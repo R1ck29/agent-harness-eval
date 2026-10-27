@@ -1,0 +1,90 @@
+# Harness Eval Work Plan
+
+## Current: merge into one repo (agent-harness-eval v0.4.0) — 2026-10-28
+
+### Inputs (read in full, nothing inferred)
+
+- This repo, Phase 0 (2026-08-15): BenchFlow 0.6.7 engine plan, `src/harness_eval` (profiles, Decimal budgets,
+  trust levels T0–T3, BenchFlow / Apple Container / AgentCore doctor), `docs/harness-eval-design.html`.
+  Tests here: 44/45 (the failing one needs `bench` on PATH).
+- Session repo v0.3.0 (2026-10-22): `~/Downloads/agent-harness-eval.zip` (140,735 bytes, from chat
+  "リポジトリ実装と社内ツール化"), its implementation note (pasted by the user), and its design doc
+  "Agent Harness Eval 設計書（Claude Code / Codex 対応）" (Claude Doc, 2026-10-21). Tests here: 46/46 (Python 3.12).
+- The iCloud `agent-harness-eval.zip` is v0.1.0 (superseded; not used).
+- OSS / method survey 2026-10-28 (subagent, primary sources): no existing tool covers Claude + Codex CLI,
+  CLAUDE.md / AGENTS.md harnesses, script graders, pass^k, a budget ledger and a statistical release gate under a
+  PyYAML-only install. Closest: the official `claude plugin eval` (Claude-only, plugin-only, no code graders, no
+  CLAUDE.md). BenchFlow is now 0.7.11 and needs Python ≥3.12, Docker and litellm.
+- Local CLIs: Claude Code 2.1.295 and Codex 0.146.1, both older than the versions v0.3.0 was verified against.
+
+### Decision
+
+Base = v0.3.0 (newer; its decisions win on conflict: direct CLI calls, PyYAML only, Python ≥3.10, zip
+distribution, Windows + macOS). Drop BenchFlow and its sandbox backends. Port only what v0.3.0 lacks and what
+the survey shows is current best practice:
+
+| # | Change | Origin | Why |
+|---|--------|--------|-----|
+| 1 | Paired, task-clustered bootstrap CI for Δ; three-valued decision (pass / fail / inconclusive) with a pre-declared non-inferiority margin and a minimum task count; used by `gate` and the report | Phase 0 design; Anthropic stats post; Bowyer et al. 2025 | v0.3.0 `gate` fails on any single-task pass^k drop (one unlucky trial at k=3 blocks a release) and never shows uncertainty |
+| 2 | Comparable score for Δ: graders that can only pass with the harness (`skill_used` / `subagent_used` / `hook_used` requiring ≥1 call) are left out of Δ in both arms; the full score is still reported | `claude plugin eval` docs | Otherwise Δ against a no-harness baseline is inflated by construction |
+| 3 | Adjacent, counterbalanced scheduling: for each (trial, task) the profiles run back to back, in an order alternated by a seeded RNG (`--seed`) | Phase 0 design; Anthropic infrastructure-noise post | v0.3.0 runs all of one profile before the next, so time drift (API load, model rollout) confounds Δ |
+| 4 | Cost basis and per-agent monthly ledgers: `client_estimate` (Claude `total_cost_usd`), `token_estimate` (Codex pricing), `unavailable`; profile `billing: api / subscription`; ledger rows carry the agent; `--monthly-budget-usd` applies to the Claude and Codex accounts separately; subscription spend is shown but not charged | Phase 0 (confirmed: separate USD 1,500 Claude / Codex ledgers; no fictional per-run USD for subscriptions) | v0.3.0 has one shared ledger and labels client estimates as "reported" |
+| 5 | `doctor` static checks: route-changing variables inherited from the parent shell (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, CLAUDE_CODE_USE_BEDROCK, …) and the minimum verified CLI version per feature | Phase 0 doctor; local CLI versions | Trials inherit the parent environment, so a stray key silently changes routing and billing; old CLIs lack flags v0.3.0 uses |
+| 6 | Reference solutions for the bundled example tasks, so `validate --selftest` proves "reference passes, empty fails" for them too | Phase 0 known-bad control | Today only harvested drafts have references |
+| 7 | Lint warning for executable harness parts (install `run`, hooks, MCP): they run with the user's privileges | Phase 0 trust levels (T2/T3 cannot be enforced without a sandbox) | Keeps the safety rule without unenforceable machinery |
+
+Not adopted (the reasons go in docs/design.html):
+- BenchFlow / Inspect / Harbor: Docker and heavy dependencies.
+- Promptfoo: Node, and it drives the SDK, not the CLI.
+- `claude plugin eval` as the engine: Claude-only; no CLAUDE.md or code graders.
+- Decimal ledger arithmetic: float is exact enough at cent scale, and it is one fewer concept.
+- Codex `--ignore-user-config`: not verifiable on the local 0.146.1, and CODEX_HOME is already isolated.
+- Plugin-eval case import/export: no user need yet.
+
+### Repo layout after merge
+
+- Flat `harness_eval/` package, so it runs as `python -m harness_eval` straight from the unzipped folder.
+- `examples/`, `tests/`, `README.md`.
+- `docs/guide.html`: how it works (updated).
+- `docs/design.html`: merged decision record and research; replaces `docs/harness-eval-design.html`.
+- `pyproject.toml` (PyYAML at runtime; pytest, pytest-cov and ruff for dev), `requirements.txt`, `uv.lock`, `tasks/`.
+- Removed: `src/`, `tests/unit/`, the BenchFlow dependency.
+
+### Steps
+
+- [ ] Baseline snapshot for rollback (pending user decision: git init + commit)
+- [ ] Import the v0.3.0 tree; remove Phase 0 code; merged pyproject and lock; tests green as-is
+- [ ] (1)(2) stats module plus summarize / deltas / gate / report integration, tests first
+- [ ] (3) counterbalanced scheduler, tests first
+- [ ] (4) cost basis and per-agent ledger, tests first
+- [ ] (5) doctor route and version checks, tests first
+- [ ] (6) example references and selftest; (7) lint warning
+- [ ] Update README, guide.html and design.html; no stale statements (grep for BenchFlow, old versions, old flags)
+- [ ] Verification:
+  - full test suite on Python 3.10–3.13, ruff, coverage ≥80%
+  - build the zip and run it from the unzipped copy
+  - `doctor` on this Mac
+  - a capped real smoke run, only if authorized
+- [ ] Independent review (a fresh reviewer with no build context); fix every CRITICAL/HIGH finding; re-review
+
+## History
+
+- 2026-08-15 Phase 0 (BenchFlow-based contracts and doctor), superseded by the merge above. Where its open items go:
+  - Counterbalanced pairs: item 3.
+  - Paired statistics and three-valued decisions: item 1.
+  - Cost provenance and separate ledgers: item 4.
+  - Route-override checks: item 5.
+  - Known-bad / reference controls: item 6.
+  - Trust levels: item 7.
+  - Covered by v0.3.0 already: materializing harnesses without ambient config (temp HOME / CLAUDE_CONFIG_DIR /
+    CODEX_HOME), the deterministic graders, the HTML report, and classifying infrastructure errors as invalid.
+  - Dropped, with reasons recorded in docs/design.html:
+    - BenchFlow producer-artifact contracts: no BenchFlow.
+    - Provider-gateway hard stop: needs corporate gateway infrastructure; the client-side ledger cap is the
+      available control.
+    - Sealed holdouts with separate credentials: no infrastructure or user need yet; harvested tasks are
+      fictionalized instead.
+    - Enforced egress / credential non-visibility and malicious-exfiltration tests: impossible without a
+      sandbox; scope stays "evaluate only reviewed internal harnesses", documented as a residual risk.
+- 2026-10-21 → 10-22: the session repo went from v0.1.0 to v0.3.0 (run, report, gate, calibrate, hooks, ledger,
+  harvest).
