@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import random
 import shutil
@@ -27,14 +28,14 @@ from typing import Any, Callable
 from . import __version__
 from .adapters import classify_stderr, get_adapter
 from .graders import JudgeConfig, JudgeUnavailable, grade_all
-from .isolation import (build_env, copy_credentials, fill, kill_running, make_trial_paths, placeholders,
+from .isolation import (build_env, copy_credentials, fill, kill_running, make_trial_paths, placeholders, route_signature,
                         run_install, run_process, snapshot)
 from .metrics import summarize
 from .record import EXCLUDED_ERRORS, TrialRecord
 from .spec import Profile, SpecError, Task
 
 NOT_RUN_ERRORS = {"budget_stop"}
-CACHE_SCHEMA = "4"  # 試行レコードの形式を変えたら上げる（古いキャッシュを使わないため）
+CACHE_SCHEMA = "5"  # 試行レコードの形式を変えたら上げる（古いキャッシュを使わないため）
 
 
 @dataclass
@@ -145,9 +146,12 @@ def uses_llm(task: Task) -> bool:
     return any(g.type == "llm" for g in task.graders)
 
 
-def cache_key(task: Task, profile: Profile, version: str | None, trial: int, opt: RunOptions, judge_sig: str = "") -> str:
+def cache_key(task: Task, profile: Profile, version: str | None, trial: int, opt: RunOptions, judge_sig: str = "",
+              route: str = "") -> str:
+    """route: 試行に渡る経路の変数の名前（route_signature）。API キー・Bedrock などの経路を変えれば再実行する。"""
     judge = f"{opt.llm}:{opt.judge_agent}:{opt.judge_model}:{judge_sig}" if uses_llm(task) else "-"
-    raw = "|".join([CACHE_SCHEMA, task.id, task.content_hash(), profile.id, profile.content_hash(), str(version), str(trial), judge])
+    raw = "|".join([CACHE_SCHEMA, task.id, task.content_hash(), profile.id, profile.content_hash(), str(version), str(trial), judge,
+                    route])
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
@@ -166,6 +170,7 @@ class Runner:
         for _, p in self.pairs:
             if p.id not in self.versions:
                 self.versions[p.id] = cli_version(get_adapter(p.agent, p))
+        self.routes = {p.id: route_signature(p, dict(os.environ)) for _, p in self.pairs}
         self._judge_seq = 0
         self.interrupted = threading.Event()
         self.ledger = Path(opt.ledger or Path(out_dir) / "spend.jsonl").resolve()
@@ -178,10 +183,11 @@ class Runner:
         if opt.monthly_budget_usd is not None:
             agents = {p.agent for _, p in self.pairs} | ({opt.judge_agent} if opt.llm else set())
             self.month_spent = {a: month_spent(self.ledger, a) for a in sorted(agents)}
-        # 判定の結果に効きうるもの（借りるプロファイルの環境変数・実行ファイル）をキャッシュキーに入れる
+        # 判定の結果に効きうるもの（借りるプロファイルの環境変数・実行ファイル・経路の変数の名前）をキャッシュキーに入れる
         self.judge_sig = hashlib.sha256(json.dumps(
             [jp.id if jp else None, jp.env if jp else None, jp.env_unset if jp else None,
-             jp.executable if jp else None, opt.judge_executable], sort_keys=True).encode()).hexdigest()[:12]
+             jp.executable if jp else None, opt.judge_executable, route_signature(self.judge_route_profile(), dict(os.environ))],
+            sort_keys=True).encode()).hexdigest()[:12]
         self.judge_warning = (f"LLM 判定（{opt.judge_agent}）の認証を借りる同種のプロファイルがありません。親の環境変数だけで判定します"
                               if opt.llm and jp is None and any(uses_llm(t) for t, _ in self.pairs) else None)
 
@@ -215,6 +221,11 @@ class Runner:
                            trial=trial, cache_key=key, task_hash=task.content_hash(), profile_hash=profile.content_hash(),
                            cli_version=self.versions.get(profile.id), **kw)
 
+    def judge_route_profile(self) -> Profile:
+        """LLM 判定が使う認証の出どころ（借りるプロファイル。なければ親の環境だけの仮のプロファイル）。経路の確認に使う。"""
+        return self.judge_profile or Profile(id=f"LLM 判定（{self.opt.judge_agent}・親の環境）", agent=self.opt.judge_agent,
+                                             path=self.run_dir / "judge.yaml")
+
     def _pick_judge_profile(self, profiles: list[Profile]) -> Profile | None:
         """LLM 判定の認証（env・env_unset・copy_credentials・executable）を借りるプロファイル。
         指定がなければ、判定エージェントと同じ種類の基準プロファイル → 最初の同種プロファイルの順。配布物（install）は使わない。"""
@@ -236,7 +247,7 @@ class Runner:
         rows, calls, hits, est, unknown = [], 0, 0, 0.0, 0
         for t, p in self.pairs:
             for i in range(self.opt.trials):
-                key = cache_key(t, p, self.versions[p.id], i, self.opt, self.judge_sig)
+                key = cache_key(t, p, self.versions[p.id], i, self.opt, self.judge_sig, self.routes[p.id])
                 if self.opt.use_cache and self._cache_get(key):
                     hits += 1
                     continue
@@ -407,7 +418,7 @@ class Runner:
                 (root / name).unlink(missing_ok=True)
 
     def _one(self, task: Task, profile: Profile, trial: int, sink) -> TrialRecord:
-        key = cache_key(task, profile, self.versions[profile.id], trial, self.opt, self.judge_sig)
+        key = cache_key(task, profile, self.versions[profile.id], trial, self.opt, self.judge_sig, self.routes[profile.id])
         if self.opt.use_cache:
             hit = self._cache_get(key)
             if hit:

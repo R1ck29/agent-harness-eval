@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from unittest import mock
 from pathlib import Path
 
@@ -305,7 +306,30 @@ class E2E(unittest.TestCase):
             code, out = run_cli("doctor", "--profiles", str(self.ex / "profiles"))
         self.assertEqual(code, 1, out)
         self.assertIn("ANTHROPIC_API_KEY", out)
+        self.assertIn("inherit_env", out)  # 直し方は「名前を宣言」（値をプロファイルに書かせない）
         self.assertNotIn("sk-secret-value", out)
+        # 親の値を使うと名前だけで宣言すれば OK（値はプロファイルにもログにも出ない）
+        prof = self.ex / "profiles" / "claude-baseline.yaml"
+        prof.write_text(prof.read_text(encoding="utf-8") + "inherit_env: [ANTHROPIC_API_KEY]\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {**clean, "ANTHROPIC_API_KEY": "sk-secret-value"}, clear=True):
+            code, out = run_cli("doctor", "--profiles", str(prof))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("sk-secret-value", out + prof.read_text(encoding="utf-8"))
+
+    def test_judge_account_budget(self):
+        """Codex の試行でも、LLM 判定が Claude の口座を使うなら Claude の月の予算で止める。"""
+        led = self.out / "spend.jsonl"
+        led.parent.mkdir(parents=True)
+        led.write_text(json.dumps({"at": datetime.now().astimezone().isoformat(), "usd": 5.0, "run_id": "x",
+                                   "agent": "claude_code", "billing": "api"}) + "\n", encoding="utf-8")
+        args = ["run", "--tasks", str(self.ex / "tasks" / "csv-summary-insight.yaml"), "--profiles",
+                str(self.ex / "profiles" / "codex-baseline.yaml"), str(self.ex / "profiles" / "claude-baseline.yaml"),
+                "--out", str(self.out), "--cache-dir", str(self.cache), "--no-cache", "--monthly-budget-usd", "1",
+                "--judge-profile", "claude-baseline"]
+        code, out = run_cli(*args)
+        recs = [json.loads(l) for l in (self.runs()[-1] / "trials.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual({r["profile_id"]: (r["error"] or {}).get("type") for r in recs},
+                         {"codex-baseline": "budget_stop", "claude-baseline": "budget_stop"}, out)
 
     def test_interrupted_before_retry_does_not_call_agent(self):
         """再試行待ちの間に Ctrl-C された試行は、新しくエージェントを呼ばずに interrupted で終わる。"""

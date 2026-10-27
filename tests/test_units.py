@@ -17,7 +17,7 @@ from harness_eval.isolation import (build_env, make_trial_paths, run_install, ru
 from harness_eval.metrics import decide, deltas, gate, paired_bootstrap, pass_hat_k, summarize  # noqa: E402
 from harness_eval.runner import append_spend, month_spent, schedule  # noqa: E402
 from harness_eval.adapters import older_than_verified  # noqa: E402
-from harness_eval.isolation import route_variables  # noqa: E402
+from harness_eval.isolation import route_signature, route_variables  # noqa: E402
 from harness_eval.record import TrialRecord  # noqa: E402
 from harness_eval.spec import Grader, SpecError, lint, load_profile, load_task, load_tasks, load_profiles  # noqa: E402
 
@@ -412,10 +412,23 @@ class DoctorTests(unittest.TestCase):
         p = load_profile(write(tmp / "p.yaml", "id: a\nagent: claude_code\nenv: {CLAUDE_CODE_USE_BEDROCK: '1'}\n"
                                                "env_unset: [ANTHROPIC_BASE_URL]\n"))
         parent = {"ANTHROPIC_API_KEY": "sk-x", "CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_BASE_URL": "http://x", "PATH": "/bin",
-                  "OPENAI_API_KEY": "k"}
-        self.assertEqual(route_variables(p, parent), (["CLAUDE_CODE_USE_BEDROCK"], ["ANTHROPIC_API_KEY"]))
+                  "OPENAI_API_KEY": "k", "AWS_BEARER_TOKEN_BEDROCK": "t"}
+        self.assertEqual(route_variables(p, parent), (["CLAUDE_CODE_USE_BEDROCK"], ["ANTHROPIC_API_KEY", "AWS_BEARER_TOKEN_BEDROCK"]))
         c = load_profile(write(tmp / "c.yaml", "id: c\nagent: codex\n"))
         self.assertEqual(route_variables(c, parent), ([], ["OPENAI_API_KEY"]))
+        # inherit_env: 親の値を使うことを「名前だけ」で宣言する（値はプロファイルに書かない）。宣言したものは決めた経路に入る
+        d = load_profile(write(tmp / "d.yaml", "id: d\nagent: claude_code\ninherit_env: [ANTHROPIC_API_KEY, ANTHROPIC_MODEL]\n"))
+        self.assertEqual(route_variables(d, parent),
+                         (["ANTHROPIC_API_KEY"], ["ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "AWS_BEARER_TOKEN_BEDROCK"]))
+        self.assertEqual(route_signature(d, parent), route_signature(d, {**parent, "ANTHROPIC_API_KEY": "別の値"}))  # 値は使わない
+        self.assertNotEqual(route_signature(d, parent), route_signature(d, {k: v for k, v in parent.items() if k != "ANTHROPIC_API_KEY"}))
+        with self.assertRaisesRegex(SpecError, "inherit_env"):
+            load_profile(write(tmp / "e.yaml", "id: e\nagent: codex\ninherit_env: [ANTHROPIC_API_KEY]\n"))  # codex の経路の変数ではない
+
+    def test_billing_not_in_profile_hash(self):
+        tmp = Path(tempfile.mkdtemp())
+        a = load_profile(write(tmp / "a.yaml", "id: a\nagent: claude_code\n")).content_hash()
+        self.assertEqual(a, load_profile(write(tmp / "a.yaml", "id: a\nagent: claude_code\nbilling: subscription\n")).content_hash())
 
     def test_older_than_verified(self):
         self.assertTrue(older_than_verified("claude_code", "2.1.295 (Claude Code)"))

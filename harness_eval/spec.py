@@ -61,8 +61,27 @@ LIMIT_KEYS = {"max_turns", "timeout_s", "max_budget_usd"}
 PROFILE_KEYS = {"id", "description", "agent", "model", "executable", "isolate_home",
                 "install", "env", "env_unset", "extra_args", "permission_mode",
                 "codex_sandbox", "pricing", "hash_paths", "copy_credentials",
-                "isolation_settings", "billing"}
+                "isolation_settings", "billing", "inherit_env"}
 BILLINGS = ("api", "subscription")  # api: 呼び出しごとに課金（Bedrock・API キー）／ subscription: 定額（呼び出しごとの請求なし）
+# 認証の経路・接続先・請求先・モデルの実体を変える環境変数（各 CLI の実行ファイルに名前が含まれることを確認したものだけ）。
+# 試行は親の環境変数を引き継ぐため、これを親から黙って引き継ぐと、意図しない経路・口座・モデルで実行される。
+# プロファイルの env で決めるか、親の値を使うなら inherit_env に名前だけ書く（値はプロファイルに書かない）。
+# 宣言のない引き継ぎは doctor が NG、run が警告する
+ROUTE_VARS = {
+    "claude_code": (
+        "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL",
+        "ANTHROPIC_BEDROCK_MANTLE_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL", "ANTHROPIC_FOUNDRY_BASE_URL",
+        "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_AWS_API_KEY", "ANTHROPIC_AWS_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
+        "ANTHROPIC_MODEL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_MANTLE",
+        "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+        "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_MANTLE_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+        "CLAUDE_CODE_SKIP_FOUNDRY_AUTH", "CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH",
+        "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_VERTEX_PROJECT_ID",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+    ),
+    "codex": ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"),
+}
 PRICING_KEYS = {"input_per_mtok", "cached_input_per_mtok", "output_per_mtok"}
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
@@ -161,6 +180,7 @@ class Profile:
     hash_paths: list[str] = field(default_factory=list)
     copy_credentials: bool = False
     billing: str = "api"
+    inherit_env: list[str] = field(default_factory=list)  # 親の環境の値を使う経路の変数（名前だけ）
     isolation_settings: bool = True
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -172,7 +192,9 @@ class Profile:
         """プロファイル定義 + コピー元ファイル + hash_paths の中身から計算するハッシュ（1 実行内では 1 回だけ計算）。"""
         if "_hash" in self.__dict__:
             return self.__dict__["_hash"]
-        h = hashlib.sha256(json.dumps(self.raw, sort_keys=True, ensure_ascii=False).encode())
+        # billing（課金の数え方）と説明は結果に影響しないので含めない
+        raw = {k: v for k, v in self.raw.items() if k not in ("billing", "description")}
+        h = hashlib.sha256(json.dumps(raw, sort_keys=True, ensure_ascii=False).encode())
         srcs = [step["copy"] for step in self.install if "copy" in step] + list(self.hash_paths)
         for s in srcs:
             # install と同じ置換をしてから探す（{profile_dir} / {python} を使ったコピー元も変更検知する）
@@ -318,6 +340,11 @@ def load_profile(path: Path) -> Profile:
     billing = d.get("billing", "api")
     if billing not in BILLINGS:
         raise SpecError(f"{path}: billing は {' / '.join(BILLINGS)}（月の予算に数えるのは api だけ）")
+    inherit = _str_list(path, "inherit_env", d.get("inherit_env"))
+    unknown = [n for n in inherit if n not in ROUTE_VARS[d["agent"]]]
+    if unknown:
+        raise SpecError(f"{path}: inherit_env の {unknown} は {d['agent']} の経路を変える変数ではありません"
+                        f"（書けるもの: {', '.join(ROUTE_VARS[d['agent']])}）")
     sandbox = d.get("codex_sandbox", "workspace-write")
     if sandbox not in ("read-only", "workspace-write", "danger-full-access"):
         raise SpecError(f"{path}: codex_sandbox は read-only / workspace-write / danger-full-access")
@@ -330,7 +357,7 @@ def load_profile(path: Path) -> Profile:
         permission_mode=d.get("permission_mode"), codex_sandbox=sandbox, pricing=pricing,
         hash_paths=_str_list(path, "hash_paths", d.get("hash_paths")),
         copy_credentials=bool(d.get("copy_credentials", False)),
-        isolation_settings=bool(d.get("isolation_settings", True)), billing=billing, raw=d,
+        isolation_settings=bool(d.get("isolation_settings", True)), billing=billing, inherit_env=inherit, raw=d,
     )
 
 
