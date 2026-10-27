@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from datetime import datetime
@@ -10,6 +11,7 @@ from pathlib import Path
 import yaml
 
 from . import __version__
+from .isolation import route_variables
 from .metrics import HARD_CATEGORIES, gate
 from .report import render
 from .runner import RunOptions, Runner, load_run
@@ -58,8 +60,8 @@ def cmd_plan(a) -> int:
     print(f"  キャッシュで省略: {p['cache_hits']} 試行 ／ 実際にエージェントを呼ぶ: {p['agent_calls']} 回")
     print(f"  概算費用: ${p['estimated_cost_usd']:.4f}（履歴がなく見積もれない呼び出し {p['unknown_cost_calls']} 回）")
     print(f"  LLM 判定: {'あり（コード判定が全合格の試行のみ）' if p['llm_judge'] else 'なし'}")
-    if runner.month_spent is not None:
-        print(f"  今月の実績: ${runner.month_spent:.4f} ／ 月の予算 ${a.monthly_budget_usd:.2f}（この実行の上限 ${runner.opt.max_cost_usd:.4f}）")
+    for agent, spent in (runner.month_spent or {}).items():
+        print(f"  今月の実績（{agent}）: ${spent:.4f} ／ 月の予算 ${a.monthly_budget_usd:.2f}（残り ${runner.month_remaining(agent):.4f}）")
     for pid, v in p["cli_versions"].items():
         print(f"  {pid}: CLI {v or '見つかりません'}")
     return 0
@@ -74,7 +76,7 @@ def cmd_run(a) -> int:
         print(f"--baseline '{opt.baseline}' がプロファイルにありません", file=sys.stderr)
         return 2
     runner = Runner(tasks, profiles, opt, Path(a.out))
-    for w in _budget_warnings(a, profiles):
+    for w in _budget_warnings(a, profiles) + _route_warnings(profiles):
         print(f"注意: {w}", file=sys.stderr)
     if not runner.pairs:
         print("実行対象がありません（targets / --tag / --task を確認）", file=sys.stderr)
@@ -103,6 +105,20 @@ def _budget_warnings(a, profiles) -> list[str]:
         w.append("Codex の判定は費用が分からないため、費用の上限の計算に入りません")
     if a.jobs > 1:
         w.append(f"--jobs {a.jobs} では、上限に達した時点で実行中の試行（最大 {a.jobs - 1} 件）の分だけ上限を超えることがあります")
+    subs = [p.id for p in profiles if p.billing == "subscription"]
+    if subs and a.monthly_budget_usd is not None:
+        w.append(f"{subs} はサブスクリプション（billing: subscription）なので月の予算には数えません（--max-cost-usd には数えます）")
+    return w
+
+
+def _route_warnings(profiles) -> list[str]:
+    """親の環境から経路を変える変数を黙って引き継ぐプロファイル（値は表示しない）。"""
+    w = []
+    for p in profiles:
+        inherited = route_variables(p, dict(os.environ))[1]
+        if inherited:
+            w.append(f"{p.id}: 親の環境から {inherited} を引き継ぎます。意図した経路ならプロファイルの env に書き、"
+                     "不要なら env_unset に入れてください（doctor で確認できます）")
     return w
 
 
@@ -152,21 +168,32 @@ def cmd_doctor(a) -> int:
     """環境検証（設計書のフェーズ0）。--live でプロファイルごとに最小の試行を 1 回だけ実行する。"""
     print(f"harness-eval {__version__} / Python {sys.version.split()[0]} / PyYAML {yaml.__version__}")
     profiles = load_profiles(a.profiles)
-    from .adapters import get_adapter
+    from .adapters import VERIFIED_VERSIONS, get_adapter, older_than_verified
     from .runner import cli_version
+    static_ok = True
     for p in profiles:
         v = cli_version(get_adapter(p.agent, p))
-        print(f"[{p.id}] {p.agent}: {v or '見つかりません'}")
+        print(f"[{p.id}] {p.agent}: {v or '見つかりません'}（billing: {p.billing}）")
+        static_ok &= v is not None
+        if older_than_verified(p.agent, v):
+            verified = ".".join(map(str, VERIFIED_VERSIONS[p.agent]))
+            print(f"  注意: 起動フラグと出力形式を確認した版（{verified}）より古い CLI です。--live で実際に動くか確かめてください")
+        own, inherited = route_variables(p, dict(os.environ))
+        print(f"  経路: プロファイルの env で指定 {own if own else 'なし（CLI の既定: ログイン済みの認証）'}")
+        if inherited:
+            static_ok = False
+            print(f"  NG: 親の環境から経路を変える変数 {inherited} を引き継ぎます（値は表示しません）。"
+                  "意図した経路ならプロファイルの env に書き、不要なら env_unset に入れてください")
     if not a.live:
         print("（--live を付けると、隔離環境で認証・配布物の読み込みを実際に確認します。1 プロファイルあたり 1 回の最小呼び出し）")
-        return 0
+        return 0 if static_ok else 1
     probe = Task(id="doctor-probe", prompt="Reply with exactly: OK", path=Path("doctor.yaml").resolve(),
                  max_turns=1, timeout_s=180, graders=[Grader("regex", {"pattern": r"\bOK\b"})])
     opt = RunOptions(trials=1, llm=False, use_cache=False, keep="none", log=lambda s: None,
                      ledger=Path(a.out) / "spend.jsonl")  # doctor の費用も月の実績に入れる
     runner = Runner([probe], profiles, opt, Path(a.out) / "_doctor")
     run_dir, recs, _ = runner.run()
-    ok = True
+    ok = static_ok
     for r in recs:
         status = "OK" if r.passed else f"NG ({(r.error or {}).get('type', 'score=' + str(r.score))}: {(r.error or {}).get('message', '')[:200]})"
         ok &= r.passed
@@ -226,7 +253,7 @@ def cmd_harvest(a) -> int:
     sources = [Path(s) for s in a.source] if a.source else default_sources()
     run_id = "harvest-" + datetime.now().strftime("%Y%m%d-%H%M%S")
     s = harvest(sources, Path(a.out), a.limit, ClaudeAdapter(profile, a.executable).exe, a.model or None, profile, a.dry_run,
-                print, lambda usd: append_spend(Path(a.ledger), usd, run_id))
+                print, lambda usd: append_spend(Path(a.ledger), usd, run_id, "claude_code", profile.billing if profile else "api"))
     if a.dry_run:
         print("（--dry-run: 書き換え・書き出しはしていません。依頼の本文は表示しません）")
         return 0

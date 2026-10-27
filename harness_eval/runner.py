@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -108,19 +109,22 @@ def cli_version(adapter) -> str | None:
         return None
 
 
-def append_spend(ledger: Path, usd: float | None, run_id: str) -> None:
-    """費用台帳に 1 行追記する（月の予算の計算に使う）。"""
+def append_spend(ledger: Path, usd: float | None, run_id: str, agent: str, billing: str) -> None:
+    """費用台帳に 1 行追記する（月の予算の計算に使う）。agent は口座（claude_code / codex）、billing は api / subscription。"""
     if not usd:
         return
     ledger.parent.mkdir(parents=True, exist_ok=True)
     with ledger.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"at": datetime.now(timezone.utc).isoformat(), "usd": usd, "run_id": run_id}) + "\n")
+        f.write(json.dumps({"at": datetime.now(timezone.utc).isoformat(), "usd": usd, "run_id": run_id,
+                            "agent": agent, "billing": billing}) + "\n")
 
 
-def month_spent(ledger: Path) -> float:
-    """費用台帳（--out/spend.jsonl）から今月（ローカル時刻）の実績を合計する。
-    台帳には、エージェントと LLM 判定の費用を発生のたびに追記している（再試行・中断・doctor の分も含む）。
-    費用が分からない呼び出し（pricing なしの Codex など）は含められない。"""
+def month_spent(ledger: Path, agent: str) -> float:
+    """費用台帳（--out/spend.jsonl）から、その口座の今月（ローカル時刻）の実績を合計する。
+    台帳には、エージェントと LLM 判定の費用を発生のたびに追記している（再試行・中断・doctor・harvest の分も含む）。
+    - Claude と Codex は別の口座（月額上限がそれぞれ別）。口座の記録がない旧形式の行は、どちらにも数える（安全側）
+    - サブスクリプション（billing: subscription）の行は API 単価換算の推定額なので数えない
+    - 費用が分からない呼び出し（pricing なしの Codex など）は含められない"""
     now = datetime.now().astimezone()
     total = 0.0
     if Path(ledger).is_file():
@@ -130,7 +134,9 @@ def month_spent(ledger: Path) -> float:
                 t = datetime.fromisoformat(r["at"]).astimezone()
             except (ValueError, KeyError, TypeError):
                 continue
-            if (t.year, t.month) == (now.year, now.month):
+            if (t.year, t.month) != (now.year, now.month) or r.get("billing", "api") == "subscription":
+                continue
+            if r.get("agent") in (None, agent):
                 total += float(r.get("usd") or 0)
     return total
 
@@ -162,15 +168,16 @@ class Runner:
                 self.versions[p.id] = cli_version(get_adapter(p.agent, p))
         self._judge_seq = 0
         self.interrupted = threading.Event()
-        self.month_spent: float | None = None
         self.ledger = Path(opt.ledger or Path(out_dir) / "spend.jsonl").resolve()
-        if opt.monthly_budget_usd is not None:
-            # 月の予算: 台帳の今月の実績を合計し、残りをこの実行の上限にする
-            self.month_spent = month_spent(self.ledger)
-            remaining = max(opt.monthly_budget_usd - self.month_spent, 0.0)
-            opt.max_cost_usd = remaining if opt.max_cost_usd is None else min(opt.max_cost_usd, remaining)
         self.judge_profile = self._pick_judge_profile(profiles) if opt.llm else None
         jp = self.judge_profile
+        self.judge_billing = jp.billing if jp else "api"
+        # 月の予算: 口座（エージェント）ごとに、台帳の今月の実績を引いた残りをこの実行の上限にする
+        self.month_spent: dict[str, float] | None = None
+        self.spent_api: dict[str, float] = defaultdict(float)  # この実行で口座に数える支出（billing: api のみ）
+        if opt.monthly_budget_usd is not None:
+            agents = {p.agent for _, p in self.pairs} | ({opt.judge_agent} if opt.llm else set())
+            self.month_spent = {a: month_spent(self.ledger, a) for a in sorted(agents)}
         # 判定の結果に効きうるもの（借りるプロファイルの環境変数・実行ファイル）をキャッシュキーに入れる
         self.judge_sig = hashlib.sha256(json.dumps(
             [jp.id if jp else None, jp.env if jp else None, jp.env_unset if jp else None,
@@ -178,13 +185,30 @@ class Runner:
         self.judge_warning = (f"LLM 判定（{opt.judge_agent}）の認証を借りる同種のプロファイルがありません。親の環境変数だけで判定します"
                               if opt.llm and jp is None and any(uses_llm(t) for t, _ in self.pairs) else None)
 
-    def _spend(self, usd: float | None) -> None:
-        """費用を実行内の合計と台帳の両方に記録する（月の予算の計算に使う）。"""
+    def _spend(self, usd: float | None, agent: str, billing: str) -> None:
+        """費用を実行内の合計・口座別の合計・台帳に記録する。--max-cost-usd は推定額の合計で止める（サブスクリプションも含む。
+        実行の大きさの上限として使うため）。月の予算は billing: api の支出だけを数える。"""
         if not usd:
             return
         with self.lock:
             self.spent += usd
-            append_spend(self.ledger, usd, self.run_id)
+            if billing == "api":
+                self.spent_api[agent] += usd
+            append_spend(self.ledger, usd, self.run_id, agent, billing)
+
+    def month_remaining(self, agent: str) -> float | None:
+        if self.month_spent is None or self.opt.monthly_budget_usd is None:
+            return None
+        return max(self.opt.monthly_budget_usd - self.month_spent.get(agent, 0.0), 0.0)
+
+    def _over_budget(self, task: Task, profile: Profile) -> bool:
+        with self.lock:
+            if self.opt.max_cost_usd is not None and self.spent >= self.opt.max_cost_usd:
+                return True
+            accounts = [profile.agent] if profile.billing == "api" else []
+            if self.opt.llm and uses_llm(task) and self.judge_billing == "api":
+                accounts.append(self.opt.judge_agent)
+            return any((rem := self.month_remaining(a)) is not None and self.spent_api[a] >= rem for a in accounts)
 
     def _record(self, task: Task, profile: Profile, trial: int, key: str, **kw: Any) -> TrialRecord:
         return TrialRecord(run_id=self.run_id, task_id=task.id, profile_id=profile.id, agent=profile.agent,
@@ -291,7 +315,7 @@ class Runner:
             if pr.timed_out:
                 raise JudgeUnavailable("判定が 300 秒でタイムアウト")
             text, cost, jerr = adapter.parse_judge(out)
-            self._spend(cost)
+            self._spend(cost, self.opt.judge_agent, self.judge_billing)
             if jerr or not text:
                 raise JudgeUnavailable(f"判定が失敗: {jerr or '応答なし'} {(classify_stderr(err) or '')} {err.strip()[-200:]}".strip())
             return text, cost
@@ -396,15 +420,13 @@ class Runner:
                 rec = self._record(task, profile, trial, key, valid=False, error={"type": "interrupted", "message": "Ctrl-C で中断"})
                 sink(rec)
                 return rec
-            with self.lock:
-                over = self.opt.max_cost_usd is not None and self.spent >= self.opt.max_cost_usd
-            if over:
+            if self._over_budget(task, profile):
                 rec = self._record(task, profile, trial, key, valid=False,
                                    error={"type": "budget_stop", "message": "費用の上限（--max-cost-usd / --monthly-budget-usd）に到達したため未実行"})
                 sink(rec)
                 return rec
             rec = self._execute(task, profile, trial, key)
-            self._spend(rec.cost_usd)
+            self._spend(rec.cost_usd, profile.agent, profile.billing)
             if self.interrupted.is_set():  # Ctrl-C で止めた試行は結果ではない（失敗として数えず、キャッシュもしない）
                 rec.valid, rec.passed, rec.score, rec.failure_tags = False, False, None, []
                 rec.error = {"type": "interrupted", "message": "Ctrl-C で中断"}

@@ -31,7 +31,7 @@ class ParsedRun:
     hook_calls: list[dict[str, Any]] | None = None  # [{name, exit_code, outcome}]。記録していなければ None（Codex・hook_used なし）
     final_message: str | None = None
     cost_usd: float | None = None
-    cost_source: str | None = None  # "reported" / "estimated" / None
+    cost_source: str | None = None  # "client_estimate"（CLI の API 単価換算）/ "token_estimate"（pricing から計算）/ None（不明）
     duration_ms: int | None = None
     num_turns: int | None = None
     tokens: dict[str, int | None] = field(default_factory=dict)

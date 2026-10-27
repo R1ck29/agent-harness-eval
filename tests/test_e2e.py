@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -274,12 +275,37 @@ class E2E(unittest.TestCase):
                 "--out", str(self.out), "--cache-dir", str(self.cache), "--no-llm"]
         self.assertEqual(run_cli("run", *args)[0], 0)  # 偽 claude はこのタスクで $0.002
         code, out = run_cli("plan", *args, "--no-cache", "--monthly-budget-usd", "1")
-        self.assertIn("今月の実績: $0.0020", out)
-        ledger = [json.loads(l) for l in (self.out / "spend.jsonl").read_text(encoding="utf-8").splitlines()]
-        self.assertEqual([x["usd"] for x in ledger], [0.002])  # 費用は発生のたびに台帳へ
+        self.assertIn("今月の実績（claude_code）: $0.0020", out)
+        led = self.out / "spend.jsonl"
+        ledger = [json.loads(l) for l in led.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([(x["usd"], x["agent"], x["billing"]) for x in ledger], [(0.002, "claude_code", "api")])  # 発生のたびに台帳へ
+        # Codex の口座の支出は Claude の予算を減らさない（別々の月額上限）
+        with led.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": ledger[0]["at"], "usd": 5.0, "run_id": "x", "agent": "codex", "billing": "api"}) + "\n")
+        self.assertIn("今月の実績（claude_code）: $0.0020", run_cli("plan", *args, "--no-cache", "--monthly-budget-usd", "1")[1])
         code, out = run_cli("run", *args, "--no-cache", "--monthly-budget-usd", "0.002")
         rec = json.loads((self.runs()[-1] / "trials.jsonl").read_text(encoding="utf-8").splitlines()[0])
         self.assertEqual(rec["error"]["type"], "budget_stop")
+        # サブスクリプションは呼び出しごとの請求がないので月の予算では止めない（API 換算の推定額は台帳に残す）
+        prof = self.ex / "profiles" / "claude-baseline.yaml"
+        prof.write_text(prof.read_text(encoding="utf-8") + "billing: subscription\n", encoding="utf-8")
+        code, out = run_cli("run", *args, "--no-cache", "--monthly-budget-usd", "0.002")
+        rec = json.loads((self.runs()[-1] / "trials.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        self.assertTrue(rec["passed"], rec["error"])
+        self.assertEqual(json.loads(led.read_text(encoding="utf-8").splitlines()[-1])["billing"], "subscription")
+
+    def test_doctor_reports_inherited_route_variables(self):
+        """親の環境から経路を変える変数（API キーなど）を引き継ぐと NG。値は表示しない。"""
+        from harness_eval.isolation import ROUTE_VARS
+        clean = {k: v for k, v in os.environ.items() if k not in {x for xs in ROUTE_VARS.values() for x in xs}}
+        with mock.patch.dict(os.environ, clean, clear=True):
+            code, out = run_cli("doctor", "--profiles", str(self.ex / "profiles"))
+            self.assertEqual(code, 0, out)
+            os.environ["ANTHROPIC_API_KEY"] = "sk-secret-value"
+            code, out = run_cli("doctor", "--profiles", str(self.ex / "profiles"))
+        self.assertEqual(code, 1, out)
+        self.assertIn("ANTHROPIC_API_KEY", out)
+        self.assertNotIn("sk-secret-value", out)
 
     def test_interrupted_before_retry_does_not_call_agent(self):
         """再試行待ちの間に Ctrl-C された試行は、新しくエージェントを呼ばずに interrupted で終わる。"""

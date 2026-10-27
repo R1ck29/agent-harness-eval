@@ -61,7 +61,8 @@ LIMIT_KEYS = {"max_turns", "timeout_s", "max_budget_usd"}
 PROFILE_KEYS = {"id", "description", "agent", "model", "executable", "isolate_home",
                 "install", "env", "env_unset", "extra_args", "permission_mode",
                 "codex_sandbox", "pricing", "hash_paths", "copy_credentials",
-                "isolation_settings"}
+                "isolation_settings", "billing"}
+BILLINGS = ("api", "subscription")  # api: 呼び出しごとに課金（Bedrock・API キー）／ subscription: 定額（呼び出しごとの請求なし）
 PRICING_KEYS = {"input_per_mtok", "cached_input_per_mtok", "output_per_mtok"}
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
@@ -159,6 +160,7 @@ class Profile:
     pricing: dict[str, float] | None = None
     hash_paths: list[str] = field(default_factory=list)
     copy_credentials: bool = False
+    billing: str = "api"
     isolation_settings: bool = True
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -313,6 +315,9 @@ def load_profile(path: Path) -> Profile:
     exe = d.get("executable")
     if exe is not None:
         exe = [exe] if isinstance(exe, str) else _str_list(path, "executable", exe)
+    billing = d.get("billing", "api")
+    if billing not in BILLINGS:
+        raise SpecError(f"{path}: billing は {' / '.join(BILLINGS)}（月の予算に数えるのは api だけ）")
     sandbox = d.get("codex_sandbox", "workspace-write")
     if sandbox not in ("read-only", "workspace-write", "danger-full-access"):
         raise SpecError(f"{path}: codex_sandbox は read-only / workspace-write / danger-full-access")
@@ -325,7 +330,7 @@ def load_profile(path: Path) -> Profile:
         permission_mode=d.get("permission_mode"), codex_sandbox=sandbox, pricing=pricing,
         hash_paths=_str_list(path, "hash_paths", d.get("hash_paths")),
         copy_credentials=bool(d.get("copy_credentials", False)),
-        isolation_settings=bool(d.get("isolation_settings", True)), raw=d,
+        isolation_settings=bool(d.get("isolation_settings", True)), billing=billing, raw=d,
     )
 
 

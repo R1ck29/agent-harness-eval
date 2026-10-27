@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +15,9 @@ from harness_eval.adapters import ClaudeAdapter, CodexAdapter  # noqa: E402
 from harness_eval.graders import JudgeConfig, grade_all  # noqa: E402
 from harness_eval.isolation import (build_env, make_trial_paths, run_install, run_process)  # noqa: E402
 from harness_eval.metrics import decide, deltas, gate, paired_bootstrap, pass_hat_k, summarize  # noqa: E402
-from harness_eval.runner import schedule  # noqa: E402
+from harness_eval.runner import append_spend, month_spent, schedule  # noqa: E402
+from harness_eval.adapters import older_than_verified  # noqa: E402
+from harness_eval.isolation import route_variables  # noqa: E402
 from harness_eval.record import TrialRecord  # noqa: E402
 from harness_eval.spec import Grader, SpecError, lint, load_profile, load_task, load_tasks, load_profiles  # noqa: E402
 
@@ -105,7 +108,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual([c.name for c in r.tool_calls], ["Skill", "Bash", "Bash"])
         self.assertEqual(r.tool_calls[1].is_error, False)
         self.assertAlmostEqual(r.cost_usd, 0.00564094, places=6)
-        self.assertEqual((r.num_turns, r.cost_source), (5, "reported"))
+        self.assertEqual((r.num_turns, r.cost_source), (5, "client_estimate"))
         self.assertIn("4 words", r.final_message)
         self.assertEqual(r.meta["cli_version"], "2.1.304")
         self.assertIn("word-count", r.meta["loaded_skills"])
@@ -180,7 +183,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(r.subagent_calls, ["spawn_agent"])
         self.assertEqual(r.final_message, "final")
         self.assertAlmostEqual(r.cost_usd, 0.6 + 0.04 + 1.0)
-        self.assertEqual(r.cost_source, "estimated")
+        self.assertEqual(r.cost_source, "token_estimate")
 
     def test_codex_turn_failed(self):
         lines = [json.dumps({"type": "turn.failed", "error": {"message": "429 Too Many Requests"}})]
@@ -368,6 +371,52 @@ class GraderTests(unittest.TestCase):
         unk = JudgeConfig(enabled=True, run=lambda p: ("UNKNOWN\n根拠不足", None))
         self.assertEqual(self.run_g([self.g("llm", criteria="c")], r4, unk), ["unknown"])
         self.assertEqual(r4.score, 0.0)
+
+
+class BudgetTests(unittest.TestCase):
+    def test_month_spent_per_agent_and_billing(self):
+        """月の予算は Claude と Codex で別の口座。サブスクリプションの推定額は台帳に残すが予算には数えない。"""
+        led = Path(tempfile.mkdtemp()) / "spend.jsonl"
+        now = datetime.now().astimezone().isoformat()
+        rows = [{"at": now, "usd": 1.0, "run_id": "r", "agent": "claude_code", "billing": "api"},
+                {"at": now, "usd": 2.0, "run_id": "r", "agent": "codex", "billing": "api"},
+                {"at": now, "usd": 5.0, "run_id": "r", "agent": "claude_code", "billing": "subscription"},
+                {"at": now, "usd": 0.5, "run_id": "v0.3"},  # 口座の記録がない旧形式の行は、どちらの口座にも数える（安全側）
+                {"at": "2000-01-01T00:00:00+00:00", "usd": 9.0, "run_id": "r", "agent": "claude_code", "billing": "api"}]
+        led.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        self.assertAlmostEqual(month_spent(led, "claude_code"), 1.5)
+        self.assertAlmostEqual(month_spent(led, "codex"), 2.5)
+        append_spend(led, 0.25, "r2", "codex", "api")
+        append_spend(led, None, "r2", "codex", "api")  # 費用不明は書かない
+        self.assertAlmostEqual(month_spent(led, "codex"), 2.75)
+        self.assertEqual(json.loads(led.read_text().splitlines()[-1])["billing"], "api")
+
+    def test_profile_billing(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.assertEqual(load_profile(write(tmp / "a.yaml", "id: a\nagent: claude_code\n")).billing, "api")
+        self.assertEqual(load_profile(write(tmp / "b.yaml", "id: b\nagent: claude_code\nbilling: subscription\n")).billing, "subscription")
+        with self.assertRaisesRegex(SpecError, "billing"):
+            load_profile(write(tmp / "c.yaml", "id: c\nagent: claude_code\nbilling: free\n"))
+
+
+class DoctorTests(unittest.TestCase):
+    def test_route_variables(self):
+        """経路（API キー・Bedrock・接続先）を変える変数を、プロファイルが決めたものと親の環境から引き継ぐものに分ける。"""
+        tmp = Path(tempfile.mkdtemp())
+        p = load_profile(write(tmp / "p.yaml", "id: a\nagent: claude_code\nenv: {CLAUDE_CODE_USE_BEDROCK: '1'}\n"
+                                               "env_unset: [ANTHROPIC_BASE_URL]\n"))
+        parent = {"ANTHROPIC_API_KEY": "sk-x", "CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_BASE_URL": "http://x", "PATH": "/bin",
+                  "OPENAI_API_KEY": "k"}
+        self.assertEqual(route_variables(p, parent), (["CLAUDE_CODE_USE_BEDROCK"], ["ANTHROPIC_API_KEY"]))
+        c = load_profile(write(tmp / "c.yaml", "id: c\nagent: codex\n"))
+        self.assertEqual(route_variables(c, parent), ([], ["OPENAI_API_KEY"]))
+
+    def test_older_than_verified(self):
+        self.assertTrue(older_than_verified("claude_code", "2.1.295 (Claude Code)"))
+        self.assertFalse(older_than_verified("claude_code", "2.1.311 (Claude Code)"))
+        self.assertFalse(older_than_verified("codex", "codex-cli 0.163.0"))
+        self.assertIsNone(older_than_verified("codex", "unknown"))
+        self.assertIsNone(older_than_verified("codex", None))
 
 
 class ScheduleTests(unittest.TestCase):
