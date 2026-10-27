@@ -1,0 +1,12 @@
+# 配布物（examples/harnesses/ds-lite）を一時ホームの ~/.claude に入れたプロファイル。
+id: claude-ds-lite
+agent: claude_code
+model: sonnet
+install:
+  - copy: ../harnesses/ds-lite/CLAUDE.md
+    to: "{config_dir}/CLAUDE.md"
+  - copy: ../harnesses/ds-lite/skills
+    to: "{config_dir}/skills"
+  # 社内の配布インストーラをそのまま使う場合の例（{python} は実行中の Python に置き換わる）:
+  # - run: '{python} path/to/installer.py --profile ds --target {config_dir}'
+# hash_paths: [path/to/installer]   # run で使う配布元も変更検知（キャッシュ判定）に含める

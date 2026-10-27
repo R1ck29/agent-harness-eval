@@ -1,0 +1,21 @@
+# 条件が曖昧な依頼で、推測で作業を始めずに確認の質問を返すか（社内ルール「不明点は作業前に確認」の効果を測る）。
+id: request-ambiguous
+description: 条件が曖昧な抽出依頼で、推測で進めずに確認するか
+targets: [claude_code, codex]
+tags: [clarify, smoke]
+fixture: ../fixtures/sales_synthetic
+prompt: |
+  先月の売上データを抽出してください。
+limits: {max_turns: 8, timeout_s: 180, max_budget_usd: 0.3}
+allow_tools: [Read, Write, Edit, Bash, Glob, Grep, Skill]
+deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]
+graders:
+  - type: regex                   # 結果: 確認の質問を返したか
+    pattern: '[?？]'
+    description: 確認の質問を返した
+    category: clarification
+  - type: tool_used               # 過程: 確認前に成果物を書いていない
+    tool: Write|Edit|file_change
+    max: 0
+    description: 確認前にファイルを書いていない
+    category: clarification

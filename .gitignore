@@ -5,5 +5,11 @@
 .ruff_cache/
 .venv/
 __pycache__/
-artifacts/
-runs/
+*.egg-info/
+build/
+dist/
+results/
+.harness-eval-cache/
+task-graph.json
+task-graph.json.lock
+.graph-evidence/

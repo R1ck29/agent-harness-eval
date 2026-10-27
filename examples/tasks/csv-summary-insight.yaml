@@ -1,0 +1,22 @@
+# LLM 判定を使う例（フル評価用。スモークでは --no-llm で実行しない）。
+# 判定は観点を 1 つに絞り、根拠不足なら UNKNOWN を返させる。
+id: csv-summary-insight
+description: サマリーにデータに基づく考察が書かれるか
+targets: [claude_code, codex]
+tags: [full]
+fixture: ../fixtures/sales_synthetic
+prompt: |
+  sales.csv を月別に集計して summary.md にまとめ、最も売上が多かった月について店舗別の内訳に触れた考察を 1〜2 文添えてください。
+limits: {max_turns: 15, timeout_s: 300, max_budget_usd: 0.5}
+allow_tools: [Read, Write, Edit, Bash, Skill]
+graders:
+  - type: command
+    run: '{python} {task_dir}/../checks/check_monthly_totals.py {task_dir}/../fixtures/sales_synthetic/sales.csv'
+  - type: tool_used
+    tool: Write|Edit|Bash|shell|file_change
+    min: 1
+  - type: llm
+    focus: summary.md
+    criteria: |
+      PASS: 最も売上が多い月（2026-03）を挙げ、その月の店舗別の違いに具体的な数値または店舗名で触れた考察がある。
+      FAIL: 考察がない、月を誤っている、または店舗に触れていない。

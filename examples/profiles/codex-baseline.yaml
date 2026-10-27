@@ -1,0 +1,4 @@
+id: codex-baseline
+agent: codex
+# model: <社内で使えるモデル>
+# 認証: CODEX_API_KEY を環境変数で渡すか、copy_credentials: true で ~/.codex/auth.json を一時 CODEX_HOME に複製する

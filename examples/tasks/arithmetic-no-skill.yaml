@@ -1,0 +1,19 @@
+# 否定タスク: スキルが誤発火しないか・余計な作業をしないか。
+id: arithmetic-no-skill
+description: 単純な計算質問でスキルやファイル書き込みが起きないか
+targets: [claude_code, codex]
+tags: [skills, smoke]
+prompt: |
+  17 × 23 はいくつですか。数字だけ答えてください。
+limits: {max_turns: 3, timeout_s: 120, max_budget_usd: 0.1}
+allow_tools: [Read]
+graders:
+  - type: regex
+    pattern: '\b391\b'
+  - type: skill_used
+    skill: csv-monthly-summary
+    max: 0
+    category: skill_misfire
+  - type: tool_used
+    tool: Write|Edit|file_change
+    max: 0

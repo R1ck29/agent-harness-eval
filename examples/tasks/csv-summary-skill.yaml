@@ -1,0 +1,17 @@
+# スキルが「使うべき場面で呼ばれるか」を測るタスク（対になる否定タスク: arithmetic-no-skill）。
+id: csv-summary-skill
+description: 月別サマリーの依頼で csv-monthly-summary スキルが呼ばれるか
+targets: [claude_code, codex]
+tags: [skills]
+fixture: ../fixtures/sales_synthetic
+prompt: |
+  sales.csv の売上を月ごとにまとめたレポートを summary.md に作ってください。
+limits: {max_turns: 15, timeout_s: 300, max_budget_usd: 0.5}
+allow_tools: [Read, Write, Edit, Bash, Skill]
+paired_negative: arithmetic-no-skill
+graders:
+  - type: skill_used              # 過程（Codex では推定）
+    skill: csv-monthly-summary
+    min: 1
+  - type: command                 # 結果
+    run: '{python} {task_dir}/../checks/check_monthly_totals.py {task_dir}/../fixtures/sales_synthetic/sales.csv'

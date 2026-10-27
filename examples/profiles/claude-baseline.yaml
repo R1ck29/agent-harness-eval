@@ -1,0 +1,9 @@
+# ハーネスなしのベースライン（Δ の基準）。install が空 = 空の設定ディレクトリで起動する。
+id: claude-baseline
+agent: claude_code
+model: sonnet
+# Bedrock を使う場合（社内の値に置き換える）:
+# env:
+#   CLAUDE_CODE_USE_BEDROCK: "1"
+#   AWS_REGION: ap-northeast-1
+#   ANTHROPIC_MODEL: <推論プロファイル ARN>   # model より優先したい場合は model を消す
