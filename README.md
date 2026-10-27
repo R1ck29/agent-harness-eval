@@ -426,9 +426,14 @@ executable: null              # CLI の場所（例: ["C:/tools/claude.exe"]）
 
 ### 認証
 一時ホームを使うため、ログイン情報が普段の場所にある方式はそのままでは使えません。
-- **Bedrock（Claude Code）**: `CLAUDE_CODE_USE_BEDROCK` などを `env` か親の環境変数で。AWS の認証ファイルは、
+- **経路を変える変数は宣言する**: API キー・トークン・Bedrock などの切り替え・接続先・モデルの別名の実体を変える環境変数
+  （`ANTHROPIC_API_KEY`・`CLAUDE_CODE_OAUTH_TOKEN`・`CLAUDE_CODE_USE_BEDROCK`・`AWS_BEARER_TOKEN_BEDROCK`・`ANTHROPIC_DEFAULT_SONNET_MODEL`・
+  `CODEX_API_KEY` など。一覧は `harness_eval/spec.py` の `ROUTE_VARS`）は、試行の経路と請求先を変えます。値を固定してよいものは `env` に書き、
+  親の環境の値を使うもの（秘密の値）は **`inherit_env: [ANTHROPIC_API_KEY]` のように名前だけ**を書きます（値はプロファイルに書かない）。
+  宣言せずに親から引き継ぐと `doctor` が NG（終了コード 1）、`run` が警告します。経路の変数の「名前」はキャッシュキーに入るため、
+  経路を変えると再実行されます（値は記録しません）。
+- **Bedrock（Claude Code）**: `CLAUDE_CODE_USE_BEDROCK` などを `env`（または `inherit_env`）で。AWS の認証ファイルは、
   ホームを差し替えても本物（`~/.aws/credentials` / `~/.aws/config`）を参照するよう `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE` を自動で設定します（未設定でファイルがある場合）。
-- **API キー / トークン**: `ANTHROPIC_API_KEY`、`CLAUDE_CODE_OAUTH_TOKEN`、`CODEX_API_KEY` は親の環境変数がそのまま渡ります。
 - **ファイルに保存されたログイン**（`~/.codex/auth.json`、Linux の `~/.claude/.credentials.json`）: `copy_credentials: true`。
   macOS のキーチェーンに保存された Claude Code のログインが一時ホームで使えるかは未確認です。`doctor --live` で確かめてください。
 - **LLM 判定の認証**: 判定も一時ホームで動くため、プロファイルの `env`・`env_unset`・`copy_credentials`・`executable` を借ります

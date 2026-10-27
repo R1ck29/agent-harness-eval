@@ -24,7 +24,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .spec import Profile
+from .spec import ROUTE_VARS, Profile
 
 # 親プロセス（Claude Code の中から実行した場合など）から受け継ぐと挙動が変わる変数
 INHERITED_UNSET = [
@@ -33,30 +33,20 @@ INHERITED_UNSET = [
 ]
 
 
-# 認証の経路・接続先・請求先を変える環境変数（各 CLI の実行ファイルに含まれることを確認した名前だけ）。
-# 試行は親の環境変数を引き継ぐため、ここにある変数を親から黙って引き継ぐと、意図しない経路・口座で実行され、
-# キャッシュキー（プロファイルの内容から計算）にも反映されない。doctor が NG にし、run が警告する
-ROUTE_VARS = {
-    "claude_code": (
-        "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL",
-        "ANTHROPIC_BEDROCK_MANTLE_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL", "ANTHROPIC_FOUNDRY_BASE_URL",
-        "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_AWS_API_KEY", "ANTHROPIC_AWS_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
-        "ANTHROPIC_MODEL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_MANTLE",
-        "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_ANTHROPIC_AWS",
-        "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_MANTLE_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH",
-        "CLAUDE_CODE_SKIP_FOUNDRY_AUTH", "CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH",
-    ),
-    "codex": ("OPENAI_API_KEY", "CODEX_API_KEY"),
-}
-
-
 def route_variables(profile: Profile, environ: dict[str, str]) -> tuple[list[str], list[str]]:
-    """(プロファイルが env で決める経路の変数, 親の環境から黙って引き継ぐ経路の変数)。名前だけを返す（値は扱わない）。"""
+    """(試行で使うと決めた経路の変数, 宣言なしに親の環境から引き継ぐ経路の変数)。名前だけを返す（値は扱わない）。
+    決めた = プロファイルの env にある、または inherit_env で宣言して親の環境にある。"""
     names = ROUTE_VARS[profile.agent]
     dropped = set(INHERITED_UNSET) | set(profile.env_unset)
-    own = [n for n in names if n in profile.env]
-    inherited = [n for n in names if environ.get(n) and n not in profile.env and n not in dropped]
-    return own, inherited
+    present = [n for n in names if n in profile.env or (environ.get(n) and n not in dropped)]
+    chosen = [n for n in present if n in profile.env or n in profile.inherit_env]
+    return chosen, [n for n in present if n not in chosen]
+
+
+def route_signature(profile: Profile, environ: dict[str, str]) -> str:
+    """試行に渡る経路の変数の「名前」の一覧（キャッシュキー用）。経路を変えれば再実行される。値は含めない。"""
+    chosen, undeclared = route_variables(profile, environ)
+    return ",".join(sorted(chosen + undeclared))
 
 
 @dataclass

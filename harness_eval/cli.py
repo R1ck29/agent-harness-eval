@@ -76,7 +76,8 @@ def cmd_run(a) -> int:
         print(f"--baseline '{opt.baseline}' がプロファイルにありません", file=sys.stderr)
         return 2
     runner = Runner(tasks, profiles, opt, Path(a.out))
-    for w in _budget_warnings(a, profiles) + _route_warnings(profiles):
+    judge = [runner.judge_route_profile()] if runner.judge_profile is None and runner.judge_warning else []
+    for w in _budget_warnings(a, profiles) + _route_warnings(profiles + judge):
         print(f"注意: {w}", file=sys.stderr)
     if not runner.pairs:
         print("実行対象がありません（targets / --tag / --task を確認）", file=sys.stderr)
@@ -112,13 +113,12 @@ def _budget_warnings(a, profiles) -> list[str]:
 
 
 def _route_warnings(profiles) -> list[str]:
-    """親の環境から経路を変える変数を黙って引き継ぐプロファイル（値は表示しない）。"""
+    """宣言なしに親の環境から経路を変える変数を引き継ぐプロファイル（LLM 判定を含む。値は表示しない）。"""
     w = []
     for p in profiles:
         inherited = route_variables(p, dict(os.environ))[1]
         if inherited:
-            w.append(f"{p.id}: 親の環境から {inherited} を引き継ぎます。意図した経路ならプロファイルの env に書き、"
-                     "不要なら env_unset に入れてください（doctor で確認できます）")
+            w.append(f"{p.id}: 親の環境から {inherited} を宣言なしに引き継ぎます。意図して親の値を使うならプロファイルの inherit_env に名前だけ書き（値は書かない）、不要なら env_unset に入れてください（doctor で確認できます）")
     return w
 
 
@@ -180,12 +180,11 @@ def cmd_doctor(a) -> int:
         if older_than_verified(p.agent, v):
             verified = ".".join(map(str, VERIFIED_VERSIONS[p.agent]))
             print(f"  注意: 起動フラグと出力形式を確認した版（{verified}）より古い CLI です。--live で実際に動くか確かめてください")
-        own, inherited = route_variables(p, dict(os.environ))
-        print(f"  経路: プロファイルの env で指定 {own if own else 'なし（CLI の既定: ログイン済みの認証）'}")
+        chosen, inherited = route_variables(p, dict(os.environ))
+        print(f"  経路: プロファイルで決めた変数 {chosen if chosen else 'なし（CLI の既定: ログイン済みの認証）'}")
         if inherited:
             static_ok = False
-            print(f"  NG: 親の環境から経路を変える変数 {inherited} を引き継ぎます（値は表示しません）。"
-                  "意図した経路ならプロファイルの env に書き、不要なら env_unset に入れてください")
+            print(f"  NG: 親の環境から経路を変える変数 {inherited} を宣言なしに引き継ぎます（値は表示しません）。意図して親の値を使うならプロファイルの inherit_env に名前だけ書き（値は書かない）、不要なら env_unset に入れてください")
     if not a.live:
         print("（--live を付けると、隔離環境で認証・配布物の読み込みを実際に確認します。1 プロファイルあたり 1 回の最小呼び出し）")
         return 0 if static_ok else 1
