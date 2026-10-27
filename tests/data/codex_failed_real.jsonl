@@ -1,0 +1,11 @@
+{"type":"thread.started","thread_id":"01a15ab3-bf35-77e1-ab7b-a9956c4eb062"}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 2/5 (stream disconnected before completion: URL error: Proxy connection failed: HTTP CONNECT failed with status 403)"}
+{"type":"error","message":"Reconnecting... 3/5 (stream disconnected before completion: URL error: Proxy connection failed: HTTP CONNECT failed with status 403)"}
+{"type":"error","message":"Reconnecting... 4/5 (stream disconnected before completion: URL error: Proxy connection failed: HTTP CONNECT failed with status 403)"}
+{"type":"error","message":"Reconnecting... 5/5 (stream disconnected before completion: URL error: Proxy connection failed: HTTP CONNECT failed with status 403)"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Falling back from WebSockets to HTTPS transport. stream disconnected before completion: URL error: Proxy connection failed: HTTP CONNECT failed with status 403"}}
+{"type":"error","message":"Reconnecting... waiting for network (Connection failed: error sending request)"}
+{"type":"error","message":"Reconnecting... waiting for network (Connection failed: error sending request)"}
+{"type":"error","message":"Reconnecting... waiting for network (Connection failed: error sending request)"}
+{"type":"error","message":"Reconnecting... waiting for network (Connection failed: error sending request)"}

@@ -1,0 +1,9 @@
+# Codex 版。常時指示は CODEX_HOME/AGENTS.md、ユーザースキルは ~/.agents/skills から読まれる
+# （Codex の公式ドキュメントの探索場所）。SKILL.md の形式は Claude Code と共通なのでそのまま複製する。
+id: codex-ds-lite
+agent: codex
+install:
+  - copy: ../harnesses/ds-lite/CLAUDE.md
+    to: "{config_dir}/AGENTS.md"
+  - copy: ../harnesses/ds-lite/skills
+    to: "{home}/.agents/skills"

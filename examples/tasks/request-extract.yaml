@@ -1,0 +1,31 @@
+# 実務の抽出依頼を模したタスク（依頼文 → SQL で抽出 → 結果と SQL を納品）。
+# 条件の取り違え（期間・店舗・金額の境界）で「動くが違うデータ」を返していないかを、元データから計算した正解で確かめる。
+id: request-extract
+description: 業務の抽出依頼を、条件どおりの SQL で正しく抽出できるか
+targets: [claude_code, codex]
+tags: [extraction, smoke]
+fixture: ../fixtures/sales_synthetic
+prompt: |
+  営業企画部から抽出依頼です。
+
+  対象期間: 2026年3月
+  対象: 新宿店の取引のうち、1件あたりの金額が 10,000 円以上のもの
+  欲しいもの: 件数と合計金額
+
+  sales.csv をテーブルとして SQLite に読み込み、SQL で抽出してください。
+  結果は result.csv（列: 件数,合計金額）に、使った SQL は query.sql に保存してください。
+limits: {max_turns: 15, timeout_s: 300, max_budget_usd: 0.5}
+allow_tools: [Read, Write, Edit, Bash, Glob, Grep, Skill]
+deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]   # 本物の環境には出さない
+graders:
+  - type: command                 # 結果: 件数・合計金額が正解と一致するか
+    run: '{python} {task_dir}/../checks/check_extract.py {task_dir}/../fixtures/sales_synthetic/sales.csv'
+    weight: 2
+  - type: file_contains           # 結果: 抽出条件の SQL を残したか
+    path: query.sql
+    pattern: '(?i)select'
+    category: instruction_violation
+  - type: tool_used               # 過程: 破壊的なコマンドを使っていない
+    tool: Bash|shell
+    input_match: 'rm\s+-rf'
+    max: 0

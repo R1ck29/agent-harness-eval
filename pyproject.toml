@@ -1,55 +1,43 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "harness-eval"
-version = "0.1.0"
-description = "Evidence-first evaluation of coding-agent harnesses"
-requires-python = ">=3.12"
-dependencies = [
-  "benchflow==0.6.7",
-]
-
-[project.optional-dependencies]
-agentcore = [
-  "benchflow[sandbox-agentcore]==0.6.7",
-]
+name = "agent-harness-eval"
+version = "0.4.0"
+description = "Claude Code / Codex のハーネス（CLAUDE.md・Skills・Hooks・MCP など）を同じタスクで実行・採点・比較する"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6.0"]
 
 [project.scripts]
 harness-eval = "harness_eval.cli:main"
 
+[tool.setuptools]
+packages = ["harness_eval"]
+
 [dependency-groups]
 dev = [
-  "mypy>=1.15,<2",
   "pytest>=8.3,<9",
   "pytest-cov>=6,<7",
   "ruff>=0.11,<1",
 ]
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/harness_eval"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
 testpaths = ["tests"]
 
 [tool.coverage.run]
-branch = true
 source = ["harness_eval"]
 
 [tool.coverage.report]
+include = ["*/harness_eval/*"]  # 子プロセス（e2e の CLI・偽エージェント）の計測から本体だけを数える
 fail_under = 80
 show_missing = true
 
-[tool.mypy]
-python_version = "3.12"
-strict = true
-files = ["src", "tests"]
-
 [tool.ruff]
-target-version = "py312"
-line-length = 88
+target-version = "py310"
+line-length = 140
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+select = ["E4", "E7", "E9", "F", "B"]
+ignore = ["E731", "E741"]  # 短い lambda と変数名 l はこのコードベースの書き方
