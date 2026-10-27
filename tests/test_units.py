@@ -13,7 +13,8 @@ sys.path.insert(0, str(ROOT))
 from harness_eval.adapters import ClaudeAdapter, CodexAdapter  # noqa: E402
 from harness_eval.graders import JudgeConfig, grade_all  # noqa: E402
 from harness_eval.isolation import (build_env, make_trial_paths, run_install, run_process)  # noqa: E402
-from harness_eval.metrics import deltas, gate, pass_hat_k, summarize  # noqa: E402
+from harness_eval.metrics import decide, deltas, gate, paired_bootstrap, pass_hat_k, summarize  # noqa: E402
+from harness_eval.runner import schedule  # noqa: E402
 from harness_eval.record import TrialRecord  # noqa: E402
 from harness_eval.spec import Grader, SpecError, lint, load_profile, load_task, load_tasks, load_profiles  # noqa: E402
 
@@ -196,10 +197,10 @@ class MetricTests(unittest.TestCase):
     def test_summary_delta_gate(self):
         rs = []
         for i, ok in enumerate([True, True, True]):
-            rs.append(rec(profile_id="h", task_id="a", trial=i, passed=ok, score=1.0, cost_usd=0.1))
+            rs.append(rec(profile_id="h", task_id="a", trial=i, passed=ok, score=1.0, cmp_passed=ok, cmp_score=1.0, cost_usd=0.1))
         for i, ok in enumerate([True, False, True]):
-            rs.append(rec(profile_id="b", task_id="a", trial=i, passed=ok, score=1.0 if ok else 0.5, cost_usd=0.1,
-                          failure_tags=[] if ok else ["wrong_output"]))
+            rs.append(rec(profile_id="b", task_id="a", trial=i, passed=ok, score=1.0 if ok else 0.5, cmp_passed=ok,
+                          cmp_score=1.0 if ok else 0.5, cost_usd=0.1, failure_tags=[] if ok else ["wrong_output"]))
         rs.append(rec(profile_id="b", task_id="a", trial=3, valid=False, error={"type": "rate_limit"}))
         s = summarize(rs, 3)
         self.assertEqual(s["profiles"]["h"]["pass_hat_k"], 1.0)
@@ -210,23 +211,75 @@ class MetricTests(unittest.TestCase):
         d = deltas(s, "b")["h"]
         self.assertAlmostEqual(d["pass_at_1"], 1 / 3)
         self.assertEqual(d["pass_hat_k"], 1.0)
-        self.assertEqual(gate(s, s), [])
+        g = lambda cur, prev: gate(cur, prev, metric="pass_hat_k", margin=0.1, min_tasks=1)
+        self.assertEqual((g(s, s)["problems"], g(s, s)["regressions"]), ([], []))
         worse = summarize([r for r in rs if r.profile_id == "b"] + [rec(profile_id="h", task_id="a", trial=i, passed=i != 1, score=1.0) for i in range(3)], 3)
-        self.assertTrue(any("h/a" in p for p in gate(worse, s)))
+        self.assertTrue(any("h/a" in p for p in g(worse, s)["regressions"]))
 
     def test_gate_refuses_incomparable_runs(self):
         s = summarize([rec(task_id="a", passed=True, score=1.0)], 1)
         meta = lambda llm, h, uses=True: {"options": {"llm": llm}, "tasks": {"a": {"hash": h, "llm": uses}}}
-        self.assertEqual(gate({**s, "meta": meta(True, "h1")}, {**s, "meta": meta(True, "h1")}), [])
-        self.assertTrue(any("LLM 判定" in x for x in gate({**s, "meta": meta(False, "h1")}, {**s, "meta": meta(True, "h1")})))
+        g = lambda cur, prev: gate(cur, prev, metric="pass_hat_k", margin=0.1, min_tasks=1)["problems"]
+        self.assertEqual(g({**s, "meta": meta(True, "h1")}, {**s, "meta": meta(True, "h1")}), [])
+        self.assertTrue(any("LLM 判定" in x for x in g({**s, "meta": meta(False, "h1")}, {**s, "meta": meta(True, "h1")})))
         # llm グレーダーを使うタスクがなければ、LLM 判定の有無が違っても比較できる
-        self.assertEqual(gate({**s, "meta": meta(False, "h1", False)}, {**s, "meta": meta(True, "h1", False)}), [])
-        self.assertTrue(any("p/a" in x and "比較できません" in x for x in gate({**s, "meta": meta(True, "h2")}, {**s, "meta": meta(True, "h1")})))
+        self.assertEqual(g({**s, "meta": meta(False, "h1", False)}, {**s, "meta": meta(True, "h1", False)}), [])
+        self.assertTrue(any("p/a" in x and "比較できません" in x for x in g({**s, "meta": meta(True, "h2")}, {**s, "meta": meta(True, "h1")})))
 
     def test_unknown_cost_not_zero_filled(self):
         s = summarize([rec(passed=True, score=1.0, cost_usd=None)], 1)
         self.assertIsNone(s["profiles"]["p"]["total_cost_usd"])
         self.assertIsNone(s["profiles"]["p"]["cost_per_pass_usd"])
+
+    def test_paired_bootstrap_and_decide(self):
+        same = paired_bootstrap([0.0] * 12)
+        self.assertEqual((same.n_tasks, same.estimate, same.low, same.high), (12, 0.0, 0.0, 0.0))
+        self.assertEqual(paired_bootstrap([0.1, -0.3, 0.2, 0.0, 0.5]), paired_bootstrap([0.1, -0.3, 0.2, 0.0, 0.5]))  # 同じ seed なら同じ
+        mixed = paired_bootstrap([0.5, -0.5] * 6)
+        self.assertLess(mixed.low, 0.0)
+        self.assertGreater(mixed.high, 0.0)
+        self.assertEqual(decide(same, margin=0.05, min_tasks=10), "pass")
+        self.assertEqual(decide(paired_bootstrap([-0.5] * 12), margin=0.05, min_tasks=10), "fail")
+        self.assertEqual(decide(mixed, margin=0.05, min_tasks=10), "inconclusive")
+        self.assertEqual(decide(same, margin=0.05, min_tasks=13), "inconclusive")  # タスクが少なすぎる
+        self.assertIsNone(paired_bootstrap([]).estimate)
+        self.assertIsNone(paired_bootstrap([0.2]).low)
+
+    def test_delta_uses_comparable_score(self):
+        """配布物がないと通らない判定（skill_used min≥1 など）は、基準との差の計算から両側とも外す。"""
+        rs = []
+        for i in range(2):
+            rs.append(rec(profile_id="harness", task_id="a", trial=i, passed=True, score=1.0, cmp_passed=True, cmp_score=1.0))
+            rs.append(rec(profile_id="base", task_id="a", trial=i, passed=False, score=0.5, cmp_passed=True, cmp_score=1.0))
+        s = summarize(rs, 2)
+        self.assertEqual((s["tasks"]["base"]["a"]["pass_at_1"], s["tasks"]["base"]["a"]["pass_at_1_cmp"]), (0.0, 1.0))
+        d = deltas(s, "base")["harness"]
+        self.assertEqual(d["pass_at_1"], 0.0)  # スキルを呼んだこと自体は差に数えない（成果物は同じ）
+        self.assertIsNone(d["pass_at_1_ci"])  # 1 タスクでは区間を出さない（タスク間のばらつきが測れない）
+
+    def test_gate_decisions(self):
+        def run(pass_rate: list[float], tags=None, k=1, llm=False):
+            rs = [rec(profile_id="h", task_id=f"t{i}", trial=0, passed=ok >= 1, score=ok, cmp_passed=ok >= 1, cmp_score=ok,
+                      failure_tags=(tags or []) if ok < 1 else [])
+                  for i, ok in enumerate(pass_rate)]
+            s = summarize(rs, k)
+            s["meta"] = {"options": {"llm": llm}, "tasks": {f"t{i}": {"hash": "h", "llm": False} for i in range(len(pass_rate))}}
+            return s
+        prev = run([1.0] * 12)
+        ok = gate(run([1.0] * 12), prev, metric="pass_at_1", margin=0.05, min_tasks=10)
+        self.assertEqual((ok["decision"], ok["problems"], ok["regressions"]), ("pass", [], []))
+        bad = gate(run([0.0] * 12), prev, metric="pass_at_1", margin=0.05, min_tasks=10)
+        self.assertEqual(bad["decision"], "fail")
+        self.assertEqual(len(bad["regressions"]), 12)  # タスク別の悪化は診断として列挙する
+        one = gate(run([0.0] + [1.0] * 11), prev, metric="pass_at_1", margin=0.05, min_tasks=10)
+        self.assertEqual(one["decision"], "inconclusive")  # 1 タスクの偶然の失敗だけでは止めない（v0.3.0 は止めていた）
+        self.assertEqual(gate(run([1.0] * 12), prev, metric="pass_at_1", margin=0.05, min_tasks=20)["decision"], "inconclusive")
+        unsafe = gate(run([0.0] + [1.0] * 11, tags=["unsafe_access"]), prev, metric="pass_at_1", margin=0.05, min_tasks=10)
+        self.assertEqual(unsafe["decision"], "fail")  # 安全違反は 1 件でも止める
+        self.assertTrue(any("unsafe_access" in p for p in unsafe["problems"]))
+        incomparable = gate(run([1.0] * 12, k=3), prev, metric="pass_hat_k", margin=0.05, min_tasks=10)
+        self.assertEqual(incomparable["decision"], "fail")
+        self.assertTrue(any("k が異なる" in p for p in incomparable["problems"]))
 
 
 class GraderTests(unittest.TestCase):
@@ -270,6 +323,23 @@ class GraderTests(unittest.TestCase):
         self.assertEqual(st, ["not_run", "pass", "pass"])
         self.assertEqual((r.score, len(judged)), (1.0, 1))
 
+    def test_harness_only_graders(self):
+        """配布物がないと通らない判定は harness_only と印を付け、比較用スコアから外す。LLM 判定の実行条件にも数えない。"""
+        self.assertTrue(self.g("skill_used", skill="s").requires_harness)
+        self.assertTrue(self.g("hook_used", hook="h", min=2).requires_harness)
+        self.assertFalse(self.g("skill_used", skill="s", max=0).requires_harness)  # 「呼ばない」はどちらの側でも測れる
+        self.assertFalse(Grader("subagent_used", {}, negate=True).requires_harness)
+        self.assertFalse(self.g("tool_used", tool="Bash", min=1).requires_harness)
+        judged = []
+        judge = JudgeConfig(enabled=True, run=lambda p: (judged.append(1) or "PASS\nok", 0.0))
+        r = rec(final_message="x")
+        st = self.run_g([self.g("file_exists", path="out.md"), self.g("skill_used", skill="s"), self.g("llm", criteria="c")], r, judge)
+        self.assertEqual(st, ["pass", "fail", "pass"])
+        self.assertEqual([x["harness_only"] for x in r.grader_results], [False, True, False])
+        self.assertEqual(len(judged), 1)  # スキル未使用（基準側では当然）でも、成果物の判定は比較のために実行する
+        self.assertAlmostEqual(r.score, 2 / 3)
+        self.assertEqual(r.cmp_score, 1.0)
+
     def test_negate_and_weight(self):
         r = rec()
         gs = [Grader("file_exists", {"path": "none.md"}, negate=True, weight=3), Grader("file_exists", {"path": "none.md"})]
@@ -298,6 +368,30 @@ class GraderTests(unittest.TestCase):
         unk = JudgeConfig(enabled=True, run=lambda p: ("UNKNOWN\n根拠不足", None))
         self.assertEqual(self.run_g([self.g("llm", criteria="c")], r4, unk), ["unknown"])
         self.assertEqual(r4.score, 0.0)
+
+
+class ScheduleTests(unittest.TestCase):
+    def test_adjacent_and_counterbalanced(self):
+        """同じ (試行, タスク) の各プロファイルを続けて実行し、先に走るプロファイルを入れ替える（時間による偏りを打ち消す）。"""
+        tmp = Path(tempfile.mkdtemp())
+        tasks = [load_task(write(tmp / f"{t}.yaml", f"id: {t}\nprompt: x\ngraders: [{{type: regex, pattern: x}}]\n")) for t in ("a", "b")]
+        profiles = [load_profile(write(tmp / f"{p}.yaml", f"id: {p}\nagent: claude_code\n")) for p in ("base", "harness")]
+        pairs = [(t, p) for p in profiles for t in tasks]  # 実行器に渡る順（プロファイルごと）
+        jobs = schedule(pairs, trials=2, seed=0)
+        self.assertEqual(len(jobs), 8)
+        blocks = [jobs[i:i + 2] for i in range(0, 8, 2)]
+        for blk in blocks:  # 各ブロックは同じタスク・同じ試行の 2 プロファイル
+            self.assertEqual({(t.id, i) for t, _, i in blk}, {(blk[0][0].id, blk[0][2])})
+            self.assertEqual({p.id for _, p, _ in blk}, {"base", "harness"})
+        firsts = [blk[0][1].id for blk in blocks]
+        self.assertEqual(firsts.count("base"), firsts.count("harness"))  # 先に走る回数が同じ
+        self.assertEqual([(t.id, p.id, i) for t, p, i in jobs], [(t.id, p.id, i) for t, p, i in schedule(pairs, 2, 0)])
+
+    def test_profile_targets_respected(self):
+        tmp = Path(tempfile.mkdtemp())
+        t = load_task(write(tmp / "t.yaml", "id: t\nprompt: x\ntargets: [codex]\ngraders: [{type: regex, pattern: x}]\n"))
+        p = load_profile(write(tmp / "p.yaml", "id: c\nagent: codex\n"))
+        self.assertEqual([(a.id, b.id, i) for a, b, i in schedule([(t, p)], 3, 1)], [("t", "c", 0), ("t", "c", 1), ("t", "c", 2)])
 
 
 class IsolationTests(unittest.TestCase):

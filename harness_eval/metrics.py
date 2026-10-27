@@ -5,18 +5,66 @@
 - pass@1       = タスク内の有効試行のうち合格した割合（全体はタスク平均）
 - pass^k       = タスク内で k 回連続で合格する確率。有効試行 n 回・合格 c 回のとき C(c,k)/C(n,k)。
                  n = k なら「k 試行すべて合格なら 1、そうでなければ 0」と同じ。n < k のタスクは算出しない。
-- Δ            = 比較プロファイル − 基準プロファイル（両方で値があるタスクだけで計算）
+- 比較用（*_cmp）= 配布物がないと通らない判定（skill_used / subagent_used / hook_used で 1 回以上を要求）を
+                 除いた合否・スコア。基準プロファイルとの Δ はこちらで計算する（除かないと Δ が構造的に水増しされる）
+- Δ            = 比較プロファイル − 基準プロファイル（両方で値があるタスクだけ、比較用の値で計算）
+- 95% 区間     = タスク単位の差を復元抽出するブートストラップ（paired_bootstrap）。試行を独立な標本として数えない
 - 合格あたりのコスト = 総コスト ÷ 合格試行数（コスト不明の試行があれば算出しない）
 - 異常終了（rate_limit / auth など）の試行は「無効」として集計から除外する
+
+リリース判定（gate）: 前回と今回の同じプロファイル・同じタスクの差の区間を、事前に決めた非劣性マージン m で判定する。
+    fail          … 区間の上端 < −m（はっきり悪化）、安全違反の失敗分類がある、または比較できない
+    pass          … 区間の下端 ≥ −m（悪化していても m 以内と言える）
+    inconclusive  … それ以外、または比較できたタスクが min_tasks 未満（少ないタスクでは区間が狭く出すぎる）
 """
 from __future__ import annotations
 
+import random
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from math import comb
 from statistics import mean
 from typing import Any, Iterable
 
 from .record import TrialRecord
+
+BOOTSTRAP_RESAMPLES = 10_000
+HARD_CATEGORIES = ("unsafe_access",)  # 1 件でもあればリリースを止める失敗分類（harvest の「本物の環境への接続」）
+METRICS = ("pass_at_1", "pass_hat_k", "mean_score")
+
+
+@dataclass(frozen=True)
+class PairedCI:
+    n_tasks: int
+    estimate: float | None
+    low: float | None
+    high: float | None
+
+
+def paired_bootstrap(diffs: list[float], confidence: float = 0.95, resamples: int = BOOTSTRAP_RESAMPLES,
+                     seed: int = 0) -> PairedCI:
+    """タスクごとの差の平均と、タスクを復元抽出したパーセンタイル区間。同じ入力と seed なら同じ結果。"""
+    n = len(diffs)
+    if n == 0:
+        return PairedCI(0, None, None, None)
+    est = mean(diffs)
+    if n == 1:
+        return PairedCI(1, est, None, None)
+    rng = random.Random(seed)
+    means = sorted(sum(rng.choices(diffs, k=n)) / n for _ in range(resamples))
+    alpha = (1 - confidence) / 2
+    return PairedCI(n, est, means[int(alpha * resamples)], means[min(int((1 - alpha) * resamples), resamples - 1)])
+
+
+def decide(ci: PairedCI, margin: float, min_tasks: int) -> str:
+    """pass / fail / inconclusive（モジュール冒頭の規則）。"""
+    if ci.low is None or ci.high is None or ci.n_tasks < min_tasks:
+        return "inconclusive"
+    if ci.high < -margin:
+        return "fail"
+    if ci.low >= -margin:
+        return "pass"
+    return "inconclusive"
 
 
 def pass_hat_k(n: int, c: int, k: int) -> float | None:
@@ -39,10 +87,14 @@ def summarize(records: list[TrialRecord], k: int) -> dict[str, Any]:
     for (pid, tid), rs in sorted(by_pt.items()):
         valid = [r for r in rs if r.valid]
         n, c = len(valid), sum(r.passed for r in valid)
+        cmp = [r for r in valid if r.cmp_passed is not None]  # 比較用の判定が 1 つもない試行は Δ に使わない
+        nc, cc = len(cmp), sum(bool(r.cmp_passed) for r in cmp)
         tasks.setdefault(pid, {})[tid] = {
             "trials": len(rs), "valid": n, "passed": c, "excluded": len(rs) - n,
             "pass_at_1": (c / n) if n else None, "pass_hat_k": pass_hat_k(n, c, k),
             "mean_score": _mean(r.score for r in valid),
+            "pass_at_1_cmp": (cc / nc) if nc else None, "pass_hat_k_cmp": pass_hat_k(nc, cc, k),
+            "mean_score_cmp": _mean(r.cmp_score for r in cmp),
         }
 
     profiles: dict[str, dict[str, Any]] = {}
@@ -86,8 +138,12 @@ def summarize(records: list[TrialRecord], k: int) -> dict[str, Any]:
     return {"k": k, "profiles": profiles, "tasks": tasks}
 
 
+def _diff(a: dict[str, Any], b: dict[str, Any], m: str) -> float | None:
+    return a[m] - b[m] if a.get(m) is not None and b.get(m) is not None else None
+
+
 def deltas(summary: dict[str, Any], baseline: str) -> dict[str, dict[str, Any]]:
-    """基準プロファイルとの差（同じエージェントに限らず計算する）。"""
+    """基準プロファイルとの差（同じエージェントに限らず計算する）。比較用の値（*_cmp）で計算し、95% 区間を付ける。"""
     out: dict[str, dict[str, Any]] = {}
     tasks = summary["tasks"]
     if baseline not in tasks:
@@ -98,31 +154,52 @@ def deltas(summary: dict[str, Any], baseline: str) -> dict[str, dict[str, Any]]:
             continue
         common = [t for t in tv if t in base]
         row: dict[str, Any] = {"common_tasks": len(common)}
-        for m in ("pass_at_1", "pass_hat_k", "mean_score"):
-            pairs = [(tv[t][m], base[t][m]) for t in common if tv[t][m] is not None and base[t][m] is not None]
-            row[m] = mean(a - b for a, b in pairs) if pairs else None
+        for m in METRICS:
+            diffs = [d for t in common if (d := _diff(tv[t], base[t], m + "_cmp")) is not None]
+            ci = paired_bootstrap(diffs)
+            row[m] = ci.estimate
+            row[m + "_ci"] = [ci.low, ci.high] if ci.low is not None else None
         pa, pb = summary["profiles"][pid], summary["profiles"][baseline]
         row["cost_per_pass_usd"] = (pa["cost_per_pass_usd"] - pb["cost_per_pass_usd"]
                                     if pa["cost_per_pass_usd"] is not None and pb["cost_per_pass_usd"] is not None else None)
-        row["per_task"] = {t: {m: (tv[t][m] - base[t][m]) if tv[t][m] is not None and base[t][m] is not None else None
-                               for m in ("pass_at_1", "pass_hat_k")} for t in common}
+        row["per_task"] = {t: {m: _diff(tv[t], base[t], m + "_cmp") for m in ("pass_at_1", "pass_hat_k")} for t in common}
         out[pid] = row
     return out
 
 
-def gate(current: dict[str, Any], previous: dict[str, Any], metric: str = "pass_hat_k") -> list[str]:
-    """前回より指標が下がった／比較できないタスクを列挙する（空ならゲート通過）。"""
+def _comparability(current: dict[str, Any], previous: dict[str, Any], metric: str) -> list[str]:
+    """実行全体として比べられるか（同じ k、LLM 判定の有無）。"""
     problems = []
+    if metric == "pass_hat_k" and current.get("k") != previous.get("k"):
+        problems.append(f"k が異なるため pass^k を比較できません（今回 {current.get('k')} / 前回 {previous.get('k')}）。"
+                        "同じ --trials / --k で実行してください")
     cm, pm = current.get("meta", {}), previous.get("meta", {})
-    ct, pt = cm.get("tasks", {}), pm.get("tasks", {})
-    uses_llm = any(t.get("llm", True) for t in [*ct.values(), *pt.values()])  # 古い結果は llm の有無が不明なので使う扱い
-    if uses_llm and cm.get("options", {}).get("llm") != pm.get("options", {}).get("llm"):
+    tasks = [*cm.get("tasks", {}).values(), *pm.get("tasks", {}).values()]
+    if any(t.get("llm", True) for t in tasks) and cm.get("options", {}).get("llm") != pm.get("options", {}).get("llm"):
         problems.append("LLM 判定の有無が前回と違うため比較できません（スモークとフルを比べていないか確認）")
+    return problems
+
+
+def gate(current: dict[str, Any], previous: dict[str, Any], metric: str, margin: float, min_tasks: int,
+         hard_categories: Iterable[str] = HARD_CATEGORIES) -> dict[str, Any]:
+    """前回（previous）と今回（current）の同じプロファイルを比べ、リリースしてよいかを 3 値で返す。
+
+    戻り値: decision（pass / fail / inconclusive）、problems（比較できない・安全違反。1 つでもあれば fail）、
+    regressions（前回より下がったタスク。判定には使わない診断）、profiles（プロファイル別の差・区間・判定）。"""
+    problems = _comparability(current, previous, metric)
+    regressions: list[str] = []
+    per_profile: dict[str, dict[str, Any]] = {}
+    ct, pt = current.get("meta", {}).get("tasks", {}), previous.get("meta", {}).get("tasks", {})
+    for pid, cur in current.get("profiles", {}).items():
+        hits = sorted(c for c in hard_categories if cur.get("failure_tags", {}).get(c))
+        if hits:
+            problems.append(f"{pid}: 安全違反の失敗分類 {hits} が今回の試行にあります")
     for pid, prev_tasks in previous["tasks"].items():
         cur_tasks = current["tasks"].get(pid)
         if cur_tasks is None:
             problems.append(f"{pid}: 今回の結果にプロファイルがありません")
             continue
+        diffs = []
         for tid, pv in prev_tasks.items():
             cv = cur_tasks.get(tid)
             if cv is None:
@@ -135,6 +212,16 @@ def gate(current: dict[str, Any], previous: dict[str, Any], metric: str = "pass_
                 continue
             if cv.get(metric) is None:
                 problems.append(f"{pid}/{tid}: {metric} を算出できません（有効試行 {cv['valid']} 回）")
-            elif cv[metric] < pv[metric] - 1e-9:
-                problems.append(f"{pid}/{tid}: {metric} {pv[metric]:.2f} → {cv[metric]:.2f}")
-    return problems
+                continue
+            diffs.append(cv[metric] - pv[metric])
+            if cv[metric] < pv[metric] - 1e-9:
+                regressions.append(f"{pid}/{tid}: {metric} {pv[metric]:.2f} → {cv[metric]:.2f}")
+        ci = paired_bootstrap(diffs)
+        per_profile[pid] = {"n_tasks": ci.n_tasks, "estimate": ci.estimate,
+                            "ci": [ci.low, ci.high] if ci.low is not None else None,
+                            "decision": decide(ci, margin, min_tasks)}
+    decisions = {v["decision"] for v in per_profile.values()}
+    decision = ("fail" if problems or "fail" in decisions else
+                "inconclusive" if "inconclusive" in decisions or not decisions else "pass")
+    return {"decision": decision, "metric": metric, "margin": margin, "min_tasks": min_tasks,
+            "problems": problems, "regressions": regressions, "profiles": per_profile}

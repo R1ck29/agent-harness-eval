@@ -109,7 +109,12 @@ class E2E(unittest.TestCase):
         self.assertEqual(len(self.argv_log.read_text().splitlines()), n_calls)
         self.assertEqual(s2["profiles"]["claude-baseline"]["pass_hat_k"], P["claude-baseline"]["pass_hat_k"])
         runs = self.runs()
-        self.assertEqual(run_cli("gate", "--current", str(runs[-1]), "--previous", str(runs[0]))[0], 0)
+        gate_args = ["--margin", "0.1", "--min-tasks", "1"]
+        self.assertEqual(run_cli("gate", "--current", str(runs[-1]), "--previous", str(runs[0]), *gate_args)[0], 0)
+        code, out = run_cli("gate", "--current", str(runs[-1]), "--previous", str(runs[0]), "--margin", "0.1")
+        self.assertEqual(code, 3, out)  # 5 タスクでは既定の最低 10 タスクに届かない → 判定不能
+        with self.assertRaises(SystemExit):  # マージンは毎回明示する（結果を見てから決めない）
+            run_cli("gate", "--current", str(runs[-1]), "--previous", str(runs[0]))
 
         # 配布物を変えると、そのプロファイルの試行だけ再実行される
         claude_md = self.ex / "harnesses" / "ds-lite" / "CLAUDE.md"
@@ -118,9 +123,9 @@ class E2E(unittest.TestCase):
         rerun = {r["profile_id"] for r in recs3 if not r["from_cache"]}
         self.assertEqual(rerun, {"claude-ds-lite", "codex-ds-lite"})
         self.assertLess(s3["profiles"]["claude-ds-lite"]["pass_hat_k"], 1.0)
-        code, out = run_cli("gate", "--current", str(self.runs()[-1]), "--previous", str(runs[0]))
-        self.assertEqual(code, 1)
-        self.assertIn("claude-ds-lite/csv-summary-format", out)
+        code, out = run_cli("gate", "--current", str(self.runs()[-1]), "--previous", str(runs[0]), *gate_args)
+        self.assertIn(code, (1, 3), out)  # 5 タスクでは悪化が区間で言い切れるとは限らない。通過はしない
+        self.assertIn("claude-ds-lite/csv-summary-format", out)  # 下がったタスクは診断として出る
 
     def test_llm_judge_only_when_code_passes(self):
         args = ["--trials", "1", "--task", "csv-summary-insight", "--judge-executable", sys.executable, str(FAKE / "fake_claude.py")]

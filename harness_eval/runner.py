@@ -33,7 +33,7 @@ from .record import EXCLUDED_ERRORS, TrialRecord
 from .spec import Profile, SpecError, Task
 
 NOT_RUN_ERRORS = {"budget_stop"}
-CACHE_SCHEMA = "3"  # 試行レコードの形式を変えたら上げる（古いキャッシュを使わないため）
+CACHE_SCHEMA = "4"  # 試行レコードの形式を変えたら上げる（古いキャッシュを使わないため）
 
 
 @dataclass
@@ -57,6 +57,7 @@ class RunOptions:
     cache_dir: Path = Path(".harness-eval-cache")
     keep: str = "failed"  # all / failed / none（作業ディレクトリを残すか）
     baseline: str | None = None
+    seed: int = 0  # プロファイルの実行順の入れ替え（schedule）に使う
     log: Callable[[str], None] = print
 
     @property
@@ -76,6 +77,26 @@ def select_pairs(tasks: list[Task], profiles: list[Profile], opt: RunOptions) ->
                 continue
             out.append((t, p))
     return out
+
+
+def schedule(pairs: list[tuple[Task, Profile]], trials: int, seed: int) -> list[tuple[Task, Profile, int]]:
+    """実行順。同じ（試行, タスク）の各プロファイルを続けて実行し、先に走るプロファイルをブロックごとに巡回させる。
+    プロファイルをまとめて順に回すと、時間とともに変わる条件（API の混雑・モデルの更新）が差に混ざるため。
+    巡回の起点は seed で決める（同じ seed なら同じ順）。"""
+    by_task: dict[str, list[tuple[Task, Profile]]] = {}
+    for t, p in pairs:
+        by_task.setdefault(t.id, []).append((t, p))
+    order = sorted({p.id for _, p in pairs})
+    random.Random(seed).shuffle(order)
+    jobs: list[tuple[Task, Profile, int]] = []
+    block = 0
+    for i in range(trials):
+        for items in by_task.values():
+            items = sorted(items, key=lambda tp: order.index(tp[1].id))
+            r = block % len(items)
+            jobs += [(t, p, i) for t, p in items[r:] + items[:r]]
+            block += 1
+    return jobs
 
 
 def cli_version(adapter) -> str | None:
@@ -343,6 +364,7 @@ class Runner:
             if rec.valid and rec.score is None and rec.error is None:  # 採点できるグレーダーが 1 つもない（例: llm だけのタスクを --no-llm）
                 rec.error, rec.valid = {"type": "not_graded", "message": "実行されたグレーダーがありません"}, False
             rec.passed = rec.valid and rec.error is None and rec.score == 1.0
+            rec.cmp_passed = (rec.valid and rec.error is None and rec.cmp_score == 1.0) if rec.cmp_score is not None else None
             if rec.valid and not rec.passed:
                 tags = [etype] if etype else []
                 tags += [g["category"] for g in rec.grader_results if g["status"] in ("fail", "unknown")]
@@ -414,7 +436,7 @@ class Runner:
                 err = f" [{rec.error['type']}]" if rec.error else ""
                 self.opt.log(f"[{len(records)}/{len(self.pairs) * self.opt.trials}] {mark:5} {rec.task_id} / {rec.profile_id} #{rec.trial} score={rec.score if rec.score is None else round(rec.score, 2)} {cost}{err}")
 
-        jobs = [(t, p, i) for i in range(self.opt.trials) for t, p in self.pairs]
+        jobs = schedule(self.pairs, self.opt.trials, self.opt.seed)
         if self.judge_warning:
             self.opt.log(f"注意: {self.judge_warning}")
         ex = ThreadPoolExecutor(max_workers=max(1, self.opt.jobs))
@@ -445,7 +467,7 @@ class Runner:
                         "jobs": self.opt.jobs,
                         "max_cost_usd": self.opt.max_cost_usd, "monthly_budget_usd": self.opt.monthly_budget_usd,
                         "month_spent_before_run_usd": self.month_spent, "use_cache": self.opt.use_cache,
-                        "baseline": self.opt.baseline},
+                        "baseline": self.opt.baseline, "seed": self.opt.seed},
             "cli_versions": self.versions,
             "profiles": {p.id: {"agent": p.agent, "hash": p.content_hash(), "model": p.model, "path": str(p.path)}
                          for p in {p.id: p for _, p in self.pairs}.values()},

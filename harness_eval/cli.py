@@ -10,7 +10,7 @@ from pathlib import Path
 import yaml
 
 from . import __version__
-from .metrics import gate
+from .metrics import HARD_CATEGORIES, gate
 from .report import render
 from .runner import RunOptions, Runner, load_run
 from .spec import Grader, SpecError, Task, lint, load_profiles, load_tasks
@@ -22,7 +22,7 @@ def _opts(a: argparse.Namespace) -> RunOptions:
         judge_agent=a.judge_agent, judge_model=a.judge_model or None, judge_executable=a.judge_executable,
         max_cost_usd=a.max_cost_usd, monthly_budget_usd=a.monthly_budget_usd,
         retry_infra=a.retry_infra, retry_wait_s=a.retry_wait_s, judge_profile=a.judge_profile, use_cache=not a.no_cache, cache_dir=Path(a.cache_dir), keep=a.keep,
-        baseline=a.baseline)
+        baseline=a.baseline, seed=a.seed)
 
 
 def _load(a: argparse.Namespace):
@@ -123,20 +123,29 @@ def cmd_report(a) -> int:
     return 0
 
 
+GATE_EXIT = {"pass": 0, "fail": 1, "inconclusive": 3}
+
+
 def cmd_gate(a) -> int:
+    """前回と今回を比べ、pass（0）/ fail（1）/ inconclusive（3）を終了コードで返す。"""
+    if not 0 <= a.margin < 1:
+        raise SpecError("--margin は 0 以上 1 未満（例: 0.05 = 5 ポイントまでの悪化を許容）")
     _, cur = load_run(Path(a.current))
     _, prev = load_run(Path(a.previous))
-    if a.metric == "pass_hat_k" and cur["k"] != prev["k"]:
-        print(f"ゲート不通過: k が異なるため pass^k を比較できません（今回 {cur['k']} / 前回 {prev['k']}）。同じ --trials / --k で実行してください")
-        return 1
-    problems = gate(cur, prev, a.metric)
-    if problems:
-        print(f"ゲート不通過: {a.metric} が下がった／比較できない項目があります")
-        for p in problems:
-            print(f"  - {p}")
-        return 1
-    print(f"ゲート通過: {a.metric} が下がったタスクはありません")
-    return 0
+    r = gate(cur, prev, a.metric, a.margin, a.min_tasks, a.hard_category or HARD_CATEGORIES)
+    label = {"pass": "通過", "fail": "不通過", "inconclusive": "判定不能（データ不足）"}[r["decision"]]
+    print(f"ゲート{label}: {a.metric} の前回との差（95% 区間）を非劣性マージン {a.margin:g} で判定")
+    for pid, v in r["profiles"].items():
+        ci = "—" if v["ci"] is None else f"[{v['ci'][0]:+.3f}, {v['ci'][1]:+.3f}]"
+        est = "—" if v["estimate"] is None else f"{v['estimate']:+.3f}"
+        print(f"  {pid}: 差 {est} {ci}（タスク {v['n_tasks']} 件、最低 {a.min_tasks} 件）→ {v['decision']}")
+    for p in r["problems"]:
+        print(f"  - 止める理由: {p}")
+    if r["regressions"]:
+        print("  前回より下がったタスク（参考）:")
+        for p in r["regressions"]:
+            print(f"    - {p}")
+    return GATE_EXIT[r["decision"]]
 
 
 def cmd_doctor(a) -> int:
@@ -258,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--cache-dir", default=".harness-eval-cache")
         sp.add_argument("--keep", choices=["all", "failed", "none"], default="failed", help="作業ディレクトリを残す範囲（none は生ログも消す）")
         sp.add_argument("--baseline", help="Δ の基準にするプロファイル id")
+        sp.add_argument("--seed", type=int, default=0, help="プロファイルの実行順を入れ替える乱数の種（同じ値なら同じ順）")
         sp.add_argument("--out", default="results", help="結果の出力先")
 
     sp = sub.add_parser("validate", help="YAML の検証と設計ルールの警告")
@@ -278,10 +288,16 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("run")
     sp.add_argument("--baseline")
     sp.set_defaults(fn=cmd_report)
-    sp = sub.add_parser("gate", help="前回結果と比べて指標が下がったら終了コード 1")
+    sp = sub.add_parser("gate", help="前回結果と比べたリリース判定（終了コード 0 通過 / 1 不通過 / 3 判定不能）")
     sp.add_argument("--current", required=True)
     sp.add_argument("--previous", required=True)
     sp.add_argument("--metric", default="pass_hat_k", choices=["pass_hat_k", "pass_at_1", "mean_score"])
+    sp.add_argument("--margin", type=float, required=True,
+                    help="非劣性マージン: 許容する悪化の大きさ（例 0.05）。結果を見る前に、業務への影響から決めておく")
+    sp.add_argument("--min-tasks", type=int, default=10,
+                    help="判定に必要な比較できたタスク数（既定 10。少ないと区間が狭く出すぎるため判定不能にする）")
+    sp.add_argument("--hard-category", action="append",
+                    help=f"1 件でもあれば不通過にする失敗分類（複数可。既定 {list(HARD_CATEGORIES)}）")
     sp.set_defaults(fn=cmd_gate)
     sp = sub.add_parser("doctor", help="環境検証（CLI・認証・配布物の読み込み）")
     sp.add_argument("--profiles", nargs="+", required=True)
