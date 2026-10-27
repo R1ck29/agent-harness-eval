@@ -179,7 +179,8 @@ class ClaudeAdapter(_Adapter):
         r.duration_ms = result.get("duration_ms")
         r.num_turns = result.get("num_turns")
         if isinstance(result.get("total_cost_usd"), (int, float)):
-            r.cost_usd, r.cost_source = float(result["total_cost_usd"]), "reported"
+            # CLI が API 単価で計算した推定額（請求額ではない。サブスクリプションでは呼び出しごとの請求はない）
+            r.cost_usd, r.cost_source = float(result["total_cost_usd"]), "client_estimate"
         u = result.get("usage") or {}
         r.tokens = {"input": u.get("input_tokens"), "output": u.get("output_tokens"),
                     "cache_read": u.get("cache_read_input_tokens"),
@@ -298,11 +299,23 @@ class CodexAdapter(_Adapter):
                 r.cost_usd = (uncached * pr.get("input_per_mtok", 0)
                               + tok["cache_read"] * pr.get("cached_input_per_mtok", pr.get("input_per_mtok", 0))
                               + tok["output"] * pr.get("output_per_mtok", 0)) / 1e6
-                r.cost_source = "estimated"
+                r.cost_source = "token_estimate"
         if not completed and not failed:
             r.error_type, r.error_message = "agent_crash", "turn.completed / turn.failed がありません"
         r.skill_calls = list(dict.fromkeys(r.skill_calls))
         return r
+
+
+# 起動フラグ・出力形式を実機で確かめた版（これより古い CLI は未確認。doctor が知らせる）
+VERIFIED_VERSIONS = {"claude_code": (2, 1, 304), "codex": (0, 163, 0)}
+
+
+def older_than_verified(agent: str, version: str | None) -> bool | None:
+    """`claude --version` / `codex --version` の出力が確認済みの版より古いか（版を読めなければ None）。"""
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", version or "")
+    if not m:
+        return None
+    return tuple(int(x) for x in m.groups()) < VERIFIED_VERSIONS[agent]
 
 
 def get_adapter(agent: str, profile: Profile | None = None, executable: list[str] | None = None):
