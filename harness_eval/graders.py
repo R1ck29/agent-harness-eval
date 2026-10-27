@@ -154,9 +154,10 @@ def grade_all(graders: list[Grader], rec: TrialRecord, workdir: Path, judge: Jud
         if g.type == "llm":
             results.append(None)  # type: ignore[arg-type]
             continue
+        base = {"label": g.label(), "type": g.type, "kind": g.kind, "weight": g.weight, "category": g.category,
+                "harness_only": g.requires_harness}
         if g.type == "hook_used" and rec.hook_calls is None:  # Codex の --json には hooks の実行記録が出ない（0.163.0 で実測）
-            results.append({"label": g.label(), "type": g.type, "kind": g.kind, "status": "not_run",
-                            "reason": "hooks の実行記録がないため判定できません（Codex）", "weight": g.weight, "category": g.category})
+            results.append({**base, "status": "not_run", "reason": "hooks の実行記録がないため判定できません（Codex）"})
             continue
         try:
             ok, why = grade_one(g, rec, workdir, task_dir)
@@ -165,15 +166,17 @@ def grade_all(graders: list[Grader], rec: TrialRecord, workdir: Path, judge: Jud
             status = "pass" if ok else "fail"
         except Exception as e:  # 採点器の不具合は不合格として理由を残す
             status, why = "fail", f"採点エラー: {e}"
-        results.append({"label": g.label(), "type": g.type, "kind": g.kind, "status": status,
-                        "reason": why, "weight": g.weight, "category": g.category})
-    code_ok = all(r is None or r["status"] in ("pass", "not_run") for r in results) and rec.error is None
+        results.append({**base, "status": status, "reason": why})
+    # LLM 判定を省くのは「配布物の有無に関係なく既に不合格」のときだけ。harness_only の不合格（基準側では当然）で
+    # 省くと、基準との比較用スコアが出せなくなる
+    code_ok = all(r is None or r["harness_only"] or r["status"] in ("pass", "not_run") for r in results) and rec.error is None
     jcost = 0.0
     jcost_known = True
     for i, g in enumerate(graders):
         if g.type != "llm":
             continue
-        base = {"label": g.label(), "type": g.type, "kind": g.kind, "weight": g.weight, "category": g.category}
+        base = {"label": g.label(), "type": g.type, "kind": g.kind, "weight": g.weight, "category": g.category,
+                "harness_only": False}
         if not judge.enabled or judge.run is None:
             results[i] = {**base, "status": "not_run", "reason": "--no-llm"}
         elif not code_ok:
@@ -195,7 +198,13 @@ def grade_all(graders: list[Grader], rec: TrialRecord, workdir: Path, judge: Jud
     rec.grader_results = results
     # 実行しなかった判定（not_run・skipped_prior_fail）は分母に入れない
     scored = [r for r in results if r["status"] not in ("not_run", "skipped_prior_fail")]
-    total = sum(r["weight"] for r in scored)
-    rec.score = (sum(r["weight"] for r in scored if r["status"] == "pass") / total) if total else None
+    rec.score = _weighted(scored)
+    rec.cmp_score = _weighted([r for r in scored if not r["harness_only"]])
     # 判定を実行しなければ 0、実行して費用が分からなければ None（集計で「不明」として扱う）
     rec.judge_cost_usd = jcost if jcost_known else None
+
+
+def _weighted(results: list[dict[str, Any]]) -> float | None:
+    """合格した判定の重み付き割合（判定が 1 つもなければ None）。"""
+    total = sum(r["weight"] for r in results)
+    return (sum(r["weight"] for r in results if r["status"] == "pass") / total) if total else None

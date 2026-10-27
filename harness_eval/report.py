@@ -43,6 +43,10 @@ def _delta(x: float | None, pct: bool = True, lower_better: bool = False) -> str
     return f'<span class="{cls}">{txt}</span>'
 
 
+def _ci(ci: list[float] | None) -> str:
+    return "" if not ci else f"<br><span class='mut'>[{ci[0] * 100:+.0f}, {ci[1] * 100:+.0f}]</span>"
+
+
 def render(summary: dict[str, Any], records: list[TrialRecord], baseline: str | None = None) -> str:
     meta = summary.get("meta", {})
     k = summary["k"]
@@ -78,10 +82,12 @@ def render(summary: dict[str, Any], records: list[TrialRecord], baseline: str | 
             out.append(f"<h2>基準 <code>{_e(baseline)}</code> との差（Δ）</h2><div class='wrap'><table><tr><th>プロファイル</th><th class='n'>共通タスク</th>"
                        "<th class='n'>Δ pass^k</th><th class='n'>Δ pass@1</th><th class='n'>Δ 平均スコア</th><th class='n'>Δ 合格あたりコスト</th></tr>")
             for pid, row in d.items():
-                out.append(f"<tr><td>{_e(pid)}</td><td class='n'>{row['common_tasks']}</td><td class='n'>{_delta(row['pass_hat_k'])}</td>"
-                           f"<td class='n'>{_delta(row['pass_at_1'])}</td><td class='n'>{_delta(row['mean_score'])}</td>"
+                cells = "".join(f"<td class='n'>{_delta(row[m])}{_ci(row[m + '_ci'])}</td>" for m in ("pass_hat_k", "pass_at_1", "mean_score"))
+                out.append(f"<tr><td>{_e(pid)}</td><td class='n'>{row['common_tasks']}</td>{cells}"
                            f"<td class='n'>{_delta(row['cost_per_pass_usd'], pct=False, lower_better=True)}</td></tr>")
-            out.append("</table></div><div class='mut'>Δ は両方で値があるタスクだけで計算。合格あたりコストは負の値ほど安い。</div>")
+            out.append("</table></div><div class='mut'>Δ は両方で値があるタスクだけで計算。括弧内はタスク単位のブートストラップによる 95% 区間"
+                       "（区間が 0 をまたぐなら差があるとは言えない）。配布物がないと通らない判定（スキル・サブエージェント・hook を"
+                       "使うことの要求）は両側とも除いて比べる。合格あたりコストは負の値ほど安い。</div>")
 
     tids = sorted({t for v in summary["tasks"].values() for t in v})
     out.append("<h2>タスク別（pass^k ／ pass@1 ／ 合格数/有効試行）</h2><div class='wrap'><table><tr><th>タスク</th>"

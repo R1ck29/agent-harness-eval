@@ -83,6 +83,14 @@ class Grader:
     def kind(self) -> str:
         return "process" if self.type in PROCESS_GRADERS else "outcome"
 
+    @property
+    def requires_harness(self) -> bool:
+        """配布物がないと通りようがない判定（スキル・サブエージェント・hook を 1 回以上使うことを要求）。
+        ハーネスなしの基準と比べる Δ では両側とも外す（claude plugin eval と同じ扱い）。"""
+        if self.type not in ("skill_used", "subagent_used", "hook_used") or self.negate:
+            return False
+        return int(self.params.get("min", 1 if "max" not in self.params else 0)) >= 1
+
     def label(self) -> str:
         if self.description:
             return self.description
