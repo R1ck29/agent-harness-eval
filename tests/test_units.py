@@ -97,6 +97,15 @@ class SpecTests(unittest.TestCase):
         w = "\n".join(lint([load_task(t)], [load_profile(p)]))
         for s in ("過程を見る", "paired_negative", "allow_tools", "ベースライン"):
             self.assertIn(s, w)
+        # 実行される配布物（install の run・hooks・MCP の設定）は利用者の権限で動くことを知らせる
+        write(self.tmp / "h2" / "settings.json", '{"hooks": {}}')
+        runner = write(self.tmp / "r.yaml", "id: r\nagent: claude_code\ninstall: [{run: 'echo x'}]\n")
+        hooked = write(self.tmp / "k.yaml", "id: k\nagent: claude_code\ninstall: [{copy: h2, to: '{config_dir}'}]\n")
+        w2 = "\n".join(lint([load_task(t)], [load_profile(runner), load_profile(hooked), load_profile(p)]))
+        self.assertIn("r: ", w2)
+        self.assertIn("k: ", w2)
+        self.assertIn("利用者の権限", w2)
+        self.assertNotIn("a: install", w2)  # CLAUDE.md などを置くだけのプロファイルには出さない
 
 
 class ParserTests(unittest.TestCase):
@@ -420,7 +429,13 @@ class DoctorTests(unittest.TestCase):
         d = load_profile(write(tmp / "d.yaml", "id: d\nagent: claude_code\ninherit_env: [ANTHROPIC_API_KEY, ANTHROPIC_MODEL]\n"))
         self.assertEqual(route_variables(d, parent),
                          (["ANTHROPIC_API_KEY"], ["ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "AWS_BEARER_TOKEN_BEDROCK"]))
-        self.assertEqual(route_signature(d, parent), route_signature(d, {**parent, "ANTHROPIC_API_KEY": "別の値"}))  # 値は使わない
+        self.assertEqual(route_signature(d, parent), route_signature(d, {**parent, "ANTHROPIC_API_KEY": "別の値"}))  # 秘密の値は使わない
+        self.assertNotIn("sk-x", route_signature(d, parent))
+        # 秘密でない変数（モデルの別名の実体・接続先・切り替え）は値が変われば再実行する（値そのものは残さずハッシュだけ）
+        m = load_profile(write(tmp / "m.yaml", "id: m\nagent: claude_code\ninherit_env: [ANTHROPIC_DEFAULT_SONNET_MODEL]\n"))
+        s1 = route_signature(m, {"ANTHROPIC_DEFAULT_SONNET_MODEL": "model-a"})
+        self.assertNotEqual(s1, route_signature(m, {"ANTHROPIC_DEFAULT_SONNET_MODEL": "model-b"}))
+        self.assertNotIn("model-a", s1)
         self.assertNotEqual(route_signature(d, parent), route_signature(d, {k: v for k, v in parent.items() if k != "ANTHROPIC_API_KEY"}))
         with self.assertRaisesRegex(SpecError, "inherit_env"):
             load_profile(write(tmp / "e.yaml", "id: e\nagent: codex\ninherit_env: [ANTHROPIC_API_KEY]\n"))  # codex の経路の変数ではない
@@ -659,7 +674,10 @@ class HarvestTests(unittest.TestCase):
         self.assertIn("結果を見る採点がない", check_written(write_draft(no_outcome, root, origin)))
         broken = {**good, "id": "h-f", "check_script": "def (:\n"}
         self.assertIn("読めない", check_written(write_draft(broken, root, origin)))
-        self.assertIsNone(selftest(load_task(ROOT / "examples" / "tasks" / "request-extract.yaml")))  # 正解例のないタスクは対象外
+        # 同梱タスクの正解例: 採点が正解例で通り、何もしなければ落ちる（採点そのものが壊れていないことの確認）
+        for tid in ("csv-summary-format", "request-extract", "arithmetic-no-skill", "request-ambiguous"):
+            self.assertEqual(selftest(load_task(ROOT / "examples" / "tasks" / f"{tid}.yaml")), "", tid)
+        self.assertIsNone(selftest(load_task(ROOT / "examples" / "tasks" / "csv-summary-skill.yaml")))  # 正解例のないタスクは対象外
         clarify = {**good, "id": "h-g", "needs_clarification": True, "check_script": "", "files": [], "reference_outputs": [],
                    "final_answer_example": "対象期間を教えていただけますか？", "graders": [{"type": "regex", "pattern": "[?？]"}]}
         self.assertEqual(check_written(write_draft(clarify, root, origin)), "")

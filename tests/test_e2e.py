@@ -393,9 +393,11 @@ class E2E(unittest.TestCase):
         empty.mkdir()
         code, log = run_cli("harvest", "--out", str(self.tmp / "fallback"), "--source", str(empty), *exe)
         self.assertIn("同梱の標準タスク", log)
-        code, log = run_cli("validate", "--tasks", str(self.tmp / "fallback" / "tasks"), "--profiles", str(self.ex / "profiles"))
+        code, log = run_cli("validate", "--tasks", str(self.tmp / "fallback" / "tasks"), "--profiles", str(self.ex / "profiles"),
+                            "--selftest")
         self.assertEqual(code, 0, log)
         self.assertIn("タスク 6 件", log)
+        self.assertEqual(log.count(": OK"), 4, log)  # 正解例も一緒に書き出され、書き出し先でも採点を確かめられる
 
     def test_plan_and_validate(self):
         code, out = run_cli("validate", "--tasks", str(self.ex / "tasks"), "--profiles", str(self.ex / "profiles"))

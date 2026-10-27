@@ -477,10 +477,10 @@ def _remove_draft(root: Path, tid: str) -> None:
 
 
 def write_fallback(root: Path) -> list[str]:
-    """履歴がないときは同梱の標準タスク（examples の tasks・fixtures・checks）を書き出す。"""
+    """履歴がないときは同梱の標準タスク（examples の tasks・fixtures・checks・references）を書き出す。"""
     if not EXAMPLES.is_dir():
         raise SpecError(f"同梱タスクが見つかりません: {EXAMPLES}")
-    for sub in ("tasks", "fixtures", "checks"):
+    for sub in ("tasks", "fixtures", "checks", "references"):  # references: validate --selftest 用の正解例
         for f in (EXAMPLES / sub).rglob("*"):
             dst = root / sub / f.relative_to(EXAMPLES / sub)
             if f.is_file() and not dst.exists():  # 既にあるファイル（手で直したタスクなど）は上書きしない
