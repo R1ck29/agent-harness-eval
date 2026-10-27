@@ -49,7 +49,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <body>
 <main>
 <h1>Agent Harness Eval 図解ガイド</h1>
-<p class="lead">Claude Code / Codex の配布物（CLAUDE.md・スキルなど）を、同じタスクで隔離して実行・採点し、配布物なしや前回版と比べる仕組みを図で説明します。詳しい設定項目は README.md を参照してください。</p>
+<p class="lead">Claude Code / Codex の配布物（CLAUDE.md・スキルなど）を、同じタスクで隔離して実行・採点し、配布物なしや前回版と比べる仕組みを図で説明します。詳しい設定項目は README.md、設計の理由（既存ツールとの比較・評価の方法・採らなかった案）は <a href="design.html">設計記録</a> を参照してください。</p>
 <nav>
 <a href="#overview">1. 全体像</a><a href="#workflow">2. 使う順番</a><a href="#harvest">3. 実際の依頼からタスクを作る</a><a href="#trial">4. 1 試行の流れ</a><a href="#isolation">5. 隔離</a><a href="#grading">6. 採点</a><a href="#metrics">7. 指標</a><a href="#cache">8. トークン節約</a><a href="#outputs">9. 出力</a>
 </nav>
@@ -116,11 +116,11 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <text x="400" y="88" text-anchor="middle">回数・概算費用</text><text x="400" y="106" text-anchor="middle" class="t-sm">呼び出し 0</text>
 <text x="560" y="88" text-anchor="middle" class="t-acc">配布物を変えるたび</text><text x="560" y="106" text-anchor="middle" class="t-sm">1 試行・コード判定のみ</text>
 <text x="720" y="88" text-anchor="middle">リリース前だけ</text><text x="720" y="106" text-anchor="middle" class="t-sm">3 試行＋LLM 判定</text>
-<text x="880" y="88" text-anchor="middle">前回より悪化？</text><text x="880" y="106" text-anchor="middle" class="t-sm">悪化なら終了コード 1</text>
+<text x="880" y="88" text-anchor="middle">前回と比べて判定</text><text x="880" y="106" text-anchor="middle" class="t-sm">通過／不通過／判定不能</text>
 <path d="M720,118 C720,140 560,140 560,118" class="ln-dash" marker-end="url(#m2)"/>
 <text x="640" y="146" text-anchor="middle" class="t-sm">変更が入ればスモークに戻る</text>
 </svg></div>
-<figcaption>validate と plan は費用 0、doctor は「OK と返すだけ」の最小呼び出しです。変更のない組み合わせはキャッシュが効くので、スモークを何度回しても呼ばれるのは変えた部分だけです。</figcaption>
+<figcaption>validate・plan・doctor（--live なし）は費用 0、doctor --live は「OK と返すだけ」の最小呼び出しです。gate の判定と終了コードは 7 章の表のとおりです。変更のない組み合わせはキャッシュが効くので、スモークを何度回しても呼ばれるのは変えた部分だけです。</figcaption>
 </figure>
 
 <!-- harvest -->
@@ -298,7 +298,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <tr><td class="ok">合格</td><td>全グレーダー合格</td><td>入る</td><td>保存</td></tr>
 <tr><td class="ng">不合格</td><td>形式違反・<code>timeout</code>・<code>max_turns</code>・<code>budget_exceeded</code>・<code>agent_error</code></td><td>入る</td><td>保存（<code>timeout</code> は保存しない）</td></tr>
 <tr><td>除外</td><td><code>rate_limit</code>・<code>overloaded</code>・<code>auth</code>・<code>network</code>・<code>launch_failed</code>・<code>harness_error</code>・<code>judge_error</code>・<code>not_graded</code>・<code>interrupted</code></td><td>入らない（件数と理由を表示）</td><td>保存しない</td></tr>
-<tr><td>未実行</td><td><code>--max-cost-usd</code>・<code>--monthly-budget-usd</code> に到達（<code>budget_stop</code>）</td><td>入らない（件数を表示）</td><td>保存しない</td></tr>
+<tr><td>未実行</td><td><code>--max-cost-usd</code>・<code>--monthly-budget-usd</code>（Claude・Codex の口座ごと）に到達（<code>budget_stop</code>）</td><td>入らない（件数を表示）</td><td>保存しない</td></tr>
 </table>
 
 <!-- 6 -->
@@ -311,7 +311,14 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <tr><td>C</td><td><span class="ng">✗ ✗</span> <span class="ok">✓</span>（c = 1）</td><td class="n">33%</td><td class="n">0</td><td class="n">0 ÷ 3 ＝ 0</td></tr>
 <tr><th>全体（タスク平均）</th><td></td><td class="n"><b>67%</b></td><td class="n"><b>0.33</b></td><td class="n"><b>0.44</b></td></tr>
 </table>
-<p>有効試行 n 回中 c 回合格のとき pass^k ＝ C(c,k) ÷ C(n,k)。n ＝ k なら「全部合格で 1、それ以外 0」です。有効試行が k 回未満のタスクは計算せず、レポートに「計算できたタスク数」を出します。Δ は比較プロファイルから基準プロファイルを引いた値で、両方に値があるタスクだけで計算します。</p>
+<p>有効試行 n 回中 c 回合格のとき pass^k ＝ C(c,k) ÷ C(n,k)。n ＝ k なら「全部合格で 1、それ以外 0」です。有効試行が k 回未満のタスクは計算せず、レポートに「計算できたタスク数」を出します。Δ は比較プロファイルから基準プロファイルを引いた値で、両方に値があるタスクだけで計算します。配布物なしの基準と比べるときは、配布物がないと通らない判定（スキル・サブエージェント・hook を使うことの要求）を両側とも除きます。差にはタスク単位のブートストラップによる 95% 区間を付けます（試行を独立な標本として数えない。区間が 0 をまたげば差があるとは言えない）。</p>
+<p>リリース判定（<code>gate</code>）は、前回と今回の同じプロファイルの差の区間を、結果を見る前に決めた非劣性マージン m（<code>--margin</code>、毎回指定）で判定します。</p>
+<table>
+<tr><th>判定</th><th>条件</th><th>終了コード</th></tr>
+<tr><td class="ok">通過</td><td>区間の下端 ≥ −m（悪化していても m 以内と言える）</td><td class="n">0</td></tr>
+<tr><td class="ng">不通過</td><td>区間の上端 &lt; −m（はっきり悪化）、安全違反（<code>unsafe_access</code> など）が 1 件でもある、または比較できない（k・LLM 判定の有無・タスク定義が違う）</td><td class="n">1</td></tr>
+<tr><td>判定不能</td><td>それ以外、または比較できたタスクが <code>--min-tasks</code>（既定 10）未満。タスクが少ないと区間は実際より狭く出やすいため</td><td class="n">3</td></tr>
+</table>
 
 <!-- 7 -->
 <h2 id="cache">8. トークン節約：変えたところだけ実行する</h2>
@@ -335,9 +342,9 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <rect x="340" y="136" width="180" height="44" rx="6" class="box"/><text x="430" y="163" text-anchor="middle">新しいキー</text>
 <line x1="520" y1="158" x2="578" y2="158" class="ln" marker-end="url(#m7)"/><text x="549" y="151" text-anchor="middle" class="t-sm">ミス</text>
 <rect x="580" y="130" width="300" height="56" rx="6" class="box"/><text x="730" y="153" text-anchor="middle">エージェントを実行</text><text x="730" y="172" text-anchor="middle" class="t-sm">有効な結果をキャッシュに保存</text>
-<text x="450" y="222" text-anchor="middle" class="t-sm">キーの材料：タスク定義・フィクスチャ・採点スクリプト・プロファイル・配布物の中身・CLI 版・試行番号・（llm グレーダーがあれば）判定の設定</text>
+<text x="450" y="222" text-anchor="middle" class="t-sm">キーの材料：タスク・フィクスチャ・採点スクリプト・プロファイル・配布物の中身・CLI 版・試行番号・経路の変数・（llm があれば）判定の設定</text>
 </svg></div>
-<figcaption>モデルの別名（sonnet など）が指す実体が変わっても CLI 版が同じならキーは変わりません。モデル移行の評価やリリース判定では <code>--no-cache</code> を付けるか、モデル ID を固定してください。</figcaption>
+<figcaption>経路の変数（API キー・Bedrock の切り替え・<code>ANTHROPIC_DEFAULT_SONNET_MODEL</code> など）はキーに入ります（秘密の値は使わず名前だけ）。ただしサービス側でモデルの別名（sonnet など）が指す実体が変わっても、キーは変わりません。モデル移行の評価やリリース判定では <code>--no-cache</code> を付けるか、モデル ID を固定してください。</figcaption>
 </figure>
 <table>
 <tr><th>トークンを使う場所</th><th>節約の仕組み</th><th>評価の正しさへの影響</th></tr>
@@ -361,7 +368,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <tr><td><code>trials/…/&lt;n&gt;/workdir/</code></td><td>エージェントが作ったファイル</td><td>既定は不合格の試行だけ残す（<code>--keep</code>）</td></tr>
 <tr><td><code>trials/…/&lt;n&gt;/home/</code></td><td>一時ホーム（認証ファイルの複製を含みうる）</td><td>試行の終わりに必ず削除</td></tr>
 <tr><td><code>.harness-eval-cache/</code></td><td>キャッシュ（試行の記録と同じ内容）</td><td>残る</td></tr>
-<tr><td><code>results/spend.jsonl</code></td><td>費用台帳（費用が発生するたびに追記。<code>--monthly-budget-usd</code> が今月分を合計）</td><td>残る</td></tr>
+<tr><td><code>results/spend.jsonl</code></td><td>費用台帳（費用が発生するたびに 1 行 {at, usd, run_id, agent, billing} を追記。<code>--monthly-budget-usd</code> が Claude・Codex の口座ごとに今月分を合計。<code>billing: subscription</code> は数えない）</td><td>残る</td></tr>
 </table>
 <p>trials.jsonl・キャッシュ・レポートには最終応答とツール呼び出しの入力が残ります。評価には合成データだけを使い、結果とキャッシュを社外に出さないでください。Ctrl-C で中断すると未開始の試行は取り消され、実行中のエージェントも止まります。完了済みの試行はキャッシュにあるので、同じコマンドを再実行すると続きから進みます。</p>
 </main>

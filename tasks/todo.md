@@ -28,8 +28,8 @@ the survey shows is current best practice:
 | 1 | Paired, task-clustered bootstrap CI for Δ; three-valued decision (pass / fail / inconclusive) with a pre-declared non-inferiority margin and a minimum task count; used by `gate` and the report | Phase 0 design; Anthropic stats post; Bowyer et al. 2025 | v0.3.0 `gate` fails on any single-task pass^k drop (one unlucky trial at k=3 blocks a release) and never shows uncertainty |
 | 2 | Comparable score for Δ: graders that can only pass with the harness (`skill_used` / `subagent_used` / `hook_used` requiring ≥1 call) are left out of Δ in both arms; the full score is still reported | `claude plugin eval` docs | Otherwise Δ against a no-harness baseline is inflated by construction |
 | 3 | Adjacent, counterbalanced scheduling: for each (trial, task) the profiles run back to back, in an order alternated by a seeded RNG (`--seed`) | Phase 0 design; Anthropic infrastructure-noise post | v0.3.0 runs all of one profile before the next, so time drift (API load, model rollout) confounds Δ |
-| 4 | Cost basis and per-agent monthly ledgers: `client_estimate` (Claude `total_cost_usd`), `token_estimate` (Codex pricing), `unavailable`; profile `billing: api / subscription`; ledger rows carry the agent; `--monthly-budget-usd` applies to the Claude and Codex accounts separately; subscription spend is shown but not charged | Phase 0 (confirmed: separate USD 1,500 Claude / Codex ledgers; no fictional per-run USD for subscriptions) | v0.3.0 has one shared ledger and labels client estimates as "reported" |
-| 5 | `doctor` static checks: route-changing variables inherited from the parent shell (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, CLAUDE_CODE_USE_BEDROCK, …) and the minimum verified CLI version per feature | Phase 0 doctor; local CLI versions | Trials inherit the parent environment, so a stray key silently changes routing and billing; old CLIs lack flags v0.3.0 uses |
+| 4 | Cost basis and per-agent monthly ledgers: `client_estimate` (Claude `total_cost_usd`), `token_estimate` (Codex pricing), null when unavailable; profile `billing: api / subscription`; ledger rows carry the agent; `--monthly-budget-usd` applies to the Claude and Codex accounts separately; subscription spend is shown but not charged | Phase 0 (confirmed: separate USD 1,500 Claude / Codex ledgers; no fictional per-run USD for subscriptions) | v0.3.0 has one shared ledger and labels client estimates as "reported" |
+| 5 | `doctor` static checks: route-changing variables (names verified in the CLI binaries) inherited without declaration, with a name-only `inherit_env` opt-in; CLI older than the verified version (one per agent: a per-flag `--help` check is unreliable because `--max-turns` is hidden) | Phase 0 doctor; local CLI versions | Trials inherit the parent environment, so a stray key silently changes routing and billing |
 | 6 | Reference solutions for the bundled example tasks, so `validate --selftest` proves "reference passes, empty fails" for them too | Phase 0 known-bad control | Today only harvested drafts have references |
 | 7 | Lint warning for executable harness parts (install `run`, hooks, MCP): they run with the user's privileges | Phase 0 trust levels (T2/T3 cannot be enforced without a sandbox) | Keeps the safety rule without unenforceable machinery |
 
@@ -52,20 +52,30 @@ Not adopted (the reasons go in docs/design.html):
 
 ### Steps
 
-- [ ] Baseline snapshot for rollback (pending user decision: git init + commit)
-- [ ] Import the v0.3.0 tree; remove Phase 0 code; merged pyproject and lock; tests green as-is
-- [ ] (1)(2) stats module plus summarize / deltas / gate / report integration, tests first
-- [ ] (3) counterbalanced scheduler, tests first
-- [ ] (4) cost basis and per-agent ledger, tests first
-- [ ] (5) doctor route and version checks, tests first
-- [ ] (6) example references and selftest; (7) lint warning
-- [ ] Update README, guide.html and design.html; no stale statements (grep for BenchFlow, old versions, old flags)
+- [x] Baseline snapshot for rollback (user chose git init + commit: `d2ff1db`)
+- [x] Import the v0.3.0 tree; remove Phase 0 code; merged pyproject and lock; tests green as-is
+- [x] (1)(2) stats in `metrics.py` plus summarize / deltas / gate / report integration, tests first
+- [x] (3) counterbalanced scheduler, tests first
+- [x] (4) cost basis and per-agent ledger, tests first
+- [x] (5) doctor route and version checks, tests first
+- [x] (6) example references and selftest; (7) lint warning
+- [x] Update README, guide.html and design.html; no stale statements (grep for BenchFlow, old versions, old flags)
 - [ ] Verification:
   - full test suite on Python 3.10–3.13, ruff, coverage ≥80%
   - build the zip and run it from the unzipped copy
   - `doctor` on this Mac
   - a capped real smoke run, only if authorized
 - [ ] Independent review (a fresh reviewer with no build context); fix every CRITICAL/HIGH finding; re-review
+
+## Review (2026-10-28)
+
+Each step was verified by an independent reviewer subagent in a separate git worktree (task-graph.json):
+- import: PASS.
+- gate-stats: PASS. Follow-ups fixed: per-task counterbalancing, Δ fallback for pre-0.4 summaries, `--min-tasks` validation.
+- cost-doctor: FAIL on attempt 1 (HIGH: doctor told users to write secrets into profiles), fixed with the name-only
+  `inherit_env`, extended route variables and the judge-route check; PASS on attempt 2. A MEDIUM finding (value-only
+  changes of model aliases reused the cache) was fixed in the docs step: non-secret values are hashed into the key.
+- Residual risks are listed in docs/design.html §8.
 
 ## History
 
