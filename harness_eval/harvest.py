@@ -368,8 +368,10 @@ def draft_problem(draft: dict) -> str:
     return ""
 
 
-def sample_test(task: Task, graders: list) -> str:
-    """正解例（references/<id>/）を置いた作業ディレクトリでは通り、何もしていない作業ディレクトリでは落ちるか。"""
+def sample_test(task: Task, graders: list, notes: list[str] | None = None) -> str:
+    """正解例（references/<id>/）を置いた作業ディレクトリでは通り、何もしていない作業ディレクトリでは落ちるか。
+    notes を渡すと、何もしなくても通る判定（negate なし）の名前を入れる（入力ファイルの有無など情報のない判定の発見用。
+    壊してはいけないものを守る判定も同じ形になるため、失敗にはしない）。"""
     ref = task.path.parent.parent / "references" / task.id
     final_file = ref.parent / f"{task.id}.final_answer.txt"
     final = final_file.read_text(encoding="utf-8") if final_file.is_file() else ""
@@ -389,6 +391,8 @@ def sample_test(task: Task, graders: list) -> str:
                 return f"正解例で採点が通らない: {failed}"
             if not use_ref and graders and not failed:
                 return "何もしなくても採点が通る"
+            if not use_ref and notes is not None:
+                notes += [g.label() for g, r in zip(graders, rec.grader_results, strict=True) if r["status"] == "pass" and not g.negate]
     return ""
 
 
@@ -408,13 +412,13 @@ def check_written(task_path: Path) -> str:
     return sample_test(task, declarative) if declarative else ""
 
 
-def selftest(task: Task) -> str | None:
+def selftest(task: Task, notes: list[str] | None = None) -> str | None:
     """人が確認したあとで、採点スクリプトを含む結果の判定が正解例で通り、何もしなければ落ちるかを確かめる。
     正解例（harvest が書き出す references/<id>/）がないタスクは None（対象外）。"""
     refs = task.path.parent.parent / "references"
     if not ((refs / task.id).is_dir() or (refs / f"{task.id}.final_answer.txt").is_file()):  # 確認の質問を見るタスクは最終応答の例だけ
         return None
-    return sample_test(task, [g for g in task.graders if g.kind == "outcome" and g.type != "llm"])
+    return sample_test(task, [g for g in task.graders if g.kind == "outcome" and g.type != "llm"], notes)
 
 
 # ---------------------------------------------------------------- 4. 書き出し

@@ -1,10 +1,10 @@
 """実行の司令塔: タスク × プロファイル × 試行回数 を回し、記録・採点・集計する。
 
 トークン節約の仕組み（評価の正しさを損なわないものだけ）:
-- キャッシュ: タスク・フィクスチャ・グレーダー・プロファイル・配布物・CLI 版・試行番号・判定設定が
+- キャッシュ: タスク・フィクスチャ・グレーダー・プロファイル・配布物・CLI 版・試行番号・経路の変数・判定設定が
   すべて同じ試行は、過去の有効な結果を再利用する（変更していない組み合わせは再実行しない）
-- LLM 判定は、コード判定がすべて合格した試行にだけ実行する（合否は変わらない）
-- 試行ごと（max_turns / max_budget_usd / timeout_s）と実行全体（--max-cost-usd）に上限
+- LLM 判定は、コード判定がすべて合格した試行にだけ実行する（配布物がないと通らない判定の不合格は除く。合否は変わらない）
+- 試行ごと（max_turns / max_budget_usd / timeout_s）・実行全体（--max-cost-usd）・口座ごとの月（--monthly-budget-usd）に上限
 - 異常終了（レート制限など）だけ再試行する。失敗した試行を「良い結果が出るまで」再実行はしない
 """
 from __future__ import annotations
@@ -148,7 +148,7 @@ def uses_llm(task: Task) -> bool:
 
 def cache_key(task: Task, profile: Profile, version: str | None, trial: int, opt: RunOptions, judge_sig: str = "",
               route: str = "") -> str:
-    """route: 試行に渡る経路の変数の名前（route_signature）。API キー・Bedrock などの経路を変えれば再実行する。"""
+    """route: 試行に渡る経路の変数の要約（route_signature: 名前と、秘密でないものは値のハッシュ）。経路を変えれば再実行する。"""
     judge = f"{opt.llm}:{opt.judge_agent}:{opt.judge_model}:{judge_sig}" if uses_llm(task) else "-"
     raw = "|".join([CACHE_SCHEMA, task.id, task.content_hash(), profile.id, profile.content_hash(), str(version), str(trial), judge,
                     route])
@@ -183,7 +183,7 @@ class Runner:
         if opt.monthly_budget_usd is not None:
             agents = {p.agent for _, p in self.pairs} | ({opt.judge_agent} if opt.llm else set())
             self.month_spent = {a: month_spent(self.ledger, a) for a in sorted(agents)}
-        # 判定の結果に効きうるもの（借りるプロファイルの環境変数・実行ファイル・経路の変数の名前）をキャッシュキーに入れる
+        # 判定の結果に効きうるもの（借りるプロファイルの環境変数・実行ファイル・経路の変数の要約）をキャッシュキーに入れる
         self.judge_sig = hashlib.sha256(json.dumps(
             [jp.id if jp else None, jp.env if jp else None, jp.env_unset if jp else None,
              jp.executable if jp else None, opt.judge_executable, route_signature(self.judge_route_profile(), dict(os.environ))],

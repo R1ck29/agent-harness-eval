@@ -274,7 +274,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <line x1="250" y1="128" x2="250" y2="162" class="ln" marker-end="url(#m5)"/><text x="262" y="149" class="t-sm">いいえ</text>
 <rect x="100" y="164" width="300" height="36" rx="6" class="box"/><text x="250" y="187" text-anchor="middle">コード判定をすべて実行</text>
 <line x1="250" y1="200" x2="250" y2="230" class="ln" marker-end="url(#m5)"/>
-<rect x="100" y="232" width="300" height="44" rx="6" class="dec"/><text x="250" y="252" text-anchor="middle">コード判定が全合格</text><text x="250" y="268" text-anchor="middle">かつ 異常終了なし？</text>
+<rect x="100" y="232" width="300" height="44" rx="6" class="dec"/><text x="250" y="252" text-anchor="middle">コード判定が全合格※</text><text x="250" y="268" text-anchor="middle">かつ 異常終了なし？</text>
 <line x1="400" y1="254" x2="498" y2="254" class="ln-acc" marker-end="url(#m5a)"/><text x="449" y="247" text-anchor="middle" class="t-sm">いいえ</text>
 <rect x="500" y="232" width="280" height="44" rx="6" class="acc"/><text x="640" y="251" text-anchor="middle" class="t-acc">LLM 判定は呼ばない（節約）</text><text x="640" y="267" text-anchor="middle" class="t-sm">skipped_prior_fail＝不合格扱い</text>
 <polyline points="780,254 800,254 800,398 402,398" class="ln-acc" marker-end="url(#m5a)"/>
@@ -291,7 +291,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <line x1="250" y1="492" x2="250" y2="528" class="ln" marker-end="url(#m5)"/><text x="262" y="515" class="t-sm">はい</text>
 <rect x="175" y="530" width="150" height="36" rx="18" class="box"/><text x="250" y="553" text-anchor="middle" class="ok">合格</text>
 </svg></div>
-<figcaption>スコアの分母は実際に判定したグレーダーだけです（呼ばなかった LLM 判定は入れません）。UNKNOWN（判定モデルが判断できなかった）は合格にしません。<code>--no-llm</code> のときの LLM 判定は not_run としてスコアの分母から外し、実行されたグレーダーが 1 つもない試行は not_graded として除外します。</figcaption>
+<figcaption>※ 配布物がないと通らない判定（スキルなどを使うことの要求）の不合格では LLM 判定を省きません（基準との比較用スコアに必要なため）。スコアの分母は実際に判定したグレーダーだけです（呼ばなかった LLM 判定は入れません）。UNKNOWN（判定モデルが判断できなかった）は合格にしません。<code>--no-llm</code> のときの LLM 判定は not_run としてスコアの分母から外し、実行されたグレーダーが 1 つもない試行は not_graded として除外します。</figcaption>
 </figure>
 <table>
 <tr><th>試行の状態</th><th>例</th><th>pass@1・pass^k の分母</th><th>キャッシュ</th></tr>
@@ -344,14 +344,14 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <rect x="580" y="130" width="300" height="56" rx="6" class="box"/><text x="730" y="153" text-anchor="middle">エージェントを実行</text><text x="730" y="172" text-anchor="middle" class="t-sm">有効な結果をキャッシュに保存</text>
 <text x="450" y="222" text-anchor="middle" class="t-sm">キーの材料：タスク・フィクスチャ・採点スクリプト・プロファイル・配布物の中身・CLI 版・試行番号・経路の変数・（llm があれば）判定の設定</text>
 </svg></div>
-<figcaption>経路の変数（API キー・Bedrock の切り替え・<code>ANTHROPIC_DEFAULT_SONNET_MODEL</code> など）はキーに入ります（秘密の値は使わず名前だけ）。ただしサービス側でモデルの別名（sonnet など）が指す実体が変わっても、キーは変わりません。モデル移行の評価やリリース判定では <code>--no-cache</code> を付けるか、モデル ID を固定してください。</figcaption>
+<figcaption>経路の変数（API キー・Bedrock の切り替え・<code>ANTHROPIC_DEFAULT_SONNET_MODEL</code> など）はキーに入ります（キー・トークンは名前だけ、それ以外は値のハッシュも）。ただしサービス側でモデルの別名（sonnet など）が指す実体が変わっても、キーは変わりません。モデル移行の評価やリリース判定では <code>--no-cache</code> を付けるか、モデル ID を固定してください。</figcaption>
 </figure>
 <table>
 <tr><th>トークンを使う場所</th><th>節約の仕組み</th><th>評価の正しさへの影響</th></tr>
 <tr><td>エージェントの試行</td><td>キャッシュ（入力が同じなら再利用）</td><td>なし</td></tr>
 <tr><td>エージェントの試行</td><td>スモーク（1 試行）とフル（3 試行）の使い分け</td><td>スモークは傾向の確認用と割り切る。判断はフルで</td></tr>
 <tr><td>エージェントの試行</td><td>試行ごと（max_turns・max_budget_usd・timeout_s）・実行全体（--max-cost-usd）・月（--monthly-budget-usd）の上限</td><td>上限到達は「不合格」または「未実行」として明示</td></tr>
-<tr><td>LLM 判定</td><td>コード判定が全合格のときだけ呼ぶ</td><td>なし（不合格の試行は判定しても合否が変わらない）</td></tr>
+<tr><td>LLM 判定</td><td>コード判定が全合格のときだけ呼ぶ（配布物がないと通らない判定の不合格は除く）</td><td>なし（不合格の試行は判定しても合否が変わらない）</td></tr>
 <tr><td>LLM 判定</td><td>haiku・ツールなし・1 ターン・対象は最大 2 万文字（Claude Code で判定する場合）</td><td><code>calibrate</code> で人手ラベルとの一致率を確認</td></tr>
 <tr><td>再試行</td><td>レート制限・過負荷で落ちた試行だけ</td><td>なし（不合格を引き直さない）</td></tr>
 <tr><td>（入れていない）</td><td>失敗が出たらそのタスクの残り試行を打ち切る</td><td>pass@1 と平均スコアが悪い側に偏るため採用しない</td></tr>

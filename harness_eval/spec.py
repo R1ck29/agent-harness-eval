@@ -427,16 +427,22 @@ def lint(tasks: list[Task], profiles: list[Profile]) -> list[str]:
 
 
 _EXEC_CONFIG = {"settings.json", "settings.local.json", ".mcp.json", "mcp.json", "hooks.json", "config.toml"}
+_EXEC_ARGS = {"--mcp-config", "--settings", "--plugin-dir", "-c", "--config"}  # CLI に hooks・MCP・プラグインを渡しうる引数
 
 
 def _executable_parts(p: Profile) -> list[str]:
-    """プロファイルの install のうち、コマンドを実行させうるもの（run 手順、hooks・MCP を定義しうる設定ファイル）。"""
+    """プロファイルのうち、コマンドを実行させうるもの（install の run、hooks・MCP を定義しうる設定ファイル（コピー元・先の名前）、
+    それらを渡す追加引数）。"""
     found = ["install の run"] if any("run" in s for s in p.install) else []
     for step in p.install:
         if "copy" not in step:
             continue
-        src = Path(str(step["copy"]).replace("{profile_dir}", str(p.base_dir)))
+        src = Path(str(step["copy"]).replace("{profile_dir}", str(p.base_dir)).replace("{python}", sys.executable))
         src = src if src.is_absolute() else p.base_dir / src
         files = [src] if src.is_file() else (sorted(src.rglob("*")) if src.is_dir() else [])
         found += [f.name for f in files if f.name in _EXEC_CONFIG]
+        dst = Path(str(step.get("to", ""))).name
+        if dst in _EXEC_CONFIG:
+            found.append(dst)
+    found += [f"extra_args の {a}" for a in p.extra_args if a.split("=")[0] in _EXEC_ARGS]
     return list(dict.fromkeys(found))

@@ -43,10 +43,13 @@ def cmd_validate(a) -> int:
     from .harvest import selftest
     bad = 0
     for t in tasks:  # 採点スクリプトを実行するので、harvest の下書きは内容を確認してから使う
-        r = selftest(t)
+        notes: list[str] = []
+        r = selftest(t, notes)
         if r is not None:
             print(f"  selftest {t.id}: {'OK' if not r else r}")
             bad += bool(r)
+            if notes:
+                print(f"    注意: 何もしなくても通る判定 {notes}（入力の有無など情報のない判定なら外す。壊してはいけないものを守る判定なら意図どおり）")
     return 1 if bad else 0
 
 
@@ -150,7 +153,7 @@ def cmd_gate(a) -> int:
         raise SpecError("--min-tasks は 2 以上（区間を出すには比較できるタスクが 2 件以上必要）")
     _, cur = load_run(Path(a.current))
     _, prev = load_run(Path(a.previous))
-    r = gate(cur, prev, a.metric, a.margin, a.min_tasks, a.hard_category or HARD_CATEGORIES)
+    r = gate(cur, prev, a.metric, a.margin, a.min_tasks, a.hard_category or ())
     label = {"pass": "通過", "fail": "不通過", "inconclusive": "判定不能（データ不足）"}[r["decision"]]
     print(f"ゲート{label}: {a.metric} の前回との差（95% 区間）を非劣性マージン {a.margin:g} で判定")
     for pid, v in r["profiles"].items():
@@ -167,7 +170,7 @@ def cmd_gate(a) -> int:
 
 
 def cmd_doctor(a) -> int:
-    """環境検証（設計書のフェーズ0）。--live でプロファイルごとに最小の試行を 1 回だけ実行する。"""
+    """環境検証。CLI の版と経路の変数を確かめ（費用 0）、--live でプロファイルごとに最小の試行を 1 回だけ実行する。"""
     print(f"harness-eval {__version__} / Python {sys.version.split()[0]} / PyYAML {yaml.__version__}")
     profiles = load_profiles(a.profiles)
     from .adapters import VERIFIED_VERSIONS, get_adapter, older_than_verified
@@ -325,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--min-tasks", type=int, default=10,
                     help="判定に必要な比較できたタスク数（既定 10。少ないと区間が狭く出すぎるため判定不能にする）")
     sp.add_argument("--hard-category", action="append",
-                    help=f"1 件でもあれば不通過にする失敗分類（複数可。既定 {list(HARD_CATEGORIES)}）")
+                    help=f"1 件でもあれば不通過にする失敗分類を追加（複数可。{list(HARD_CATEGORIES)} は常に含む）")
     sp.set_defaults(fn=cmd_gate)
     sp = sub.add_parser("doctor", help="環境検証（CLI・認証・配布物の読み込み）")
     sp.add_argument("--profiles", nargs="+", required=True)

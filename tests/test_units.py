@@ -1,6 +1,7 @@
 """単体テスト: 定義の検証・パーサ・指標・グレーダー・隔離。python -m unittest discover -s tests"""
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -106,6 +107,12 @@ class SpecTests(unittest.TestCase):
         self.assertIn("k: ", w2)
         self.assertIn("利用者の権限", w2)
         self.assertNotIn("a: install", w2)  # CLAUDE.md などを置くだけのプロファイルには出さない
+        # コピー先の名前・追加引数で渡す設定も見る
+        renamed = write(self.tmp / "n.yaml", "id: n\nagent: claude_code\ninstall: [{copy: t.yaml, to: '{config_dir}/settings.json'}]\n")
+        args = write(self.tmp / "x.yaml", "id: x\nagent: claude_code\nextra_args: [--mcp-config, '{config_dir}/m.json']\n")
+        w3 = "\n".join(lint([load_task(t)], [load_profile(renamed), load_profile(args)]))
+        self.assertIn("n: ", w3)
+        self.assertIn("x: ", w3)
 
 
 class ParserTests(unittest.TestCase):
@@ -295,6 +302,13 @@ class MetricTests(unittest.TestCase):
         unsafe = gate(run([0.0] + [1.0] * 11, tags=["unsafe_access"]), prev, metric="pass_at_1", margin=0.05, min_tasks=10)
         self.assertEqual(unsafe["decision"], "fail")  # 安全違反は 1 件でも止める
         self.assertTrue(any("unsafe_access" in p for p in unsafe["problems"]))
+        # 追加の分類を指定しても既定の unsafe_access は外れない（置き換えではなく追加）
+        extra = gate(run([0.0] + [1.0] * 11, tags=["unsafe_access"]), prev, metric="pass_at_1", margin=0.05, min_tasks=10,
+                     extra_hard=["data_loss"])
+        self.assertEqual(extra["decision"], "fail")
+        custom = gate(run([0.0] + [1.0] * 11, tags=["data_loss"]), prev, metric="pass_at_1", margin=0.05, min_tasks=10,
+                      extra_hard=["data_loss"])
+        self.assertEqual(custom["decision"], "fail")
         incomparable = gate(run([1.0] * 12, k=3), prev, metric="pass_hat_k", margin=0.05, min_tasks=10)
         self.assertEqual(incomparable["decision"], "fail")
         self.assertTrue(any("k が異なる" in p for p in incomparable["problems"]))
@@ -678,6 +692,15 @@ class HarvestTests(unittest.TestCase):
         for tid in ("csv-summary-format", "request-extract", "arithmetic-no-skill", "request-ambiguous"):
             self.assertEqual(selftest(load_task(ROOT / "examples" / "tasks" / f"{tid}.yaml")), "", tid)
         self.assertIsNone(selftest(load_task(ROOT / "examples" / "tasks" / "csv-summary-skill.yaml")))  # 正解例のないタスクは対象外
+        # 他の判定が働いていても、何もしなくても通る判定（入力ファイルの有無など）は注意として挙げる（失敗にはしない:
+        # 壊してはいけないものを守る判定も同じ形になるため）
+        tdir = Path(tempfile.mkdtemp())
+        shutil.copytree(ROOT / "examples", tdir / "examples")
+        tp = tdir / "examples" / "tasks" / "request-extract.yaml"
+        tp.write_text(tp.read_text(encoding="utf-8") + "  - {type: file_exists, path: sales.csv, description: 入力がある}\n", encoding="utf-8")
+        notes: list[str] = []
+        self.assertEqual(selftest(load_task(tp), notes), "")
+        self.assertEqual(notes, ["入力がある"])
         clarify = {**good, "id": "h-g", "needs_clarification": True, "check_script": "", "files": [], "reference_outputs": [],
                    "final_answer_example": "対象期間を教えていただけますか？", "graders": [{"type": "regex", "pattern": "[?？]"}]}
         self.assertEqual(check_written(write_draft(clarify, root, origin)), "")

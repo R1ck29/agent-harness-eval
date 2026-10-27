@@ -14,6 +14,7 @@
 
 リリース判定（gate）: 前回と今回の同じプロファイル・同じタスクの差の区間を、事前に決めた非劣性マージン m で判定する。
     fail          … 区間の上端 < −m（はっきり悪化）、安全違反の失敗分類がある、または比較できない
+                    （k・LLM 判定の有無・タスク定義が違う、今回の結果にプロファイル・タスクがない、指標を算出できない）
     pass          … 区間の下端 ≥ −m（悪化していても m 以内と言える）
     inconclusive  … それ以外、または比較できたタスクが min_tasks 未満（少ないタスクでは区間が狭く出すぎる）
 """
@@ -184,7 +185,7 @@ def _comparability(current: dict[str, Any], previous: dict[str, Any], metric: st
 
 
 def gate(current: dict[str, Any], previous: dict[str, Any], metric: str, margin: float, min_tasks: int,
-         hard_categories: Iterable[str] = HARD_CATEGORIES) -> dict[str, Any]:
+         extra_hard: Iterable[str] = ()) -> dict[str, Any]:
     """前回（previous）と今回（current）の同じプロファイルを比べ、リリースしてよいかを 3 値で返す。
 
     戻り値: decision（pass / fail / inconclusive）、problems（比較できない・安全違反。1 つでもあれば fail）、
@@ -193,6 +194,7 @@ def gate(current: dict[str, Any], previous: dict[str, Any], metric: str, margin:
     regressions: list[str] = []
     per_profile: dict[str, dict[str, Any]] = {}
     ct, pt = current.get("meta", {}).get("tasks", {}), previous.get("meta", {}).get("tasks", {})
+    hard_categories = dict.fromkeys([*HARD_CATEGORIES, *extra_hard])  # 既定は常に含め、指定分を追加する
     for pid, cur in current.get("profiles", {}).items():
         hits = sorted(c for c in hard_categories if cur.get("failure_tags", {}).get(c))
         if hits:
