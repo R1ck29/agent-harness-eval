@@ -110,7 +110,7 @@ class E2E(unittest.TestCase):
         self.assertEqual(len(self.argv_log.read_text().splitlines()), n_calls)
         self.assertEqual(s2["profiles"]["claude-baseline"]["pass_hat_k"], P["claude-baseline"]["pass_hat_k"])
         runs = self.runs()
-        gate_args = ["--margin", "0.1", "--min-tasks", "1"]
+        gate_args = ["--margin", "0.1", "--min-tasks", "2"]
         self.assertEqual(run_cli("gate", "--current", str(runs[-1]), "--previous", str(runs[0]), *gate_args)[0], 0)
         code, out = run_cli("gate", "--current", str(runs[-1]), "--previous", str(runs[0]), "--margin", "0.1")
         self.assertEqual(code, 3, out)  # 5 タスクでは既定の最低 10 タスクに届かない → 判定不能

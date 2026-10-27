@@ -81,22 +81,22 @@ def select_pairs(tasks: list[Task], profiles: list[Profile], opt: RunOptions) ->
 
 
 def schedule(pairs: list[tuple[Task, Profile]], trials: int, seed: int) -> list[tuple[Task, Profile, int]]:
-    """実行順。同じ（試行, タスク）の各プロファイルを続けて実行し、先に走るプロファイルをブロックごとに巡回させる。
-    プロファイルをまとめて順に回すと、時間とともに変わる条件（API の混雑・モデルの更新）が差に混ざるため。
-    巡回の起点は seed で決める（同じ seed なら同じ順）。"""
+    """実行順。同じ（試行, タスク）の各プロファイルを続けて実行し、先に走るプロファイルを試行ごとに巡回させる
+    （タスク内で各プロファイルが先頭になる回数がそろう）。プロファイルをまとめて順に回すと、時間とともに変わる条件
+    （API の混雑・モデルの更新）が差に混ざるため。巡回の起点はタスクごとにずらし、seed で決める（同じ seed なら同じ順）。"""
     by_task: dict[str, list[tuple[Task, Profile]]] = {}
     for t, p in pairs:
         by_task.setdefault(t.id, []).append((t, p))
+    rng = random.Random(seed)
     order = sorted({p.id for _, p in pairs})
-    random.Random(seed).shuffle(order)
+    rng.shuffle(order)
+    offsets = {tid: rng.randrange(len(items)) for tid, items in by_task.items()}
     jobs: list[tuple[Task, Profile, int]] = []
-    block = 0
     for i in range(trials):
-        for items in by_task.values():
+        for tid, items in by_task.items():
             items = sorted(items, key=lambda tp: order.index(tp[1].id))
-            r = block % len(items)
+            r = (i + offsets[tid]) % len(items)
             jobs += [(t, p, i) for t, p in items[r:] + items[:r]]
-            block += 1
     return jobs
 
 

@@ -153,16 +153,19 @@ def deltas(summary: dict[str, Any], baseline: str) -> dict[str, dict[str, Any]]:
         if pid == baseline:
             continue
         common = [t for t in tv if t in base]
-        row: dict[str, Any] = {"common_tasks": len(common)}
+        # v0.3.0 までの summary.json には比較用の値がない → 全判定の値で計算し、comparable: False で知らせる
+        cmp = all("pass_at_1_cmp" in tv[t] and "pass_at_1_cmp" in base[t] for t in common)
+        sfx = "_cmp" if cmp else ""
+        row: dict[str, Any] = {"common_tasks": len(common), "comparable": cmp}
         for m in METRICS:
-            diffs = [d for t in common if (d := _diff(tv[t], base[t], m + "_cmp")) is not None]
+            diffs = [d for t in common if (d := _diff(tv[t], base[t], m + sfx)) is not None]
             ci = paired_bootstrap(diffs)
             row[m] = ci.estimate
             row[m + "_ci"] = [ci.low, ci.high] if ci.low is not None else None
         pa, pb = summary["profiles"][pid], summary["profiles"][baseline]
         row["cost_per_pass_usd"] = (pa["cost_per_pass_usd"] - pb["cost_per_pass_usd"]
                                     if pa["cost_per_pass_usd"] is not None and pb["cost_per_pass_usd"] is not None else None)
-        row["per_task"] = {t: {m: _diff(tv[t], base[t], m + "_cmp") for m in ("pass_at_1", "pass_hat_k")} for t in common}
+        row["per_task"] = {t: {m: _diff(tv[t], base[t], m + sfx) for m in ("pass_at_1", "pass_hat_k")} for t in common}
         out[pid] = row
     return out
 
