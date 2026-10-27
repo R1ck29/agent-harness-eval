@@ -87,7 +87,11 @@ def render(summary: dict[str, Any], records: list[TrialRecord], baseline: str | 
                            f"<td class='n'>{_delta(row['cost_per_pass_usd'], pct=False, lower_better=True)}</td></tr>")
             out.append("</table></div><div class='mut'>Δ は両方で値があるタスクだけで計算。括弧内はタスク単位のブートストラップによる 95% 区間"
                        "（区間が 0 をまたぐなら差があるとは言えない）。配布物がないと通らない判定（スキル・サブエージェント・hook を"
-                       "使うことの要求）は両側とも除いて比べる。合格あたりコストは負の値ほど安い。</div>")
+                       "使うことの要求）は両側とも除いて比べる。合格あたりコストは負の値ほど安い。"
+                       "タスクが少ない（目安 10〜20 件）と区間は実際より狭く出やすい。</div>")
+            if not all(row["comparable"] for row in d.values()):
+                out.append("<div class='warn'>この結果は v0.3.0 以前の形式のため、配布物がないと通らない判定を除けず、"
+                           "全判定の値で Δ を計算しています（基準との差が大きめに出ることがあります）。</div>")
 
     tids = sorted({t for v in summary["tasks"].values() for t in v})
     out.append("<h2>タスク別（pass^k ／ pass@1 ／ 合格数/有効試行）</h2><div class='wrap'><table><tr><th>タスク</th>"

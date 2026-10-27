@@ -146,6 +146,8 @@ def cmd_gate(a) -> int:
     """前回と今回を比べ、pass（0）/ fail（1）/ inconclusive（3）を終了コードで返す。"""
     if not 0 <= a.margin < 1:
         raise SpecError("--margin は 0 以上 1 未満（例: 0.05 = 5 ポイントまでの悪化を許容）")
+    if a.min_tasks < 2:
+        raise SpecError("--min-tasks は 2 以上（区間を出すには比較できるタスクが 2 件以上必要）")
     _, cur = load_run(Path(a.current))
     _, prev = load_run(Path(a.previous))
     r = gate(cur, prev, a.metric, a.margin, a.min_tasks, a.hard_category or HARD_CATEGORIES)

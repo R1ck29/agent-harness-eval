@@ -259,6 +259,12 @@ class MetricTests(unittest.TestCase):
         d = deltas(s, "base")["harness"]
         self.assertEqual(d["pass_at_1"], 0.0)  # スキルを呼んだこと自体は差に数えない（成果物は同じ）
         self.assertIsNone(d["pass_at_1_ci"])  # 1 タスクでは区間を出さない（タスク間のばらつきが測れない）
+        self.assertTrue(d["comparable"])
+        # 比較用の値がない旧形式（v0.3.0）の summary.json では、全判定の値で計算し、その旨を印で残す
+        old = {"profiles": s["profiles"], "tasks": {pid: {t: {k: v for k, v in tv.items() if not k.endswith("_cmp")}
+                                                            for t, tv in ts.items()} for pid, ts in s["tasks"].items()}}
+        d_old = deltas(old, "base")["harness"]
+        self.assertEqual((d_old["pass_at_1"], d_old["comparable"]), (1.0, False))
 
     def test_gate_decisions(self):
         def run(pass_rate: list[float], tags=None, k=1, llm=False):
@@ -432,8 +438,9 @@ class ScheduleTests(unittest.TestCase):
         for blk in blocks:  # 各ブロックは同じタスク・同じ試行の 2 プロファイル
             self.assertEqual({(t.id, i) for t, _, i in blk}, {(blk[0][0].id, blk[0][2])})
             self.assertEqual({p.id for _, p, _ in blk}, {"base", "harness"})
-        firsts = [blk[0][1].id for blk in blocks]
-        self.assertEqual(firsts.count("base"), firsts.count("harness"))  # 先に走る回数が同じ
+        for tid in ("a", "b"):  # タスクごとに、先に走るプロファイルが試行ごとに入れ替わる（pass^k の中で順序の偏りを打ち消す）
+            firsts = [blk[0][1].id for blk in blocks if blk[0][0].id == tid]
+            self.assertEqual(sorted(firsts), ["base", "harness"], tid)
         self.assertEqual([(t.id, p.id, i) for t, p, i in jobs], [(t.id, p.id, i) for t, p, i in schedule(pairs, 2, 0)])
 
     def test_profile_targets_respected(self):
