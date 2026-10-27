@@ -418,4 +418,25 @@ def lint(tasks: list[Task], profiles: list[Profile]) -> list[str]:
             warns.append(f"{t.id}: allow_tools が空です。-p モードでは承認が必要なツール（Write/Edit/Bash 等）は拒否されます")
     if not any(not p.install for p in profiles):
         warns.append("ハーネスなし（install が空）のベースラインプロファイルがありません。Δ の比較対象になります")
+    for p in profiles:
+        parts = _executable_parts(p)
+        if parts:
+            warns.append(f"{p.id}: 実行される部品 {parts} を含みます。利用者の権限で動き、sandbox はないため、"
+                         "社内でレビュー済みの配布物だけを評価してください")
     return warns
+
+
+_EXEC_CONFIG = {"settings.json", "settings.local.json", ".mcp.json", "mcp.json", "hooks.json", "config.toml"}
+
+
+def _executable_parts(p: Profile) -> list[str]:
+    """プロファイルの install のうち、コマンドを実行させうるもの（run 手順、hooks・MCP を定義しうる設定ファイル）。"""
+    found = ["install の run"] if any("run" in s for s in p.install) else []
+    for step in p.install:
+        if "copy" not in step:
+            continue
+        src = Path(str(step["copy"]).replace("{profile_dir}", str(p.base_dir)))
+        src = src if src.is_absolute() else p.base_dir / src
+        files = [src] if src.is_file() else (sorted(src.rglob("*")) if src.is_dir() else [])
+        found += [f.name for f in files if f.name in _EXEC_CONFIG]
+    return list(dict.fromkeys(found))

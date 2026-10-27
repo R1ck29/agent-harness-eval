@@ -43,10 +43,22 @@ def route_variables(profile: Profile, environ: dict[str, str]) -> tuple[list[str
     return chosen, [n for n in present if n not in chosen]
 
 
+_SECRET = ("KEY", "TOKEN", "HEADERS")  # 名前にこれを含む変数は秘密として扱い、値をキャッシュキーにも使わない
+
+
 def route_signature(profile: Profile, environ: dict[str, str]) -> str:
-    """試行に渡る経路の変数の「名前」の一覧（キャッシュキー用）。経路を変えれば再実行される。値は含めない。"""
+    """試行に渡る経路の変数のキャッシュキー用の要約。経路を変えれば再実行される。
+    秘密（キー・トークン・ヘッダ）は名前だけ。秘密でないもの（モデルの別名の実体・接続先・切り替え）は値の短いハッシュも含め、
+    値だけを変えても再実行されるようにする（値そのものは残さない）。"""
     chosen, undeclared = route_variables(profile, environ)
-    return ",".join(sorted(chosen + undeclared))
+    parts = []
+    for name in sorted(chosen + undeclared):
+        if any(s in name for s in _SECRET):
+            parts.append(name)
+            continue
+        value = profile.env.get(name, environ.get(name, ""))
+        parts.append(f"{name}#{hashlib.sha256(value.encode()).hexdigest()[:8]}")
+    return ",".join(parts)
 
 
 @dataclass
