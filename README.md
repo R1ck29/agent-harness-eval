@@ -4,15 +4,17 @@ Claude Code と Codex の「ハーネス」（CLAUDE.md / AGENTS.md、Skills、S
 **同じタスク定義で、配布される形のまま実行して採点し、変更前後やハーネスなしと比較する**ための評価ツールです。
 
 - 1 コマンドで「タスク × 設定プロファイル × 試行回数」を実行し、pass@1・pass^k・コスト・時間・失敗分類を出す
+- 比較はタスク単位の 95% 区間つき。リリース判定は事前に決めたマージンで 通過／不通過／判定不能 の 3 値
 - 各試行は一時ホーム・一時作業ディレクトリで実行し、普段の `~/.claude` / `~/.codex` には触らない
 - 採点はコード判定が基本（独自スクリプトも可）。LLM 判定は補助
 - 結果は 1 ファイルの HTML レポート（外部通信なし）と JSON に残る
 - 依存は Python 3.10+ と PyYAML だけ。エージェントは各 CLI（`claude -p` / `codex exec --json`）を直接呼ぶ
 
-設計書「Agent Harness Eval 設計書（Claude Code / Codex 対応）」の「自作レイヤー」と「CLI 直呼びアダプタ」を実装したものです。
-Promptfoo などの外部エンジンは使いません（理由は末尾の「採らなかった案」）。
+設計書「Agent Harness Eval 設計書（Claude Code / Codex 対応）」の実装に、以前の評価基盤の試み（Phase 0）の評価方法を統合したものです。
+Promptfoo・BenchFlow などの外部エンジンは使いません。
 
 > **図解ガイド**: [`docs/guide.html`](docs/guide.html) をブラウザで開くと、流れと仕組みを図で確認できます（1 ファイル・外部通信なし）。
+> **設計記録**: [`docs/design.html`](docs/design.html) に、既存ツールとの比較・評価の方法・採らなかった案と理由・残るリスクをまとめています。
 
 ### 全体像
 
@@ -49,7 +51,7 @@ python -m harness_eval --version
 
 `pip install .` すると `harness-eval` コマンドとしても使えます（以降の例の `python -m harness_eval` と同じ）。
 
-評価するエージェントの CLI が PATH にあること（`claude --version` / `codex --version`）。動作を確認した版は Claude Code 2.1.304〜2.1.306（`hook_used` は 2.1.306）、Codex 0.163.0 です。
+評価するエージェントの CLI が PATH にあること（`claude --version` / `codex --version`）。起動フラグと出力形式を実機で確認した版は Claude Code 2.1.304〜2.1.308（`hook_used` は 2.1.306）、Codex 0.163.0 です。これより古い版は `doctor` が知らせます（`doctor --live` で実際に動くか確かめてください）。
 PATH にない場合はプロファイルの `executable:` で指定します。
 
 ## 2. 5 分で試す（同梱サンプル）
@@ -58,9 +60,9 @@ PATH にない場合はプロファイルの `executable:` で指定します。
 
 ```
  harvest ──▶ 人が確認 ──▶ validate（--selftest）──▶ doctor --live ──▶ plan ──▶ run（スモーク）──▶ run（フル）──▶ gate
-  実際の依頼    架空化した    YAML の      隔離環境で        呼び出し回数   1 試行・コード     3 試行・LLM      前回より
-  から架空の    下書きを      誤りを検出    認証と配布物の     と概算費用を   判定のみ。普段     判定あり。       pass^k が下がったら
-  タスク下書き  読んで直す    （費用 0。--selftest で採点スクリプトを正解例で確認）    読み込みを確認     確認（費用 0） はここだけ回す    リリース前だけ    終了コード 1
+  実際の依頼    架空化した    YAML の      隔離環境で        呼び出し回数   1 試行・コード     3 試行・LLM      前回と比べ
+  から架空の    下書きを      誤りを検出    認証と配布物の     と概算費用を   判定のみ。普段     判定あり。       通過 0／不通過 1／
+  タスク下書き  読んで直す    （費用 0。--selftest で採点を正解例で確認）    読み込みを確認     確認（費用 0） はここだけ回す    リリース前だけ    判定不能 3
   （§4.1）                                 （最小呼び出し 1 回/プロファイル）
 ```
 
@@ -68,11 +70,12 @@ PATH にない場合はプロファイルの `executable:` で指定します。
 |---|---|---|
 | `harvest` | タスクを用意するとき（自分の履歴から。履歴がなければ同梱タスク） | 依頼 1 件につき 1〜2 回（書き換え） |
 | `validate` | YAML を書いた・直したとき（harvest の下書きは確認後に `--selftest` で採点も試す） | なし |
-| `doctor --live` | 初回・端末や認証方式を変えたとき | プロファイルごとに 1 回（"OK" と返すだけ） |
+| `doctor` | 初回・端末や認証方式を変えたとき（CLI の版と、経路を変える環境変数の引き継ぎを確認） | なし |
+| `doctor --live` | 同上（隔離環境で認証と配布物の読み込みを実際に確認） | プロファイルごとに 1 回（"OK" と返すだけ） |
 | `plan` | `run` の前に規模と費用を確かめたいとき | なし |
 | `run --tag smoke --no-llm` | 配布物を変えるたび | タスク × プロファイル × 1（変更のない組み合わせはキャッシュ） |
 | `run --trials 3` | リリース前・モデル移行時 | タスク × プロファイル × 3 + LLM 判定 |
-| `gate` | リリース判定（CI など） | なし |
+| `gate --margin <m>` | リリース判定（CI など） | なし |
 | `report` / `calibrate` | レポートの作り直し／LLM 判定と人手ラベルの照合 | なし |
 
 ```bash
@@ -84,7 +87,8 @@ python -m harness_eval validate --tasks my-tasks/tasks --profiles examples/profi
 # ① 定義の検証（YAML の誤り・設計ルール違反の警告）
 python -m harness_eval validate --tasks examples/tasks --profiles examples/profiles
 
-# ② 環境検証：隔離した状態で認証が通るか・配布物が読み込まれるかを、最小の呼び出し 1 回ずつで確認
+# ② 環境検証：CLI の版と経路の変数（費用 0）→ 隔離した状態で認証と配布物の読み込み（最小の呼び出し 1 回ずつ）
+python -m harness_eval doctor --profiles examples/profiles/claude-*.yaml
 python -m harness_eval doctor --profiles examples/profiles/claude-*.yaml --live
 
 # ③ 見積もり：何回エージェントを呼ぶか・キャッシュで何回省けるか・概算費用
@@ -103,6 +107,7 @@ python -m harness_eval run --tasks examples/tasks --profiles examples/profiles/c
 
 **サンプルの中身**（履歴がないときの標準タスクも兼ねる）: 合成の売上 CSV（`examples/fixtures`）を使う 6 タスクと、
 小さな配布物 `examples/harnesses/ds-lite`（CLAUDE.md の出力形式ルール・「曖昧なら確認」ルール + 月別集計スキル）。
+4 タスクには正解例（`examples/references/`）があり、`validate --selftest` で「採点が正解例で通り、何もしなければ落ちる」ことを確かめられます。
 
 | タスク | 想定している実際の依頼 | 主に見ること |
 |---|---|---|
@@ -134,14 +139,14 @@ python -m harness_eval run --tasks examples/tasks --profiles examples/profiles/c
  ① 読み込み     タスク・プロファイルの YAML を検証（未知のキーはエラー）
       │
  ② 組み合わせ   プロファイル × タスク（targets・--tag・--task で絞る）× 試行回数 = 試行の一覧
-      │
+      │         並べ方: 同じ（試行・タスク）の各プロファイルを続けて実行し、先に走るプロファイルを試行ごとに入れ替える（--seed）
  ③ 試行ごとに（--jobs で並列）
       │   ├─ キャッシュにある？ ──yes──▶ 過去の結果を再利用（エージェントは呼ばない）
-      │   ├─ 費用の上限（--max-cost-usd・--monthly-budget-usd）に到達？ ─yes─▶ 未実行（budget_stop）
+      │   ├─ 費用の上限（--max-cost-usd・口座ごとの --monthly-budget-usd）に到達？ ─yes─▶ 未実行（budget_stop）
       │   └─ no ──▶ 1 試行を実行（3.2）──▶ レート制限・過負荷なら待って再試行（--retry-infra 回まで）
       │                                  └─▶ 有効な結果をキャッシュに保存
       │
- ④ 集計         pass@1 / pass^k / Δ / コスト / 失敗分類（除外・未実行は分母に入れない）
+ ④ 集計         pass@1 / pass^k / Δ と 95% 区間 / コスト / 失敗分類（除外・未実行は分母に入れない）
       │
  ⑤ 出力         results/<実行ID>/ に trials.jsonl（1 試行ずつ追記）・summary.json・report.html
 ```
@@ -191,6 +196,7 @@ python -m harness_eval run --tasks examples/tasks --profiles examples/profiles/c
 | `AWS_SHARED_CREDENTIALS_FILE`・`AWS_CONFIG_FILE` | 本物の `~/.aws/…` | ホームを差し替えても Bedrock の認証を使えるように（未設定でファイルがあるときだけ） |
 | `CLAUDECODE` など親セッションの変数 | 削除 | Claude Code の中から実行しても入れ子扱いにならないように |
 | プロファイルの `env` | 追加・上書き | Bedrock 設定など |
+| 経路を変える変数（API キー・Bedrock の切り替え・モデルの別名など） | 親の値をそのまま渡す | `env` か `inherit_env`（名前だけ）で宣言する。宣言のない引き継ぎは `doctor` が NG（§5「認証」） |
 
 Claude Code にはさらに `--settings {"syncClaudeAiSkills":false,"syncClaudeAiPlugins":false}` を渡し、claude.ai アカウントから同期されるスキル・プラグインの混入を防ぎます。
 それでも残るもの（同梱スキル・組織の管理設定）があるため、実際に読み込まれた構成要素を試行ごとに記録します（§10）。
@@ -268,6 +274,8 @@ graders:
 
 全グレーダー共通: `weight`（既定 1）、`negate`（判定を反転）、`category`（失敗分類のタグ）、`description`。
 `min`/`max` を省略すると「1 回以上」、`max` だけ書くと「0〜max 回」。
+`skill_used`・`subagent_used`・`hook_used` で 1 回以上を求める判定は「配布物がないと通らない判定」として、配布物なしの基準と比べる Δ では
+両側とも除きます（試行の合否・スコアには入ります）。
 
 ### 採点の流れと試行の扱い
 
@@ -282,6 +290,7 @@ graders:
    ├─ LLM 判定（llm グレーダー）
    │      ├─ --no-llm ─────────────────────▶ not_run（スコアの分母から外す）
    │      ├─ コード判定に不合格 or 異常終了あり ─▶ skipped_prior_fail（不合格扱い。判定は呼ばない＝節約）
+   │      │   （配布物がないと通らない判定だけの不合格では省かない。基準との比較用スコアに必要なため）
    │      ├─ 判定を呼べない（認証など）─────▶【除外】judge_error
    │      └─ 実行 ─▶ PASS / FAIL / UNKNOWN（UNKNOWN は不合格扱い）
    │
@@ -404,10 +413,12 @@ install:                      # 一時ホームへの配布物の展開（上か
   - copy: ../harnesses/ds-lite/skills
     to: "{config_dir}/skills"
   - run: '{python} path/to/installer.py --profile ds --target {config_dir}'   # 社内インストーラをそのまま使う（プロファイルのフォルダで実行）
-env:                          # 追加の環境変数（{…} の置換可）
+env:                          # 追加の環境変数（{…} の置換可）。値を固定してよいものだけ
   CLAUDE_CODE_USE_BEDROCK: "1"
   AWS_REGION: ap-northeast-1
+inherit_env: []               # 親の環境の値を使う経路の変数（名前だけ。例: [ANTHROPIC_API_KEY]。値は書かない）
 env_unset: []                 # 消したい環境変数
+billing: api                  # api（呼び出しごとに課金。月の予算に数える）/ subscription（定額。月の予算に数えない）
 extra_args: []                # CLI に足す引数（{…} の置換可。例: [--mcp-config, "{config_dir}/mcp.json"]）
 permission_mode: null         # Claude Code の --permission-mode
 codex_sandbox: workspace-write
@@ -460,7 +471,7 @@ SKILL.md は共通形式なのでそのまま複製できます（`examples/prof
 | 試行の合格 | スコア 1.0 かつ失敗扱いの異常終了なし |
 | pass@1 | タスクごとに「合格した有効試行 ÷ 有効試行」、全体はタスク平均 |
 | pass^k | タスクごとに k 回続けて合格する確率。有効試行 n・合格 c なら C(c,k)/C(n,k)。n = k なら「全試行合格で 1、それ以外 0」。n < k のタスクは算出しない（レポートに算出できたタスク数を表示）。全体はタスク平均。**一貫性が重要な配布ツールでは主指標** |
-| Δ | 比較プロファイル − 基準プロファイル（両方で値があるタスクだけ） |
+| Δ | 比較プロファイル − 基準プロファイル（両方で値があるタスクだけ）。配布物がないと通らない判定を両側とも除いた値で計算し、タスク単位のブートストラップによる 95% 区間を付ける（区間が 0 をまたげば差があるとは言えない）。v0.3.0 以前の結果では除けないため全判定の値で計算し、レポートに注意を出す |
 | 合格あたりのコスト | 総コスト ÷ 合格試行数。コスト不明の試行があれば出さない（0 で埋めない） |
 | 失敗分類 | 不合格の試行に付くタグ。異常終了の種類（`timeout`・`max_turns`・`budget_exceeded`・`agent_error`・`agent_crash`）と、不合格グレーダーの `category`（既定: `wrong_output`・`process_violation`・`skill_selection`・`delegation`・`hook`） |
 
@@ -483,8 +494,9 @@ pass@1 は「平均的にどれくらいできるか」、pass^k は「k 回続�
 タイムアウト・ターン上限・予算超過は「失敗」として数えます。
 
 **費用**: エージェントと LLM 判定の合計。どちらかが不明な試行が 1 つでもあれば総額は「不明」と表示します。
-Claude Code は CLI が報告する `total_cost_usd`（クライアント側の概算。請求額とは異なりうる）。
-Codex は CLI が費用を出さないため、`pricing`（100 万トークンあたりの単価）を書いたときだけ概算します。
+試行レコードの `cost_source` が出どころです。Claude Code は `client_estimate`（CLI が API 単価で計算した `total_cost_usd`。請求額とは異なりうる。
+サブスクリプションでは呼び出しごとの請求はない）。Codex は CLI が費用を出さないため、`pricing`（100 万トークンあたりの単価）を書いたときだけ
+`token_estimate` として概算します（なければ不明）。
 計算式は「(input − cached) × input単価 + cached × cached単価 + output × output単価」で、
 OpenAI API の usage 定義（cached は input の内数）を前提にしています。社内の請求と照合してから使ってください。
 
@@ -510,6 +522,7 @@ OpenAI API の usage 定義（cached は input の内数）を前提にしてい
  タスク定義 ＋ フィクスチャの中身 ＋ 採点スクリプトの中身
  ＋ プロファイル定義 ＋ 配布物（copy 元・hash_paths）の中身
  ＋ CLI のバージョン ＋ 試行番号
+ ＋ 経路の変数（名前。秘密でないものは値のハッシュも。キー・トークンの値は使わない）
  ＋ （llm グレーダーがあるタスクだけ）判定エージェント・モデル・借りるプロファイルの環境変数・実行ファイル
        │
        └─▶ SHA-256 ─▶ .harness-eval-cache/<キー>.json
@@ -517,17 +530,17 @@ OpenAI API の usage 定義（cached は input の内数）を前提にしてい
 
 | 仕組み | 内容 |
 |---|---|
-| キャッシュ | タスク定義・フィクスチャ・採点スクリプト・プロファイル・配布物・CLI 版・試行番号・判定設定（判定エージェント・モデル・借りるプロファイルの環境変数・実行ファイル）がすべて同じ試行は、過去の有効な結果を再利用（`.harness-eval-cache/`）。**変えた配布物のプロファイルだけ再実行**される。タスクの説明・タグ・`paired_negative` は含めない（書き換えても再実行しない）。グレーダーや採点スクリプトを直すと、そのタスクは全プロファイルで再実行される。`--no-cache` で無効 |
+| キャッシュ | タスク定義・フィクスチャ・採点スクリプト・プロファイル・配布物・CLI 版・試行番号・経路の変数・判定設定（判定エージェント・モデル・借りるプロファイルの環境変数・実行ファイル）がすべて同じ試行は、過去の有効な結果を再利用（`.harness-eval-cache/`）。**変えた配布物のプロファイルだけ再実行**される。タスクの説明・タグ・`paired_negative`、プロファイルの説明・`billing` は含めない（書き換えても再実行しない）。グレーダーや採点スクリプトを直すと、そのタスクは全プロファイルで再実行される。`--no-cache` で無効 |
 | LLM 判定の省略 | コード判定がすべて合格した試行にだけ LLM 判定を実行（不合格の試行は判定しても合否が変わらない）。判定は既定で Claude Code の haiku・ツールなし・1 ターン・対象は最大 2 万文字（`--judge-agent codex` は読み取り専用だがツール・ターンの制限はなく費用も不明） |
 | 2 段構成 | 普段は `--tag smoke --no-llm`（1 試行）、リリース前・モデル移行時だけフル（3 試行 + LLM 判定） |
-| 上限 | 試行ごと（`max_turns`・`max_budget_usd`・`timeout_s`）、実行全体（`--max-cost-usd`）、月（`--monthly-budget-usd`: 費用台帳 `--out/spend.jsonl` の今月分を合計し、残りを上限にする。台帳には再試行・中断・`doctor` を含め費用が発生するたびに追記。`--out` を変えると別の台帳になる。`plan` で残りを確認できる）。到達後の試行は未実行として除外。費用が分からない試行（pricing なしの Codex、Codex での判定）は上限の計算に入らず、`--jobs` が 2 以上だと実行中の分だけ超えることがあります（実行前に注意を表示） |
+| 上限 | 試行ごと（`max_turns`・`max_budget_usd`・`timeout_s`）、実行全体（`--max-cost-usd`。推定額の合計で、サブスクリプションも含む）、月（`--monthly-budget-usd`: Claude と Codex を別々の口座として、費用台帳 `--out/spend.jsonl` の今月分を口座ごとに合計し、残りを上限にする。LLM 判定は判定エージェントの口座。`billing: subscription` は数えない。台帳には再試行・中断・`doctor`・`harvest` を含め費用が発生するたびに追記。`--out` を変えると別の台帳になる。`plan` で口座ごとの残りを確認できる）。到達後の試行は未実行として除外。費用が分からない試行（pricing なしの Codex、Codex での判定）は上限の計算に入らず、`--jobs` が 2 以上だと実行中の分だけ超えることがあります（実行前に注意を表示） |
 | 見積もり | `plan` で実行前に呼び出し回数・キャッシュ・過去実績からの概算費用を確認 |
 | 再試行 | レート制限・過負荷で落ちた試行だけ再試行（`--retry-infra` 既定 1 回、`--retry-wait-s` 既定 20 秒）。不合格の試行を「良い結果が出るまで」再実行はしない |
 
 **キャッシュに入れないもの**: 除外・未実行・中断した試行と、タイムアウトした試行（一時的な原因でも起きるため）。
 `--no-cache` のときは読みも書きもしません（`doctor` も書きません）。
 
-**キャッシュの注意**: 同じ CLI 版でも、モデルの別名（`sonnet` など）が指す実体が変わると結果は変わりえます。
+**キャッシュの注意**: 環境変数による別名の付け替え（`ANTHROPIC_DEFAULT_SONNET_MODEL` など）はキャッシュキーに入りますが、サービス側でモデルの別名（`sonnet` など）が指す実体が変わっても、キーは変わらず結果は変わりえます。
 モデル移行の評価やリリース判定では `--no-cache` を付けるか、モデル ID を固定してください。
 
 **やらないこと（評価が偏るため）**: 不合格が出た時点でそのタスクの残り試行を打ち切る「早期打ち切り」は入れていません。
@@ -537,7 +550,7 @@ pass^k は 0 で確定しても、pass@1 と平均スコアが不合格側に偏
 
 ```
 results/
-  spend.jsonl      費用台帳（費用が発生するたびに追記。--monthly-budget-usd が使う）
+  spend.jsonl      費用台帳（1 行 {at, usd, run_id, agent, billing}。費用が発生するたびに追記。--monthly-budget-usd が口座ごとに使う）
 results/<実行ID>/
   report.html      レポート
   summary.json     集計（実行メタデータ: CLI 版・プロファイル/タスクのハッシュ・判定モデル・オプションを含む）
@@ -554,9 +567,20 @@ stdout.jsonl はエージェントの生出力（プロンプトと応答を含�
 ## 9. リリースゲートと較正
 
 ```bash
-# 前回リリース時の結果と比べ、pass^k が下がった／比較できないタスクがあれば終了コード 1（CI で配布を止める）
-# 次の場合も比較できないので終了コード 1: k が違う／LLM 判定の有無が違う（スモークとフル）／タスク定義・フィクスチャ・採点が変わった
-python -m harness_eval gate --current results/<今回> --previous results/<前回>
+# 前回リリース時の結果と比べたリリース判定（CI で使う）。マージンは結果を見る前に業務への影響から決め、毎回明示する
+python -m harness_eval gate --current results/<今回> --previous results/<前回> --margin 0.05
+```
+
+| 判定 | 条件（前回との差の 95% 区間、マージン m） | 終了コード |
+|---|---|---|
+| 通過 | 区間の下端 ≥ −m（悪化していても m 以内と言える） | 0 |
+| 不通過 | 区間の上端 < −m（はっきり悪化）、安全違反の失敗分類（既定 `unsafe_access`。`--hard-category` で追加）が 1 件でもある、または比較できない（k・LLM 判定の有無・タスク定義が違う） | 1 |
+| 判定不能 | それ以外、または比較できたタスクが `--min-tasks`（既定 10）未満 | 3 |
+
+区間はタスク単位のブートストラップ（試行を独立な標本として数えない）。タスクが少ないと区間は実際より狭く出やすいため、判断には 20 タスク以上・
+3 試行以上を目安にしてください。前回より下がったタスクの一覧は参考として表示します（判定には使いません）。指標は `--metric`（既定 `pass_hat_k`）。
+
+```bash
 
 # LLM 判定と人手ラベルの一致率（約 20 件で較正）
 python -m harness_eval calibrate results/<実行ID> --labels labels.yaml
@@ -591,7 +615,7 @@ python -m harness_eval calibrate results/<実行ID> --labels labels.yaml
   その旨の通知が `error` アイテムとして 2 回出る（致命的ではなく、警告として記録するだけ）。
 
 未確認・未実装:
-- **Windows では未検証**です（開発・テストは Linux。Python 3.10・3.11・3.12・3.13 でテスト済み）。パスは pathlib、タイムアウト時の停止は
+- **Windows では未検証**です（テストは Linux と macOS、Python 3.10・3.11・3.12・3.13 で実施）。パスは pathlib、タイムアウト時の停止は
   `taskkill /T` を使う実装ですが、社内 Windows 端末で `doctor --live` とスモーク評価を一度通してから展開してください。
   CLI が npm の `claude.cmd` の場合、`--settings` の JSON などの引数が cmd.exe を経由します。問題が出たら `executable:` で実体（`.exe` や `node` + スクリプト）を指定してください。
 - Codex での実際のエージェント実行（この開発環境から OpenAI API に接続できないため）。Codex のパーサは実出力（失敗時）と
@@ -603,18 +627,12 @@ python -m harness_eval calibrate results/<実行ID> --labels labels.yaml
 
 ```bash
 python -m unittest discover -s tests        # 偽の claude / codex CLI を使うためトークンは使わない
+uv run pytest --cov                         # 開発用（pytest・カバレッジ 80% 以上・ruff は pyproject.toml の dev グループ）
 ```
 
 `tests/fake_agents/` は実機で観測した出力形式を再現する偽 CLI、`tests/data/` は実機の出力（Claude Code の stream-json、
 Codex の失敗時 JSONL、採点スクリプトの回帰用の実出力）です。
 
-## 採らなかった案（理由）
-- **Promptfoo を実行エンジンにする**: SDK 経由で CLI 本体と同一とは限らず、配布設定の読み込みを測りたい目的とずれる。Node 依存も増える。
-- **claude plugin eval だけで済ませる**: Codex 非対応、CLAUDE.md・ユーザー設定を読まない、独自コードで採点できない。
-  スキル単体の効果測定には併用できます。
-- **早期打ち切り**: 上記「やらないこと」のとおり、指標が偏る。
-- **LLM 判定で `--system-prompt` に差し替えて入力を減らす**: 実測（2.1.306・haiku）で入力は差し替え前後とも約 1.45 万トークンで減らなかった。
-- **LLM 判定に `--json-schema`（構造化出力）を使う**: 動作はしたが費用は同程度で、今の「1 行目が PASS/FAIL/UNKNOWN」の解析で実出力の失敗がなかったため、仕組みを増やさない。
-- **試行に `--exclude-dynamic-system-prompt-sections` を付けてキャッシュを効かせる**: 実測で各試行の 1 ターン目から約 1.7 万トークンが
-  既にキャッシュから読まれており（新規書き込みは 0.5〜1 万）、節約の余地が小さい一方、普段の使い方とプロンプトの形が変わり評価がずれる。
-- **`--bare`**: CLAUDE.md の自動読み込みを止め、OAuth（サブスクリプションのログイン）も読まないため、配布物どおりの評価にならない。
+## 採らなかった案
+
+理由とともに [`docs/design.html`](docs/design.html) の「採らなかった案」にまとめています（Promptfoo・BenchFlow などの外部エンジン、`claude plugin eval` だけで済ませる案、早期打ち切り、トークン節約のフラグなど）。

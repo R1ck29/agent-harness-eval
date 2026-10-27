@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Harness Eval 設計記録</title>
+<style>
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--mut:#6b6b70;--line:#d9d9de;--card:#ffffff;--accent:#0b6bcb;--accent-bg:#e8f1fb;--ok:#1a7f37;--ng:#b42318;--warn:#a15c00}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#151517;--fg:#ececef;--mut:#a0a0a8;--line:#3a3a40;--card:#1e1e22;--accent:#5aa9ff;--accent-bg:#17283b;--ok:#5cc777;--ng:#ff7a6e;--warn:#e0a03a}}
+:root[data-theme="dark"]{--bg:#151517;--fg:#ececef;--mut:#a0a0a8;--line:#3a3a40;--card:#1e1e22;--accent:#5aa9ff;--accent-bg:#17283b;--ok:#5cc777;--ng:#ff7a6e;--warn:#e0a03a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.7 -apple-system,"Segoe UI","Hiragino Sans","Yu Gothic UI","Meiryo",sans-serif}
+main{max-width:1000px;margin:0 auto;padding:32px 16px 64px}
+h1{font-size:26px;line-height:1.3;margin:0 0 6px}
+h2{font-size:19px;margin:44px 0 10px;padding-top:12px;border-top:1px solid var(--line)}
+h3{font-size:16px;margin:22px 0 6px}
+p{margin:8px 0}
+ul{margin:6px 0;padding-left:22px}
+.lead{color:var(--mut);margin-bottom:20px}
+nav{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px;margin:14px 0 4px}
+a{color:var(--accent);text-decoration:none}
+code{font-family:ui-monospace,Consolas,"Courier New",monospace;font-size:.88em;background:var(--accent-bg);padding:1px 5px;border-radius:4px}
+.box{background:var(--accent-bg);border:1px solid var(--accent);border-radius:10px;padding:14px 16px;margin:12px 0}
+@media (max-width:700px){table{display:block;overflow-x:auto}th{white-space:normal}td code{word-break:break-all}}
+table{border-collapse:collapse;width:100%;margin:12px 0;font-size:14px;background:var(--card)}
+th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
+.ok{color:var(--ok);font-weight:600}.ng{color:var(--ng);font-weight:600}.warn{color:var(--warn);font-weight:600}
+.mut{color:var(--mut);font-size:13.5px}
+</style>
+</head>
+<body>
+<main>
+<h1>Agent Harness Eval 設計記録</h1>
+<p class="lead">なぜこの作りなのか（採用・不採用の理由、評価の方法、残るリスク）の記録です。使い方と仕組みは <a href="guide.html">図解ガイド</a> と README を見てください。最終更新 2026-10-28（v0.4.0）。</p>
+<nav>
+<a href="#decision">1. 結論</a><a href="#lineage">2. 統合の経緯</a><a href="#tools">3. 既存ツールとの比較</a><a href="#method">4. 評価の方法</a><a href="#cost">5. 費用と経路</a><a href="#trust">6. 信頼の境界</a><a href="#rejected">7. 採らなかった案</a><a href="#risks">8. 残るリスク</a><a href="#sources">9. 根拠</a>
+</nav>
+
+<h2 id="decision">1. 結論</h2>
+<div class="box">
+<p><b>実際の CLI（<code>claude -p</code> / <code>codex exec --json</code>）を直接呼ぶ小さな自作ツールにし、評価の統計と安全の規則をその上に載せる。</b>依存は Python 3.10+ と PyYAML だけで、zip を展開してそのまま使える。</p>
+<ul>
+<li>測りたいのは「配布される形のままのハーネス（CLAUDE.md / AGENTS.md・Skills・Subagents・Hooks・MCP・モデル設定）」を載せた実際の CLI の振る舞い。SDK 経由や独自ループでは、配布設定の読み込み方が実物とずれる。</li>
+<li>社内では GitHub が使えず、インストールは Artifactory 経由の制限つき、利用者は Windows と macOS が混在、Claude は Bedrock。Docker・Node・重い Python 依存を前提にするツールは使えない。</li>
+<li>2026-10 時点で、Claude Code と Codex の両方を CLAUDE.md / AGENTS.md を含む配布物ごと、独自コードの採点と統計的なリリース判定つきで比べられる既存ツールは見つからなかった（§3）。</li>
+</ul>
+</div>
+
+<h2 id="lineage">2. 統合の経緯</h2>
+<p>同じ目的の 2 つの取り組みを 1 つのリポジトリにまとめた。食い違う点は新しい方（v0.3.0 の決定）を優先し、古い方にしかない評価方法を移植した。</p>
+<table>
+<tr><th>系統</th><th>時期</th><th>持っていたもの</th><th>この版での扱い</th></tr>
+<tr><td>Phase 0（BenchFlow 案）</td><td>2026-08-15</td><td>BenchFlow 0.6.7 を実行エンジンにする計画、Decimal の予算計算、信頼レベル T0〜T3、Apple Container / AgentCore の診断、統計（paired・非劣性・3 値判定）と反証テストの設計</td><td>実行エンジンと sandbox の診断は廃止。評価方法を下の 1〜7 として移植</td></tr>
+<tr><td>v0.1.0 → v0.3.0</td><td>2026-10-21〜22</td><td>CLI 直呼びの実行・採点・レポート・キャッシュ・ゲート・較正、hooks、費用台帳、<code>harvest</code>。実機の Claude Code で端から端まで確認</td><td>土台としてそのまま採用</td></tr>
+</table>
+<table>
+<tr><th>#</th><th>v0.4.0 で加えたもの</th><th>出どころ</th><th>理由</th></tr>
+<tr><td>1</td><td>リリース判定を、タスク単位の paired ブートストラップ区間と事前に決めた非劣性マージンによる 3 値（通過・不通過・判定不能）にする</td><td>Phase 0 の設計、Anthropic の評価統計の指針</td><td>v0.3.0 はどれか 1 タスクの pass^k が下がると止めていた。3 試行なら偶然の 1 回の失敗で配布が止まり、差の不確かさも見えなかった</td></tr>
+<tr><td>2</td><td>基準（配布物なし）との Δ から「配布物がないと通らない判定」を両側とも外す</td><td><code>claude plugin eval</code> の扱い</td><td>外さないと、スキルを呼んだこと自体が差として水増しされる</td></tr>
+<tr><td>3</td><td>同じ（試行・タスク）の各プロファイルを続けて実行し、先に走るプロファイルを試行ごとに入れ替える</td><td>Phase 0 の設計、Anthropic のインフラ雑音の報告</td><td>プロファイルをまとめて順に回すと、時間とともに変わる条件（混雑・モデル更新）が差に混ざる</td></tr>
+<tr><td>4</td><td>費用の出どころの区別と、Claude・Codex 別の月の予算</td><td>Phase 0 で決めた予算の方針（Claude・Codex で別々の月額上限）</td><td>v0.3.0 は台帳が 1 つで、CLI の推定額を「報告値」と呼んでいた</td></tr>
+<tr><td>5</td><td><code>doctor</code> が経路を変える環境変数の宣言のない引き継ぎと、確認済みより古い CLI を知らせる</td><td>Phase 0 の doctor</td><td>試行は親の環境を引き継ぐため、残っていた API キーなどで経路・請求先が黙って変わる</td></tr>
+<tr><td>6</td><td>同梱タスクに正解例を付け、<code>validate --selftest</code> で「正解例で通り、何もしなければ落ちる」を確かめる</td><td>Phase 0 の反証テスト（正解例・既知の不良）</td><td>採点そのものが壊れていると、比べた結果がすべて無意味になる</td></tr>
+<tr><td>7</td><td>実行される部品（install の run・hooks・MCP の設定ファイル）を含むプロファイルに警告</td><td>Phase 0 の信頼レベル</td><td>sandbox がないので T2/T3 は強制できない。規則として残し、気づける形にする</td></tr>
+</table>
+<p class="mut">各段階は独立したレビュー担当（作った経緯を知らないエージェント）が別の作業ツリーで検証した。重大な指摘（例: 経路の変数を「プロファイルに値を書いて」と案内していた問題）は直して再検証している。</p>
+
+<h2 id="tools">3. 既存ツールとの比較（2026-10-28 調査）</h2>
+<p>一次情報（公式ドキュメント・リポジトリ・論文）で確認した。版は調査時点。</p>
+<table>
+<tr><th>ツール</th><th>この用途で使えるもの</th><th>足りないもの・合わない点</th><th>判断</th></tr>
+<tr><td><code>claude plugin eval</code>（公式、Claude Code 2.1.269 以降）</td><td>試行ごとの一時ホーム、プラグインあり／なしの Δ、regex・tool_used・llm などの採点、MCP のモック、費用上限</td><td>Claude 専用でプラグイン単位。CLAUDE.md・プロジェクト設定を読まない。独自コードの採点がない。版どうし（A / B）の比較・pass^k・区間がない</td><td>スキル単体の確認には併用できる。基盤にはしない</td></tr>
+<tr><td>Promptfoo 0.125.1（MIT）</td><td>Claude Agent SDK・Codex SDK のプロバイダ、スキル使用の判定、繰り返し、費用の判定</td><td>Node が必要。CLI 本体ではなく SDK を動かす。設定・CLAUDE.md の読み込みは既定で無効。paired の統計・pass^k・リリース判定がない</td><td>最も近いが社内に入れられない</td></tr>
+<tr><td>Inspect AI 0.3.285 + inspect_swe 0.2.72（MIT）</td><td>Claude Code・Codex のエージェント、スキル・MCP の注入、繰り返しと誤差</td><td>Docker の sandbox が前提。モデル呼び出しを代理するので社内の Bedrock 設定をそのまま使えない。依存が重い</td><td>不採用</td></tr>
+<tr><td>Harbor 0.25.0（Apache-2.0）</td><td>Terminal-Bench の公式ハーネス。スキルを <code>$CLAUDE_CONFIG_DIR/skills</code>・<code>$HOME/.agents/skills</code> に置く（本ツールと同じ置き方）</td><td>コンテナが必須。依存が重い</td><td>不採用（置き方の裏付けとして参照）</td></tr>
+<tr><td>BenchFlow 0.7.11（Apache-2.0）</td><td>Claude・Codex の実行、スキル評価、SkillsBench</td><td>Python 3.12+・Docker・litellm などが必要。Windows の記載なし</td><td>Phase 0 の採用案を取り消し</td></tr>
+<tr><td>skillgrade 0.5.0（MIT）</td><td>Claude・Codex・Gemini、スクリプト採点、CI のしきい値</td><td>Node。費用と pass^k の記載なし</td><td>不採用</td></tr>
+<tr><td>mdarena 0.1.0（MIT）</td><td>CLAUDE.md を自分の PR で比べる（paired t 検定）</td><td>Claude 専用、初期段階、scipy と anthropic が必要</td><td><code>harvest</code> と同じ発想の先行例</td></tr>
+</table>
+<p class="mut">ベンチマーク（SkillsBench・SWE-Skills-Bench・Harness-Bench）は道具ではなく根拠として使う。スキルの効果がない・負になる例が多いことは、「判定不能」を正式な結果として持つ設計の裏付けになる。</p>
+
+<h2 id="method">4. 評価の方法</h2>
+<h3>指標</h3>
+<table>
+<tr><th>指標</th><th>意味</th><th>使いどころ</th></tr>
+<tr><td>pass@1</td><td>タスクごとの合格率の平均</td><td>平均的にどれだけできるか</td></tr>
+<tr><td>pass^k</td><td>k 回続けて合格する確率（有効試行 n・合格 c なら C(c,k)/C(n,k)）</td><td>毎回できるか。配布するハーネスでは主指標</td></tr>
+<tr><td>比較用の値（*_cmp）</td><td>配布物がないと通らない判定（スキル・サブエージェント・hook を 1 回以上使うことの要求）を除いた合否</td><td>配布物なしの基準との Δ</td></tr>
+<tr><td>合格あたりの費用</td><td>総費用 ÷ 合格試行数。不明な費用があれば出さない</td><td>品質と費用の両立</td></tr>
+</table>
+<h3>比べ方</h3>
+<ul>
+<li>単位はタスク。同じタスクの試行は独立ではないので、試行を標本として数えない。タスクごとの値の差を作り、タスクを復元抽出するブートストラップで 95% 区間を出す（同じ seed なら同じ結果）。</li>
+<li>リリース判定（<code>gate</code>）は前回と今回の同じプロファイルを比べる。非劣性マージン m は<b>毎回明示</b>する（結果を見てから決めないため、既定値を持たない）。</li>
+</ul>
+<table>
+<tr><th>判定</th><th>条件</th><th>終了コード</th></tr>
+<tr><td class="ok">通過</td><td>区間の下端 ≥ −m（悪化していても m 以内と言える）</td><td>0</td></tr>
+<tr><td class="ng">不通過</td><td>区間の上端 &lt; −m（はっきり悪化）、安全違反の失敗分類（既定 <code>unsafe_access</code>）が 1 件でもある、または比べられない（k・LLM 判定の有無・タスク定義が違う）</td><td>1</td></tr>
+<tr><td class="warn">判定不能</td><td>それ以外、または比べられたタスクが <code>--min-tasks</code>（既定 10）未満</td><td>3</td></tr>
+</table>
+<p>少ないタスクではパーセンタイル・ブートストラップの区間は実際より狭く出やすい（レビュー時の模擬で、12 タスク・正規分布の差のとき被覆率は 0.90 程度）。最低タスク数はそのための歯止めで、判断に使うなら 20 タスク以上を目安にする。前回より下がったタスクの一覧は判定には使わず、診断として出す。</p>
+<h3>雑音を減らす工夫</h3>
+<ul>
+<li>同じ（試行・タスク）の各プロファイルを続けて実行し、先に走るプロファイルを試行ごとに入れ替える（<code>--seed</code>）。</li>
+<li>レート制限・過負荷・認証・ネットワーク不通・判定を呼べないなど環境起因の終了は「除外」にし、失敗として数えない。再試行するのは環境起因だけ。</li>
+<li>各試行は空の一時ホーム・作業ディレクトリから始める（前の試行の残りが答えを漏らさない）。</li>
+</ul>
+<h3>採点</h3>
+<ul>
+<li>コードで決められるもの（ファイル・正規表現・独自スクリプト・ツール呼び出しの回数）を先に使う。LLM 判定は、配布物の有無に関係なく既に不合格の試行では呼ばない。観点を 1 つに絞り、根拠がなければ UNKNOWN を返させ、人手ラベル約 20 件との一致率を <code>calibrate</code> で確かめる。</li>
+<li>正解は元のフィクスチャから計算する（作業ディレクトリのファイルはエージェントが書き換えられる）。</li>
+<li>採点の反証: 正解例で通り、何もしなければ落ちることを <code>validate --selftest</code> で確かめる（同梱タスクと harvest の下書き）。</li>
+</ul>
+
+<h2 id="cost">5. 費用と経路</h2>
+<table>
+<tr><th>費用の出どころ（<code>cost_source</code>）</th><th>意味</th></tr>
+<tr><td><code>client_estimate</code></td><td>Claude Code が API 単価で計算した推定額（<code>total_cost_usd</code>）。請求額ではない</td></tr>
+<tr><td><code>token_estimate</code></td><td>Codex のトークン数とプロファイルの <code>pricing</code> から計算した概算</td></tr>
+<tr><td>null（不明）</td><td>取得できない。0 で埋めず、総額・合格あたり費用は「不明」</td></tr>
+</table>
+<ul>
+<li>月の予算（<code>--monthly-budget-usd</code>）は Claude と Codex で別々の口座として数える。LLM 判定の費用は判定エージェントの口座に入る。口座の記録がない旧形式の台帳の行は、どちらにも数える（安全側）。</li>
+<li><code>billing: subscription</code> のプロファイルは呼び出しごとの請求がないため、推定額は台帳に残すが月の予算には数えない。<code>--max-cost-usd</code>（1 回の実行の大きさの上限）には数える。</li>
+<li>経路・請求先・モデルの実体を変える環境変数（各 CLI の実行ファイルに名前があることを確認したもの）を親から黙って引き継ぐと、意図しない口座で動き、キャッシュにも反映されない。値を固定するものは <code>env</code>、親の値を使うもの（秘密）は <code>inherit_env</code> に名前だけ書く。宣言のない引き継ぎは <code>doctor</code> が NG、<code>run</code> が警告（LLM 判定の経路も含む）。</li>
+<li>キャッシュキーには経路の変数の名前が入る。秘密でないもの（モデルの別名の実体・接続先・切り替え）は値の短いハッシュも入れ、値を変えれば再実行される。キー・トークン・ヘッダの値は使わない。</li>
+</ul>
+
+<h2 id="trust">6. 信頼の境界</h2>
+<ul>
+<li>隔離は「どの設定を読み込むか」の隔離で、ファイルアクセスやネットワークの制限ではない。評価には合成データだけを使う。</li>
+<li>配布物の hooks・MCP サーバー・install の <code>run</code> は利用者の権限で動く。sandbox がないため、未レビューの実行物を安全に評価する手段はない（Phase 0 の T2/T3 に当たるものは扱わない）。社内でレビュー済みの配布物だけを評価し、<code>validate</code> の警告で実行される部品に気づけるようにしている。</li>
+<li><code>harvest</code> は LLM が書いた採点スクリプトを実行しない（人が読んだ後の <code>validate --selftest</code> で実行）。元の依頼文はメモリ上だけで扱う。</li>
+</ul>
+
+<h2 id="rejected">7. 採らなかった案</h2>
+<table>
+<tr><th>案</th><th>理由</th></tr>
+<tr><td>BenchFlow / Inspect / Harbor を実行エンジンにする</td><td>Docker と重い依存が必要で、社内の配布・インストールの制約に合わない</td></tr>
+<tr><td>Promptfoo を実行エンジンにする</td><td>Node が必要。SDK 経由で CLI 本体と同一とは限らず、配布設定の読み込みを測る目的とずれる</td></tr>
+<tr><td><code>claude plugin eval</code> だけで済ませる</td><td>Codex 非対応、CLAUDE.md・ユーザー設定を読まない、独自コードで採点できない（スキル単体の確認には併用できる）</td></tr>
+<tr><td>リリース判定の既定マージン</td><td>結果を見てからの調整を防ぐため、毎回明示させる</td></tr>
+<tr><td>Decimal による予算計算</td><td>セント単位の上限には float で十分で、概念を 1 つ減らせる</td></tr>
+<tr><td>Codex の <code>--ignore-user-config</code></td><td><code>$CODEX_HOME/config.toml</code> を読まなくなり、配布物の hooks・MCP 設定まで無効になる（0.146.1 のヘルプで確認）。CODEX_HOME は既に一時ホーム</td></tr>
+<tr><td>CLI の <code>--help</code> でフラグの有無を調べる診断</td><td>Claude Code は <code>--max-turns</code> をヘルプに出さないため誤って NG になる。実際に動くかは <code>doctor --live</code> で確かめる</td></tr>
+<tr><td>早期打ち切り（不合格が出たら残り試行をやめる）</td><td>pass@1 と平均スコアが不合格側に偏る</td></tr>
+<tr><td>LLM 判定の <code>--system-prompt</code> 差し替え・<code>--json-schema</code></td><td>実測で入力トークンが減らない／費用が同程度で、今の解析に失敗がない</td></tr>
+<tr><td>試行の <code>--exclude-dynamic-system-prompt-sections</code>・<code>--bare</code></td><td>節約の余地が小さい一方、プロンプトの形や CLAUDE.md・ログインの読み込みが変わり、配布物どおりの評価にならない</td></tr>
+<tr><td>生成された採点スクリプトを静的検査して自動実行</td><td>Python の安全性は静的に確かめきれない（許可した標準モジュールだけでもコマンド実行や通信ができる書き方が見つかった）</td></tr>
+<tr><td>提供元ゲートウェイでの強制停止・封印した holdout・egress の強制と持ち出し攻撃のテスト（Phase 0 の未着手項目）</td><td>社内ゲートウェイ・別の認証情報・sandbox が必要で、この配布形態では実現できない。台帳による上限、架空化したタスク、レビュー済みの配布物だけを評価する運用で代える</td></tr>
+<tr><td>plugin eval のケース形式との相互変換</td><td>今は必要としている利用者がいない</td></tr>
+</table>
+
+<h2 id="risks">8. 残るリスク・未確認</h2>
+<ul>
+<li>Windows の実機、Codex での実際のエージェント実行、macOS キーチェーンのログインを一時ホームで使えるかは未確認。社内では最初に <code>doctor</code>・<code>doctor --live</code>・<code>harvest --dry-run</code> を通す。</li>
+<li>統合を行った開発機の CLI（Claude Code 2.1.295・Codex 0.146.1）は、起動フラグと出力形式を確かめた版（2.1.304・0.163.0）より古い。使うフラグはどちらのヘルプにもある（Claude の <code>--max-turns</code> は非表示の既存フラグ）が、出力形式の違いは <code>doctor --live</code> で確かめる。</li>
+<li>Claude Code の同梱スキル・組織の管理設定は一時ホームでも読み込まれる。試行ごとに実際に読み込まれた構成要素を記録し、レポートで見えるようにしている。</li>
+<li>少ないタスクでは区間が狭く出やすい（§4）。判断には 20 タスク以上・3 試行以上を目安にする。</li>
+<li><code>harvest</code> の架空化は日本語の固有名詞を機械で判定できない。下書きは人が確認してから使う。</li>
+<li><code>doctor</code> は LLM 判定の経路を見ない（判定の有無は実行時の指定で決まるため）。判定が親の環境で動くときの経路の警告は <code>run</code> が出す。</li>
+</ul>
+
+<h2 id="sources">9. 根拠</h2>
+<ul>
+<li>Anthropic: <a href="https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents">Demystifying evals for AI agents</a>（タスク・試行・採点、pass@k と pass^k、判定の較正、試行ごとのクリーンな環境）</li>
+<li>Anthropic: <a href="https://www.anthropic.com/research/statistical-approach-to-model-evals">A statistical approach to model evaluations</a>（タスク単位のクラスタ、paired の差）</li>
+<li>Anthropic: <a href="https://www.anthropic.com/engineering/infrastructure-noise">Quantifying infrastructure noise in agentic coding evals</a>（資源設定だけで 6 ポイント動く、3 ポイント未満の差に注意）</li>
+<li>Bowyer et al., ICML 2025: <a href="https://arxiv.org/abs/2503.01747">small-sample uncertainty in LLM evaluations</a>（少数では正規近似の区間が過小）</li>
+<li>Claude Code: <a href="https://code.claude.com/docs/en/plugin-evals">Test plugins with evals</a>（配布物がないと通らない判定を Δ から外す扱い）</li>
+<li>OpenAI: <a href="https://openai.com/index/why-we-no-longer-evaluate-swe-bench-verified/">Why we no longer evaluate SWE-bench Verified</a>（汚染）、<a href="https://developers.openai.com/blog/eval-skills">Testing Agent Skills Systematically with Evals</a></li>
+<li>OSS: <a href="https://www.promptfoo.dev/docs/guides/test-agent-skills/">Promptfoo</a>、<a href="https://meridianlabs-ai.github.io/inspect_swe/">inspect_swe</a>、<a href="https://docs.harborframework.com/llms.txt">Harbor</a>、<a href="https://github.com/benchflow-ai/benchflow">BenchFlow</a>、<a href="https://github.com/mgechev/skillgrade">skillgrade</a>、<a href="https://pypi.org/project/mdarena/">mdarena</a></li>
+<li>論文: <a href="https://arxiv.org/abs/2602.12670">SkillsBench</a>、<a href="https://arxiv.org/abs/2603.15401">SWE-Skills-Bench</a>、<a href="https://arxiv.org/abs/2605.27922">Harness-Bench</a>、<a href="https://arxiv.org/abs/2406.12045">τ-bench（pass^k）</a></li>
+<li>実機・ソースで確かめた CLI の挙動は README の「制約と注意」に記録している</li>
+</ul>
+</main>
+</body>
+</html>
