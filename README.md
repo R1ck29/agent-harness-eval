@@ -201,7 +201,7 @@ python -m harness_eval run --tasks examples/tasks --profiles examples/profiles/c
 | `AWS_SHARED_CREDENTIALS_FILE`・`AWS_CONFIG_FILE` | 本物の `~/.aws/…` | ホームを差し替えても Bedrock の認証を使えるように（未設定でファイルがあるときだけ） |
 | `CLAUDECODE` など親セッションの変数 | 削除 | Claude Code の中から実行しても入れ子扱いにならないように |
 | プロファイルの `env` | 追加・上書き | Bedrock 設定など |
-| 経路を変える変数（API キー・Bedrock の切り替え・モデルの別名など） | 親の値をそのまま渡す | `env` か `inherit_env`（名前だけ）で宣言する。宣言のない引き継ぎは `doctor` が NG（§5「認証」） |
+| 経路を変える変数（API キー・Bedrock の切り替え・モデルの別名など） | 親の値をそのまま渡す | `env` か `inherit_env`（名前だけ）で宣言する。宣言のない引き継ぎと、宣言したのに設定されていない変数は `doctor` が NG（§5「認証」） |
 
 Claude Code にはさらに `--settings {"syncClaudeAiSkills":false,"syncClaudeAiPlugins":false}` を渡し、claude.ai アカウントから同期されるスキル・プラグインの混入を防ぎます。
 それでも残るもの（同梱スキル・組織の管理設定。上のフォルダの指示は上記のとおり止める）があるため、実際に読み込まれた構成要素を試行ごとに記録します（§10）。
