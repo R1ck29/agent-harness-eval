@@ -51,18 +51,18 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <p>同じ目的の 2 つの取り組みを 1 つのリポジトリにまとめた。食い違う点は新しい方（v0.3.0 の決定）を優先し、古い方にしかない評価方法を移植した。</p>
 <table>
 <tr><th>系統</th><th>時期</th><th>持っていたもの</th><th>この版での扱い</th></tr>
-<tr><td>Phase 0（BenchFlow 案）</td><td>2026-08-15</td><td>BenchFlow 0.6.7 を実行エンジンにする計画、Decimal の予算計算、信頼レベル T0〜T3、Apple Container / AgentCore の診断、統計（paired・非劣性・3 値判定）と反証テストの設計</td><td>実行エンジンと sandbox の診断は廃止。評価方法を下の 1〜7 として移植</td></tr>
+<tr><td>旧評価基盤（BenchFlow 案）</td><td>2026-08-15</td><td>BenchFlow 0.6.7 を実行エンジンにする計画、Decimal の予算計算、信頼レベル T0〜T3、Apple Container / AgentCore の診断、統計（paired・非劣性・3 値判定）と反証テストの設計</td><td>実行エンジンと sandbox の診断は廃止。評価方法を下の 1〜7 として移植</td></tr>
 <tr><td>v0.1.0 → v0.3.0</td><td>2026-10-21〜22</td><td>CLI 直呼びの実行・採点・レポート・キャッシュ・ゲート・較正、hooks、費用台帳、<code>harvest</code>。実機の Claude Code で端から端まで確認</td><td>土台としてそのまま採用</td></tr>
 </table>
 <table>
 <tr><th>#</th><th>v0.4.0 で加えたもの</th><th>出どころ</th><th>理由</th></tr>
-<tr><td>1</td><td>リリース判定を、タスク単位の paired ブートストラップ区間と事前に決めた非劣性マージンによる 3 値（通過・不通過・判定不能）にする</td><td>Phase 0 の設計、Anthropic の評価統計の指針</td><td>v0.3.0 はどれか 1 タスクの pass^k が下がると止めていた。3 試行なら偶然の 1 回の失敗で配布が止まり、差の不確かさも見えなかった</td></tr>
+<tr><td>1</td><td>リリース判定を、タスク単位の paired ブートストラップ区間と事前に決めた非劣性マージンによる 3 値（通過・不通過・判定不能）にする</td><td>旧評価基盤 の設計、Anthropic の評価統計の指針</td><td>v0.3.0 はどれか 1 タスクの pass^k が下がると止めていた。3 試行なら偶然の 1 回の失敗で配布が止まり、差の不確かさも見えなかった</td></tr>
 <tr><td>2</td><td>基準（配布物なし）との Δ から「配布物がないと通らない判定」を両側とも外す</td><td><code>claude plugin eval</code> の扱い</td><td>外さないと、スキルを呼んだこと自体が差として水増しされる</td></tr>
-<tr><td>3</td><td>同じ（試行・タスク）の各プロファイルを続けて実行し、先に走るプロファイルを試行ごとに入れ替える</td><td>Phase 0 の設計、Anthropic のインフラ雑音の報告</td><td>プロファイルをまとめて順に回すと、時間とともに変わる条件（混雑・モデル更新）が差に混ざる</td></tr>
-<tr><td>4</td><td>費用の出どころの区別と、Claude・Codex 別の月の予算</td><td>Phase 0 で決めた予算の方針（Claude・Codex で別々の月額上限）</td><td>v0.3.0 は台帳が 1 つで、CLI の推定額を「報告値」と呼んでいた</td></tr>
-<tr><td>5</td><td><code>doctor</code> が経路を変える環境変数の宣言のない引き継ぎと、確認済みより古い CLI を知らせる</td><td>Phase 0 の doctor</td><td>試行は親の環境を引き継ぐため、残っていた API キーなどで経路・請求先が黙って変わる</td></tr>
-<tr><td>6</td><td>同梱タスクに正解例を付け、<code>validate --selftest</code> で「正解例で通り、何もしなければ落ちる」を確かめる</td><td>Phase 0 の反証テスト（正解例・既知の不良）</td><td>採点そのものが壊れていると、比べた結果がすべて無意味になる</td></tr>
-<tr><td>7</td><td>実行される部品（install の run・hooks・MCP の設定ファイル）を含むプロファイルに警告</td><td>Phase 0 の信頼レベル</td><td>sandbox がないので T2/T3 は強制できない。規則として残し、気づける形にする</td></tr>
+<tr><td>3</td><td>同じ（試行・タスク）の各プロファイルを続けて実行し、先に走るプロファイルを試行ごとに入れ替える</td><td>旧評価基盤 の設計、Anthropic のインフラ雑音の報告</td><td>プロファイルをまとめて順に回すと、時間とともに変わる条件（混雑・モデル更新）が差に混ざる</td></tr>
+<tr><td>4</td><td>費用の出どころの区別と、Claude・Codex 別の月の予算</td><td>旧評価基盤 で決めた予算の方針（Claude・Codex で別々の月額上限）</td><td>v0.3.0 は台帳が 1 つで、CLI の推定額を「報告値」と呼んでいた</td></tr>
+<tr><td>5</td><td><code>doctor</code> が経路を変える環境変数の宣言のない引き継ぎと、確認済みより古い CLI を知らせる</td><td>旧評価基盤 の doctor</td><td>試行は親の環境を引き継ぐため、残っていた API キーなどで経路・請求先が黙って変わる</td></tr>
+<tr><td>6</td><td>同梱タスクに正解例を付け、<code>validate --selftest</code> で「正解例で通り、何もしなければ落ちる」を確かめる</td><td>旧評価基盤 の反証テスト（正解例・既知の不良）</td><td>採点そのものが壊れていると、比べた結果がすべて無意味になる</td></tr>
+<tr><td>7</td><td>実行される部品（install の run・hooks・MCP の設定ファイル）を含むプロファイルに警告</td><td>旧評価基盤 の信頼レベル</td><td>sandbox がないので T2/T3 は強制できない。規則として残し、気づける形にする</td></tr>
 </table>
 <p class="mut">各段階は独立したレビュー担当（作った経緯を知らないエージェント）が別の作業ツリーで検証した。重大な指摘（例: 経路の変数を「プロファイルに値を書いて」と案内していた問題）は直して再検証している。</p>
 
@@ -74,7 +74,7 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <tr><td>Promptfoo 0.125.1（MIT）</td><td>Claude Agent SDK・Codex SDK のプロバイダ、スキル使用の判定、繰り返し、費用の判定</td><td>Node が必要。CLI 本体ではなく SDK を動かす。設定・CLAUDE.md の読み込みは既定で無効。paired の統計・pass^k・リリース判定がない</td><td>最も近いが社内に入れられない</td></tr>
 <tr><td>Inspect AI 0.3.285 + inspect_swe 0.2.72（MIT）</td><td>Claude Code・Codex のエージェント、スキル・MCP の注入、繰り返しと誤差</td><td>Docker の sandbox が前提。モデル呼び出しを代理するので社内の Bedrock 設定をそのまま使えない。依存が重い</td><td>不採用</td></tr>
 <tr><td>Harbor 0.25.0（Apache-2.0）</td><td>Terminal-Bench の公式ハーネス。スキルを <code>$CLAUDE_CONFIG_DIR/skills</code>・<code>$HOME/.agents/skills</code> に置く（本ツールと同じ置き方）</td><td>コンテナが必須。依存が重い</td><td>不採用（置き方の裏付けとして参照）</td></tr>
-<tr><td>BenchFlow 0.7.11（Apache-2.0）</td><td>Claude・Codex の実行、スキル評価、SkillsBench</td><td>Python 3.12+・Docker・litellm などが必要。Windows の記載なし</td><td>Phase 0 の採用案を取り消し</td></tr>
+<tr><td>BenchFlow 0.7.11（Apache-2.0）</td><td>Claude・Codex の実行、スキル評価、SkillsBench</td><td>Python 3.12+・Docker・litellm などが必要。Windows の記載なし</td><td>旧評価基盤 の採用案を取り消し</td></tr>
 <tr><td>skillgrade 0.5.0（MIT）</td><td>Claude・Codex・Gemini、スクリプト採点、CI のしきい値</td><td>Node。費用と pass^k の記載なし</td><td>不採用</td></tr>
 <tr><td>mdarena 0.1.0（MIT）</td><td>CLAUDE.md を自分の PR で比べる（paired t 検定）</td><td>Claude 専用、初期段階、scipy と anthropic が必要</td><td><code>harvest</code> と同じ発想の先行例</td></tr>
 </table>
@@ -120,7 +120,7 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <h2 id="trust">6. 信頼の境界</h2>
 <ul>
 <li>隔離は「どの設定を読み込むか」の隔離で、ファイルアクセスやネットワークの制限ではない。評価には合成データだけを使う。</li>
-<li>配布物の hooks・MCP サーバー・install の <code>run</code> は利用者の権限で動く。sandbox がないため、未レビューの実行物を安全に評価する手段はない（Phase 0 の T2/T3 に当たるものは扱わない）。社内でレビュー済みの配布物だけを評価し、<code>validate</code> の警告で実行される部品に気づけるようにしている。</li>
+<li>配布物の hooks・MCP サーバー・install の <code>run</code> は利用者の権限で動く。sandbox がないため、未レビューの実行物を安全に評価する手段はない（旧評価基盤 の T2/T3 に当たるものは扱わない）。社内でレビュー済みの配布物だけを評価し、<code>validate</code> の警告で実行される部品に気づけるようにしている。</li>
 <li><code>harvest</code> は LLM が書いた採点スクリプトを実行しない（人が読んだ後の <code>validate --selftest</code> で実行）。元の依頼文はメモリ上だけで扱う。</li>
 </ul>
 
@@ -138,7 +138,7 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <tr><td>LLM 判定の <code>--system-prompt</code> 差し替え・<code>--json-schema</code></td><td>実測で入力トークンが減らない／費用が同程度で、今の解析に失敗がない</td></tr>
 <tr><td>試行の <code>--exclude-dynamic-system-prompt-sections</code>・<code>--bare</code></td><td>節約の余地が小さい一方、プロンプトの形や CLAUDE.md・ログインの読み込みが変わり、配布物どおりの評価にならない</td></tr>
 <tr><td>生成された採点スクリプトを静的検査して自動実行</td><td>Python の安全性は静的に確かめきれない（許可した標準モジュールだけでもコマンド実行や通信ができる書き方が見つかった）</td></tr>
-<tr><td>提供元ゲートウェイでの強制停止・封印した holdout・egress の強制と持ち出し攻撃のテスト（Phase 0 の未着手項目）</td><td>社内ゲートウェイ・別の認証情報・sandbox が必要で、この配布形態では実現できない。台帳による上限、架空化したタスク、レビュー済みの配布物だけを評価する運用で代える</td></tr>
+<tr><td>提供元ゲートウェイでの強制停止・封印した holdout・egress の強制と持ち出し攻撃のテスト（旧評価基盤 の未着手項目）</td><td>社内ゲートウェイ・別の認証情報・sandbox が必要で、この配布形態では実現できない。台帳による上限、架空化したタスク、レビュー済みの配布物だけを評価する運用で代える</td></tr>
 <tr><td>plugin eval のケース形式との相互変換</td><td>今は必要としている利用者がいない</td></tr>
 </table>
 

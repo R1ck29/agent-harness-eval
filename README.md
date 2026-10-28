@@ -10,7 +10,7 @@ Claude Code と Codex の「ハーネス」（CLAUDE.md / AGENTS.md、Skills、S
 - 結果は 1 ファイルの HTML レポート（外部通信なし）と JSON に残る
 - 依存は Python 3.10+ と PyYAML だけ。エージェントは各 CLI（`claude -p` / `codex exec --json`）を直接呼ぶ
 
-設計書「Agent Harness Eval 設計書（Claude Code / Codex 対応）」の実装に、以前の評価基盤の試み（Phase 0）の評価方法を統合したものです。
+設計書「Agent Harness Eval 設計書（Claude Code / Codex 対応）」の実装に、以前の評価基盤の試み（旧評価基盤、2026-08）の評価方法を統合したものです。
 Promptfoo・BenchFlow などの外部エンジンは使いません。
 
 > **図解ガイド**: [`docs/guide.html`](docs/guide.html) をブラウザで開くと、流れと仕組みを図で確認できます（1 ファイル・外部通信なし）。
@@ -109,6 +109,7 @@ python -m harness_eval run --tasks examples/tasks --profiles examples/profiles/c
 **サンプルの中身**（履歴がないときの標準タスクも兼ねる）: 合成の売上 CSV（`examples/fixtures`）を使う 6 タスクと、
 小さな配布物 `examples/harnesses/ds-lite`（CLAUDE.md の出力形式ルール・「曖昧なら確認」ルール + 月別集計スキル）。
 4 タスクには正解例（`examples/references/`）があり、`validate --selftest` で「採点が正解例で通り、何もしなければ落ちる」ことを確かめられます。
+何もしなくても通る判定（入力ファイルの有無など）があれば `--selftest` が注意として表示します（壊してはいけないものを守る判定なら意図どおり）。
 
 | タスク | 想定している実際の依頼 | 主に見ること |
 |---|---|---|
@@ -171,6 +172,7 @@ python -m harness_eval run --tasks examples/tasks --profiles examples/profiles/c
  合否・失敗タグ ◀──────────────────────────────────────────────────────────────  スコア
  後始末: home/ を必ず削除（例外・Ctrl-C でも）。workdir/ は --keep に従う
 ```
+※ 配布物がないと通らない判定（スキル・サブエージェント・hook を使うことの要求）の不合格だけなら、LLM 判定を省きません（基準との比較用スコアに必要なため）。
 
 ### 3.3 隔離：何をどこへ向けるか
 
@@ -517,6 +519,7 @@ OpenAI API の usage 定義（cached は input の内数）を前提にしてい
                               （Claude Code で判定する場合。--judge-agent codex は読み取り専用だがツール・ターンの制限はなく、費用も不明）
  再試行             ──────▶  環境起因（レート制限・過負荷）だけ               なし（不合格を引き直さない）
 ```
+※ 配布物がないと通らない判定（スキル・サブエージェント・hook を使うことの要求）の不合格だけなら、LLM 判定を省きません（基準との比較用スコアに必要なため）。
 
 キャッシュキーに入るもの（どれか 1 つでも変われば再実行）:
 
