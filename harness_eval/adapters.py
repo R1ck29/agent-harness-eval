@@ -65,6 +65,8 @@ def _status_type(status: Any) -> str | None:
         return "overloaded"
     if status in (401, 403):
         return "auth"
+    if isinstance(status, int) and status >= 400:
+        return "api_error"  # 上記以外の API エラー（例: Bedrock のモデル ID の誤りで 400）。エージェントの失敗ではない
     return None
 
 

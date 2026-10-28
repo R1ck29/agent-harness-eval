@@ -210,7 +210,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 
 <!-- 4 -->
 <h2 id="isolation">5. 隔離：エージェントから何が見えるか</h2>
-<p>普段の設定（ホームの <code>.claude</code>・<code>.codex</code>）は読み込ませず、試行ディレクトリに置いた配布物で起動します。ただし CLI は作業ディレクトリより上のフォルダの <code>CLAUDE.md</code>・<code>.claude/skills</code>・<code>AGENTS.md</code> も読むため、<code>--out</code> とその上にこれらがあると <code>run</code> は止まり、<code>doctor</code> は NG にします（<code>--out</code> はリポジトリやホームの外に置く）。外のもので使うのは AWS の認証ファイル（参照のみ）と、指定したときの認証ファイルの複製です。これは「どの設定を読み込むか」の隔離で、ファイルの読み書きを禁止するものではありません（Read や Bash を許可すれば絶対パスで外も読めます）。そのため評価には合成データだけを使います。</p>
+<p>普段の設定（ホームの <code>.claude</code>・<code>.codex</code>）は読み込ませず、試行ディレクトリに置いた配布物で起動します。ただし CLI は作業ディレクトリより上のフォルダの指示・スキル・ルール・サブエージェントも読むため、<code>--out</code> とその上に <code>CLAUDE.md</code>・<code>AGENTS.md</code>・<code>.mcp.json</code> や <code>.claude/</code>・<code>.codex/</code>・<code>.agents/</code> フォルダ があると <code>run</code> は止まり、<code>doctor</code> は NG にします（<code>--out</code> はリポジトリやホームの外に置く）。外のもので使うのは AWS の認証ファイル（参照のみ）と、指定したときの認証ファイルの複製です。これは「どの設定を読み込むか」の隔離で、ファイルの読み書きを禁止するものではありません（Read や Bash を許可すれば絶対パスで外も読めます）。そのため評価には合成データだけを使います。</p>
 <figure>
 <div class="scroll"><svg viewBox="0 0 900 360" role="img" aria-label="エージェント CLI は HOME と設定ディレクトリを一時ホームに向けられ、作業ディレクトリで動く。普段の ~/.claude は読まない。AWS 認証ファイルは参照のみ。認証ファイルは copy_credentials のときだけ複製され、試行後に削除される">
 <defs>
@@ -298,7 +298,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <tr><th>試行の状態</th><th>例</th><th>pass@1・pass^k の分母</th><th>キャッシュ</th></tr>
 <tr><td class="ok">合格</td><td>全グレーダー合格</td><td>入る</td><td>保存</td></tr>
 <tr><td class="ng">不合格</td><td>形式違反・<code>timeout</code>・<code>max_turns</code>・<code>budget_exceeded</code>・<code>agent_error</code></td><td>入る</td><td>保存（<code>timeout</code> は保存しない）</td></tr>
-<tr><td>除外</td><td><code>rate_limit</code>・<code>overloaded</code>・<code>auth</code>・<code>network</code>・<code>launch_failed</code>・<code>harness_error</code>・<code>judge_error</code>・<code>not_graded</code>・<code>interrupted</code></td><td>入らない（件数と理由を表示）</td><td>保存しない</td></tr>
+<tr><td>除外</td><td><code>rate_limit</code>・<code>overloaded</code>・<code>auth</code>・<code>api_error</code>・<code>network</code>・<code>launch_failed</code>・<code>harness_error</code>・<code>judge_error</code>・<code>not_graded</code>・<code>interrupted</code></td><td>入らない（件数と理由を表示）</td><td>保存しない</td></tr>
 <tr><td>未実行</td><td><code>--max-cost-usd</code>・<code>--monthly-budget-usd</code>（Claude・Codex の口座ごと）に到達（<code>budget_stop</code>）</td><td>入らない（件数を表示）</td><td>保存しない</td></tr>
 </table>
 

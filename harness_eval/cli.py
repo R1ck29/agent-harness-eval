@@ -124,7 +124,8 @@ def _budget_warnings(a, profiles) -> list[str]:
 
 def _ancestor_message(leaks: list[str]) -> str:
     return (f"--out より上のフォルダに、試行に読み込まれる指示・スキルがあります: {leaks}。一時ホームにしても CLI は上位フォルダの "
-            "CLAUDE.md・.claude/skills・AGENTS.md を読むため、配布物なしの基準にも入り比較が壊れます。--out をこれらのない場所"
+            "指示・スキル・ルール・サブエージェント（CLAUDE.md・AGENTS.md・.mcp.json、.claude/・.codex/・.agents/）を読むため、"
+            "配布物なしの基準にも入り比較が壊れます。--out をこれらのない場所"
             "（リポジトリやホームの外。ただし OS の一時フォルダは Codex が拒否するので不可）にしてください")
 
 
@@ -317,7 +318,7 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--baseline", help="Δ の基準にするプロファイル id")
         sp.add_argument("--seed", type=int, default=0, help="プロファイルの実行順を入れ替える乱数の種（同じ値なら同じ順）")
         sp.add_argument("--allow-ancestor-instructions", action="store_true",
-                        help="--out より上に CLAUDE.md・.claude/skills・AGENTS.md があっても実行する（結果に記録。比較は汚れうる）")
+                        help="--out より上に CLAUDE.md・AGENTS.md・.claude/ などがあっても実行する（結果に記録。比較は汚れうる）")
         sp.add_argument("--out", default="results", help="結果の出力先")
 
     sp = sub.add_parser("validate", help="YAML の検証と設計ルールの警告")

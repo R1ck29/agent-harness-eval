@@ -62,10 +62,10 @@ def route_signature(profile: Profile, environ: dict[str, str]) -> str:
 
 
 # 試行の作業ディレクトリ（--out の下）より上のフォルダにあると、一時ホームにしても CLI が読み込んでしまう指示・スキル
-# （最終レビューの実測: Claude Code 2.1.295 は上位の CLAUDE.md と .claude/skills を、Codex 0.146.1 は git ルートまでの
-# AGENTS.md を読んだ）。配布物なしの基準にも入り Δ を壊すため、見つかれば run は止める（安全側に、同じ系統の名前も見る）
-ANCESTOR_INSTRUCTIONS = ("CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md", ".claude/skills", "AGENTS.md", "AGENTS.override.md",
-                         ".agents/skills")
+# （最終レビューの実測: Claude Code 2.1.295 は上位の CLAUDE.md と .claude/ の skills・rules・agents・commands を、Codex 0.146.1 は
+# git ルートまでの AGENTS.md を読んだ）。配布物なしの基準にも入り Δ を壊すため、見つかれば run は止める。
+# 安全側に、エージェント設定のフォルダ（.claude/・.codex/・.agents/）は中身を問わず、同じ系統のファイル名も見る
+ANCESTOR_INSTRUCTIONS = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", ".mcp.json", ".claude", ".codex", ".agents")
 
 
 def ancestor_instructions(out_dir: Path) -> list[str]:

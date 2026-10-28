@@ -104,7 +104,7 @@ python -m harness_eval run --tasks examples/tasks --profiles examples/profiles/c
     --trials 3 --baseline claude-baseline --max-cost-usd 5
 ```
 
-結果は `--out`（既定 `results/`）の `<実行ID>/report.html` に出ます。ホームの下で使い、ホームに `CLAUDE.md` や `~/.claude/skills` があると `run` は止まります。その場合は `--out` をホームの外にしてください（§3.3）。
+結果は `--out`（既定 `results/`）の `<実行ID>/report.html` に出ます。`--out` とその上のフォルダに `CLAUDE.md`・`AGENTS.md`・`.mcp.json` や `.claude/`・`.codex/`・`.agents/` フォルダ があると `run` は止まります。ホーム（`~/.claude` など）やリポジトリの下は該当しやすいので、`--out` はそれらの外にしてください（§3.3）。
 
 **サンプルの中身**（履歴がないときの標準タスクも兼ねる）: 合成の売上 CSV（`examples/fixtures`）を使う 6 タスクと、
 小さな配布物 `examples/harnesses/ds-lite`（CLAUDE.md の出力形式ルール・「曖昧なら確認」ルール + 月別集計スキル）。
@@ -180,7 +180,7 @@ python -m harness_eval run --tasks examples/tasks --profiles examples/profiles/c
 これは「どの設定を読み込むか」の隔離で、ファイルの読み書きを禁止するものではありません（Read や Bash を許可すれば絶対パスで外も読めます）。評価には合成データだけを使ってください。
 `install` のコピー先は試行ディレクトリの中に限ります（相対パスは一時ホーム基準。外を指すと `harness_error`）。
 
-**上のフォルダの指示は防げない**: 試行の作業ディレクトリは `--out` の下にあり、CLI はそこから上のフォルダの `CLAUDE.md`・`.claude/skills`・`AGENTS.md` も読み込みます（一時ホームでは防げない。最終レビューで実測）。配布物なしの基準にも入って比較が壊れるため、`run` はこれらが `--out` とその上にあれば止まり（`--allow-ancestor-instructions` で承知の上で実行すると結果とレポートに記録）、`doctor` は NG にします。`--out` はリポジトリやホームの外（例: macOS `/Users/Shared/harness-eval`、Windows `C:\harness-eval`）に置いてください。OS の一時フォルダは Codex が拒否するため使えません。
+**上のフォルダの指示は防げない**: 試行の作業ディレクトリは `--out` の下にあり、CLI はそこから上のフォルダの指示・スキル・ルール・サブエージェント・コマンドも読み込みます（一時ホームでは防げない。最終レビューで、上位の `CLAUDE.md`、`.claude/` の skills・rules・agents・commands、git ルートまでの `AGENTS.md` を実測）。配布物なしの基準にも入って比較が壊れるため、`run` は `CLAUDE.md`・`AGENTS.md`・`.mcp.json` や `.claude/`・`.codex/`・`.agents/` フォルダ が `--out` とその上にあれば止まり（`--allow-ancestor-instructions` で承知の上で実行すると結果とレポートに記録）、`doctor` は NG にします。`--out` はリポジトリやホームの外（例: macOS `/Users/Shared/harness-eval`、Windows `C:\harness-eval`）に置いてください。OS の一時フォルダは Codex が拒否するため使えません。
 
 ```
  普段の環境                              1 試行の中
@@ -287,7 +287,7 @@ graders:
 ```
  エージェント終了
    │
-   ├─ 環境起因の異常終了？（rate_limit・overloaded・auth・network・launch_failed・harness_error・interrupted）
+   ├─ 環境起因の異常終了？（rate_limit・overloaded・auth・api_error・network・launch_failed・harness_error・interrupted）
    │      └─ yes ─▶【除外】採点しない・集計に入れない（rate_limit / overloaded は再試行）
    │
    ├─ コード判定（llm 以外のグレーダー）をすべて実行
@@ -310,7 +310,7 @@ graders:
 |---|---|---|---|
 | 合格 | 全グレーダー合格 | 入る | 保存 |
 | 不合格 | 形式違反、`timeout`、`max_turns`、`budget_exceeded`、`agent_error` | 入る | 保存（`timeout` だけは保存しない） |
-| 除外 | `rate_limit`、`auth`、`network`、`judge_error`、`not_graded`、`interrupted` など | 入らない（件数と理由をレポートに表示） | 保存しない |
+| 除外 | `rate_limit`、`auth`、`api_error`、`network`、`judge_error`、`not_graded`、`interrupted` など | 入らない（件数と理由をレポートに表示） | 保存しない |
 | 未実行 | `--max-cost-usd`・`--monthly-budget-usd` に到達（`budget_stop`） | 入らない（件数をレポートに表示） | 保存しない |
 
 - `command` の `run` では `{python}`（実行中の Python）・`{workdir}`・`{task_dir}` が使えます。作業ディレクトリで実行され、
@@ -493,7 +493,7 @@ SKILL.md は共通形式なのでそのまま複製できます（`examples/prof
 pass@1 は「平均的にどれくらいできるか」、pass^k は「k 回続けて使っても毎回できるか」。配布物の変更でたまにしか失敗しなくなった、
 という差は pass@1 では小さく見え、pass^k で大きく出ます。
 
-**集計から除外する試行**（評価対象の失敗ではなく環境起因など）: `rate_limit`・`overloaded`・`auth`・`launch_failed`・`harness_error`・
+**集計から除外する試行**（評価対象の失敗ではなく環境起因など）: `rate_limit`・`overloaded`・`auth`・`api_error`（それ以外の API エラー。例: モデル ID の誤りで 400）・`launch_failed`・`harness_error`・
 `network`（Codex が API に接続できず再接続を繰り返しただけ）・`judge_error`（LLM 判定を呼べなかった）・
 `not_graded`（実行されたグレーダーがない。例: `llm` だけのタスクを `--no-llm` で実行）・`interrupted`（Ctrl-C で止めた）。
 レポートに件数と理由を出します。費用の上限に達して実行しなかった試行（`budget_stop`）は「未実行」として件数だけ出します。
@@ -582,6 +582,7 @@ python -m harness_eval gate --current results/<今回> --previous results/<前�
 | 通過 | 区間の下端 ≥ −m（悪化していても m 以内と言える） | 0 |
 | 不通過 | 区間の上端 < −m（はっきり悪化）、安全違反の失敗分類（既定 `unsafe_access`。`--hard-category` で追加でき、既定は常に含む）が 1 件でもある、または比較できない（k・LLM 判定の有無・タスク定義が違う、今回の結果にプロファイル・タスクがない、指標を算出できない） | 1 |
 | 判定不能 | それ以外、または比較できたタスクが `--min-tasks`（既定 10）未満 | 3 |
+| （判定できない） | 定義の誤り・結果のフォルダがない（`summary.json`・`trials.jsonl`） | 2 |
 
 区間はタスク単位のブートストラップ（試行を独立な標本として数えない）。タスクが少ないと区間は実際より狭く出やすいため、判断には 20 タスク以上・
 3 試行以上を目安にしてください。前回より下がったタスクの一覧は参考として表示します（判定には使いません）。指標は `--metric`（既定 `pass_hat_k`）。
