@@ -18,7 +18,7 @@ from harness_eval.isolation import (build_env, make_trial_paths, run_install, ru
 from harness_eval.metrics import decide, deltas, gate, paired_bootstrap, pass_hat_k, summarize  # noqa: E402
 from harness_eval.runner import append_spend, month_spent, schedule  # noqa: E402
 from harness_eval.adapters import older_than_verified  # noqa: E402
-from harness_eval.isolation import route_signature, route_variables  # noqa: E402
+from harness_eval.isolation import ancestor_instructions, route_signature, route_variables  # noqa: E402
 from harness_eval.record import TrialRecord  # noqa: E402
 from harness_eval.spec import Grader, SpecError, lint, load_profile, load_task, load_tasks, load_profiles  # noqa: E402
 
@@ -467,6 +467,22 @@ class DoctorTests(unittest.TestCase):
         self.assertFalse(older_than_verified("codex", "codex-cli 0.163.0"))
         self.assertIsNone(older_than_verified("codex", "unknown"))
         self.assertIsNone(older_than_verified("codex", None))
+
+
+class AncestorTests(unittest.TestCase):
+    def test_ancestor_instructions(self):
+        """試行の作業ディレクトリ（--out の下）より上のフォルダの指示・スキルは、一時ホームでも CLI に読み込まれる（実測）。"""
+        tmp = Path(tempfile.mkdtemp()).resolve()  # macOS の /var → /private/var をそろえる
+        self.addCleanup(shutil.rmtree, tmp, True)
+        out = tmp / "outer" / "inner" / "results"
+        out.mkdir(parents=True)
+        self.assertEqual(ancestor_instructions(out), [])
+        write(tmp / "outer" / "CLAUDE.md", "rule")
+        write(tmp / "outer" / ".claude" / "skills" / "s" / "SKILL.md", "x")
+        write(tmp / "outer" / "inner" / "AGENTS.md", "rule")
+        found = ancestor_instructions(out)
+        self.assertEqual(sorted(Path(f).relative_to(tmp).as_posix() for f in found),
+                         ["outer/.claude/skills", "outer/CLAUDE.md", "outer/inner/AGENTS.md"])
 
 
 class ScheduleTests(unittest.TestCase):

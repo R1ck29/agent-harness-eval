@@ -146,6 +146,7 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <ul>
 <li>Windows の実機、Codex での実際のエージェント実行、macOS キーチェーンのログインを一時ホームで使えるかは未確認。社内では最初に <code>doctor</code>・<code>doctor --live</code>・<code>harvest --dry-run</code> を通す。</li>
 <li>統合を行った開発機の CLI（Claude Code 2.1.295・Codex 0.146.1）は、起動フラグと出力形式を確かめた版（2.1.304・0.163.0）より古い。使うフラグはどちらのヘルプにもある（Claude の <code>--max-turns</code> は非表示の既存フラグ）が、出力形式の違いは <code>doctor --live</code> で確かめる。</li>
+<li>CLI は作業ディレクトリより上のフォルダの <code>CLAUDE.md</code>・<code>.claude/skills</code>・<code>AGENTS.md</code> を一時ホームでも読む（最終レビューで実測）。配布物なしの基準を汚すため、<code>--out</code> とその上にあれば <code>run</code> は止まり <code>doctor</code> は NG にする。<code>--out</code> はリポジトリやホームの外に置く必要がある。</li>
 <li>Claude Code の同梱スキル・組織の管理設定は一時ホームでも読み込まれる。試行ごとに実際に読み込まれた構成要素を記録し、レポートで見えるようにしている。</li>
 <li>少ないタスクでは区間が狭く出やすい（§4）。判断には 20 タスク以上・3 試行以上を目安にする。</li>
 <li><code>harvest</code> の架空化は日本語の固有名詞を機械で判定できない。下書きは人が確認してから使う。</li>

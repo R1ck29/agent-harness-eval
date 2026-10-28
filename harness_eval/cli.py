@@ -11,7 +11,7 @@ from pathlib import Path
 import yaml
 
 from . import __version__
-from .isolation import route_variables
+from .isolation import ancestor_instructions, route_variables
 from .metrics import HARD_CATEGORIES, gate
 from .report import render
 from .runner import RunOptions, Runner, load_run
@@ -57,6 +57,9 @@ def cmd_plan(a) -> int:
     tasks, profiles = _load(a)
     runner = Runner(tasks, profiles, _opts(a), Path(a.out))
     p = runner.plan()
+    leaks = ancestor_instructions(Path(a.out))
+    if leaks:
+        print(f"  注意: {_ancestor_message(leaks)}（このままでは run が止まります）")
     for w in _budget_warnings(a, profiles):
         print(f"  注意: {w}")
     print(f"組み合わせ {p['pairs']} × 試行 {a.trials} = {p['trials_total']} 試行")
@@ -77,6 +80,10 @@ def cmd_run(a) -> int:
     opt = _opts(a)
     if opt.baseline and opt.baseline not in {p.id for p in profiles}:
         print(f"--baseline '{opt.baseline}' がプロファイルにありません", file=sys.stderr)
+        return 2
+    leaks = ancestor_instructions(Path(a.out))
+    if leaks and not a.allow_ancestor_instructions:
+        print(_ancestor_message(leaks) + "（承知の上で実行するなら --allow-ancestor-instructions。結果に記録されます）", file=sys.stderr)
         return 2
     runner = Runner(tasks, profiles, opt, Path(a.out))
     judge = [runner.judge_route_profile()] if runner.judge_profile is None and runner.judge_warning else []
@@ -113,6 +120,12 @@ def _budget_warnings(a, profiles) -> list[str]:
     if subs and a.monthly_budget_usd is not None:
         w.append(f"{subs} はサブスクリプション（billing: subscription）なので月の予算には数えません（--max-cost-usd には数えます）")
     return w
+
+
+def _ancestor_message(leaks: list[str]) -> str:
+    return (f"--out より上のフォルダに、試行に読み込まれる指示・スキルがあります: {leaks}。一時ホームにしても CLI は上位フォルダの "
+            "CLAUDE.md・.claude/skills・AGENTS.md を読むため、配布物なしの基準にも入り比較が壊れます。--out をこれらのない場所"
+            "（リポジトリやホームの外。ただし OS の一時フォルダは Codex が拒否するので不可）にしてください")
 
 
 def _route_warnings(profiles) -> list[str]:
@@ -188,6 +201,10 @@ def cmd_doctor(a) -> int:
         if inherited:
             static_ok = False
             print(f"  NG: 親の環境から経路を変える変数 {inherited} を宣言なしに引き継ぎます（値は表示しません）。意図して親の値を使うならプロファイルの inherit_env に名前だけ書き（値は書かない）、不要なら env_unset に入れてください")
+    leaks = ancestor_instructions(Path(a.out))
+    if leaks:
+        static_ok = False
+        print(f"NG: {_ancestor_message(leaks)}")
     if not a.live:
         print("（--live を付けると、隔離環境で認証・配布物の読み込みを実際に確認します。1 プロファイルあたり 1 回の最小呼び出し）")
         return 0 if static_ok else 1
@@ -299,6 +316,8 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--keep", choices=["all", "failed", "none"], default="failed", help="作業ディレクトリを残す範囲（none は生ログも消す）")
         sp.add_argument("--baseline", help="Δ の基準にするプロファイル id")
         sp.add_argument("--seed", type=int, default=0, help="プロファイルの実行順を入れ替える乱数の種（同じ値なら同じ順）")
+        sp.add_argument("--allow-ancestor-instructions", action="store_true",
+                        help="--out より上に CLAUDE.md・.claude/skills・AGENTS.md があっても実行する（結果に記録。比較は汚れうる）")
         sp.add_argument("--out", default="results", help="結果の出力先")
 
     sp = sub.add_parser("validate", help="YAML の検証と設計ルールの警告")

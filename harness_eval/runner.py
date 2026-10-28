@@ -28,8 +28,9 @@ from typing import Any, Callable
 from . import __version__
 from .adapters import classify_stderr, get_adapter
 from .graders import JudgeConfig, JudgeUnavailable, grade_all
-from .isolation import (build_env, copy_credentials, fill, kill_running, make_trial_paths, placeholders, route_signature,
-                        run_install, run_process, snapshot)
+from .graders import JUDGE_PROMPT
+from .isolation import (ancestor_instructions, build_env, copy_credentials, fill, kill_running, make_trial_paths, placeholders,
+                        route_signature, run_install, run_process, snapshot)
 from .metrics import summarize
 from .record import EXCLUDED_ERRORS, TrialRecord
 from .spec import Profile, SpecError, Task
@@ -150,7 +151,8 @@ def cache_key(task: Task, profile: Profile, version: str | None, trial: int, opt
               route: str = "") -> str:
     """route: 試行に渡る経路の変数の要約（route_signature: 名前と、秘密でないものは値のハッシュ）。経路を変えれば再実行する。"""
     judge = f"{opt.llm}:{opt.judge_agent}:{opt.judge_model}:{judge_sig}" if uses_llm(task) else "-"
-    raw = "|".join([CACHE_SCHEMA, task.id, task.content_hash(), profile.id, profile.content_hash(), str(version), str(trial), judge,
+    # ツールの版も入れる（起動コマンドや採点の作りが変われば再実行する）
+    raw = "|".join([CACHE_SCHEMA, __version__, task.id, task.content_hash(), profile.id, profile.content_hash(), str(version), str(trial), judge,
                     route])
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
@@ -186,7 +188,9 @@ class Runner:
         # 判定の結果に効きうるもの（借りるプロファイルの環境変数・実行ファイル・経路の変数の要約）をキャッシュキーに入れる
         self.judge_sig = hashlib.sha256(json.dumps(
             [jp.id if jp else None, jp.env if jp else None, jp.env_unset if jp else None,
-             jp.executable if jp else None, opt.judge_executable, route_signature(self.judge_route_profile(), dict(os.environ))],
+             jp.executable if jp else None, opt.judge_executable, route_signature(self.judge_route_profile(), dict(os.environ)),
+             hashlib.sha256(JUDGE_PROMPT.encode()).hexdigest()[:12],
+             cli_version(get_adapter(opt.judge_agent, jp, executable=opt.judge_executable)) if opt.llm else None],
             sort_keys=True).encode()).hexdigest()[:12]
         self.judge_warning = (f"LLM 判定（{opt.judge_agent}）の認証を借りる同種のプロファイルがありません。親の環境変数だけで判定します"
                               if opt.llm and jp is None and any(uses_llm(t) for t, _ in self.pairs) else None)
@@ -345,6 +349,9 @@ class Runner:
 
     def _execute_in(self, task: Task, profile: Profile, trial: int, key: str, adapter, tdir: Path, tp) -> TrialRecord:
         rec = self._record(task, profile, trial, key, trial_dir=str(tdir), started_at=datetime.now(timezone.utc).isoformat())
+        if self.interrupted.is_set():  # 準備の前に Ctrl-C された → 何もしない
+            rec.valid, rec.error = False, {"type": "interrupted", "message": "Ctrl-C で中断"}
+            return rec
         try:
             if task.fixture:
                 if task.fixture.is_dir():
@@ -358,6 +365,9 @@ class Runner:
         except Exception as e:
             rec.error = {"type": "harness_error", "message": str(e)[:1000]}
             rec.valid = False
+            return rec
+        if self.interrupted.is_set():  # 準備（install など）の間に Ctrl-C された → エージェントを起動しない
+            rec.valid, rec.error = False, {"type": "interrupted", "message": "Ctrl-C で中断"}
             return rec
         before = snapshot(tp.workdir)
         ph = placeholders(tp, profile)
@@ -507,6 +517,7 @@ class Runner:
             "tasks": {t.id: {"hash": t.content_hash(), "tags": t.tags, "paired_negative": t.paired_negative, "llm": uses_llm(t)}
                       for t in {t.id: t for t, _ in self.pairs}.values()},
             "spent_usd_this_run": self.spent,
+            "ancestor_instructions": ancestor_instructions(self.run_dir.parent),
             "not_run": sum(1 for r in records if (r.error or {}).get("type") in NOT_RUN_ERRORS),
         }
         summary["meta"] = meta
@@ -515,6 +526,8 @@ class Runner:
 
 
 def load_run(run_dir: Path) -> tuple[list[TrialRecord], dict[str, Any]]:
+    if not (run_dir / "summary.json").is_file() or not (run_dir / "trials.jsonl").is_file():
+        raise SpecError(f"{run_dir}: 実行結果（summary.json・trials.jsonl）がありません")
     recs = [TrialRecord.from_dict(json.loads(l)) for l in
             (run_dir / "trials.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
     summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))

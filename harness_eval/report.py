@@ -56,6 +56,9 @@ def render(summary: dict[str, Any], records: list[TrialRecord], baseline: str | 
     out.append(f"<h1>ハーネス評価レポート</h1><div class='mut'>run {_e(meta.get('run_id'))} ・ {_e(meta.get('started_at'))} ・ "
                f"試行 {_e(meta.get('options', {}).get('trials'))} 回/組 ・ k={k} ・ LLM判定 {'あり' if meta.get('options', {}).get('llm') else 'なし'}"
                f"（{_e(meta.get('options', {}).get('judge_agent'))}/{_e(meta.get('options', {}).get('judge_model'))}）</div>")
+    if meta.get("ancestor_instructions"):
+        out.append("<div class='warn'>注意: --out より上のフォルダの指示・スキルが全試行（配布物なしの基準を含む）に読み込まれた可能性があります: "
+                   f"{_e(', '.join(meta['ancestor_instructions']))}</div>")
 
     out.append("<h2>サマリー</h2><div class='wrap'><table><tr><th>プロファイル</th><th>エージェント</th><th class='n'>pass^k</th>"
                "<th class='n'>pass@1</th><th class='n'>平均スコア</th><th class='n'>有効/全試行</th><th class='n'>総コスト</th>"

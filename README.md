@@ -104,7 +104,7 @@ python -m harness_eval run --tasks examples/tasks --profiles examples/profiles/c
     --trials 3 --baseline claude-baseline --max-cost-usd 5
 ```
 
-結果は `results/<実行ID>/report.html` に出ます。
+結果は `--out`（既定 `results/`）の `<実行ID>/report.html` に出ます。ホームの下で使い、ホームに `CLAUDE.md` や `~/.claude/skills` があると `run` は止まります。その場合は `--out` をホームの外にしてください（§3.3）。
 
 **サンプルの中身**（履歴がないときの標準タスクも兼ねる）: 合成の売上 CSV（`examples/fixtures`）を使う 6 タスクと、
 小さな配布物 `examples/harnesses/ds-lite`（CLAUDE.md の出力形式ルール・「曖昧なら確認」ルール + 月別集計スキル）。
@@ -180,6 +180,8 @@ python -m harness_eval run --tasks examples/tasks --profiles examples/profiles/c
 これは「どの設定を読み込むか」の隔離で、ファイルの読み書きを禁止するものではありません（Read や Bash を許可すれば絶対パスで外も読めます）。評価には合成データだけを使ってください。
 `install` のコピー先は試行ディレクトリの中に限ります（相対パスは一時ホーム基準。外を指すと `harness_error`）。
 
+**上のフォルダの指示は防げない**: 試行の作業ディレクトリは `--out` の下にあり、CLI はそこから上のフォルダの `CLAUDE.md`・`.claude/skills`・`AGENTS.md` も読み込みます（一時ホームでは防げない。最終レビューで実測）。配布物なしの基準にも入って比較が壊れるため、`run` はこれらが `--out` とその上にあれば止まり（`--allow-ancestor-instructions` で承知の上で実行すると結果とレポートに記録）、`doctor` は NG にします。`--out` はリポジトリやホームの外（例: macOS `/Users/Shared/harness-eval`、Windows `C:\harness-eval`）に置いてください。OS の一時フォルダは Codex が拒否するため使えません。
+
 ```
  普段の環境                              1 試行の中
  ─────────                              ─────────
@@ -202,7 +204,7 @@ python -m harness_eval run --tasks examples/tasks --profiles examples/profiles/c
 | 経路を変える変数（API キー・Bedrock の切り替え・モデルの別名など） | 親の値をそのまま渡す | `env` か `inherit_env`（名前だけ）で宣言する。宣言のない引き継ぎは `doctor` が NG（§5「認証」） |
 
 Claude Code にはさらに `--settings {"syncClaudeAiSkills":false,"syncClaudeAiPlugins":false}` を渡し、claude.ai アカウントから同期されるスキル・プラグインの混入を防ぎます。
-それでも残るもの（同梱スキル・組織の管理設定）があるため、実際に読み込まれた構成要素を試行ごとに記録します（§10）。
+それでも残るもの（同梱スキル・組織の管理設定。上のフォルダの指示は上記のとおり止める）があるため、実際に読み込まれた構成要素を試行ごとに記録します（§10）。
 
 ### 3.4 モジュール構成
 
@@ -602,7 +604,7 @@ python -m harness_eval calibrate results/<実行ID> --labels labels.yaml
   Skill ツールの入力は `{"skill": 名前, "args": …}`。init イベントに CLI 版・モデル・読み込まれたスキル/プラグイン/MCP が入る。
 - Claude Code: 一時ホームにしても **claude.ai アカウントのスキル/プラグイン同期**で配布物以外が混入する（実測 94 件）。
   `--settings` の `syncClaudeAiSkills:false` / `syncClaudeAiPlugins:false` で 23 件まで減り、残りは Claude Code 同梱スキルと
-  実行環境側で管理されたプラグインだった。**完全には隔離できない**ため、各試行で実際に読み込まれた構成要素を記録し、
+  実行環境側で管理されたプラグインだった。**完全には隔離できない**（上位フォルダの指示も読まれる。§3.3 のとおり `run` が止める）ため、各試行で実際に読み込まれた構成要素を記録し、
   レポートの「実行環境の記録」と `doctor --live` で見えるようにしています。組織の managed settings も隔離できません。
 - Codex 0.163.0: `codex exec --json` のイベントは `thread.started` / `turn.*` / `item.*` / `error` のフラットな形式
   （`codex-rs/exec/src/exec_events.rs` で確認。一部の記事にある「エンベロープ形式」はソースでは確認できなかった）。
