@@ -60,12 +60,12 @@ Not adopted (the reasons go in docs/design.html):
 - [x] (5) doctor route and version checks, tests first
 - [x] (6) example references and selftest; (7) lint warning
 - [x] Update README, guide.html and design.html; no stale statements (grep for BenchFlow, old versions, old flags)
-- [ ] Verification:
+- [x] Verification:
   - full test suite on Python 3.10–3.13, ruff, coverage ≥80%
   - build the zip and run it from the unzipped copy
   - `doctor` on this Mac
   - a capped real smoke run, only if authorized
-- [ ] Independent review (a fresh reviewer with no build context); fix every CRITICAL/HIGH finding; re-review
+- [x] Independent review (a fresh reviewer with no build context); fix every CRITICAL/HIGH finding; re-review
 
 ## Review (2026-10-28)
 
@@ -75,6 +75,15 @@ Each step was verified by an independent reviewer subagent in a separate git wor
 - cost-doctor: FAIL on attempt 1 (HIGH: doctor told users to write secrets into profiles), fixed with the name-only
   `inherit_env`, extended route variables and the judge-route check; PASS on attempt 2. A MEDIUM finding (value-only
   changes of model aliases reused the cache) was fixed in the docs step: non-secret values are hashed into the key.
+- controls-docs: FAIL on attempts 1 and 2 (docs/code mismatches, duplication), PASS on attempt 3 (granted by the user).
+- verify (final whole-repo review): FAIL on attempt 1 (HIGH: instruction files in folders above --out leak into every
+  trial, confirmed with a local capture server) and attempt 2 (the check missed .claude/rules, agents, commands); fixed by
+  refusing runs when CLAUDE.md, CLAUDE.local.md, AGENTS.md, AGENTS.override.md, .mcp.json or any .claude/, .codex/,
+  .agents/ folder is at or above --out; other API errors became the excluded api_error. PASS on attempt 3 (granted).
+- graphctl completion-check: complete. Final state: 62 tests on Python 3.10-3.13, coverage 90.9%, ruff clean,
+  dist/agent-harness-eval.zip runs from an unzipped copy.
+- Not done: no real API run in this session (doctor --live and a capped smoke run need the user's go-ahead and an --out
+  outside home); Windows and real Codex runs remain unverified.
 - Residual risks are listed in docs/design.html §8.
 
 ## History
