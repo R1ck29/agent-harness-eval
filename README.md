@@ -452,7 +452,11 @@ executable: null              # CLI の場所（例: ["C:/tools/claude.exe"]）
 - **Bedrock（Claude Code）**: `CLAUDE_CODE_USE_BEDROCK` などを `env`（または `inherit_env`）で。AWS の認証ファイルは、
   ホームを差し替えても本物（`~/.aws/credentials` / `~/.aws/config`）を参照するよう `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE` を自動で設定します（未設定でファイルがある場合）。
 - **ファイルに保存されたログイン**（`~/.codex/auth.json`、Linux の `~/.claude/.credentials.json`）: `copy_credentials: true`。
-  macOS のキーチェーンに保存された Claude Code のログインが一時ホームで使えるかは未確認です。`doctor --live` で確かめてください。
+  **macOS のキーチェーンに保存されたログイン（`claude auth login`）は試行では使えません**（2026-10-28、Claude Code 2.1.295 で実測。
+  一時ホームでも本物のホームでも、設定フォルダ `CLAUDE_CONFIG_DIR` を分けると「Not logged in」になる）。
+- **サブスクリプション（Pro / Max）で評価する**: 端末で `claude setup-token` を実行して長期トークンを作り（推論専用）、
+  `export CLAUDE_CODE_OAUTH_TOKEN=<トークン>` してから実行します。プロファイルには値を書かず、`inherit_env: [CLAUDE_CODE_OAUTH_TOKEN]` と
+  `billing: subscription` を書きます（CLI が表示する使い方と同じ。トークンはチャットやファイルに貼らない）。
 - **LLM 判定の認証**: 判定も一時ホームで動くため、プロファイルの `env`・`env_unset`・`copy_credentials`・`executable` を借ります
   （配布物と追加引数は借りません）。借りる先は `--judge-profile` で指定、省略時は判定エージェントと同じ種類の `--baseline`、
   なければ最初の同種プロファイル。判定が認証エラーなどで動かなかった試行は `judge_error` として集計から除外します。

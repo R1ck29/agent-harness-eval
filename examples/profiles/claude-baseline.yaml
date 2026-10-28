@@ -7,3 +7,7 @@ model: sonnet
 #   CLAUDE_CODE_USE_BEDROCK: "1"
 #   AWS_REGION: ap-northeast-1
 #   ANTHROPIC_MODEL: <推論プロファイル ARN>   # model より優先したい場合は model を消す
+# サブスクリプション（Pro / Max）で評価する場合: 端末で `claude setup-token` → `export CLAUDE_CODE_OAUTH_TOKEN=<トークン>` してから実行
+# （macOS のキーチェーンのログインは試行では使えない）。値はここに書かない:
+# inherit_env: [CLAUDE_CODE_OAUTH_TOKEN]
+# billing: subscription
