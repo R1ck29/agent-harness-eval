@@ -315,6 +315,15 @@ class E2E(unittest.TestCase):
             code, out = run_cli("doctor", "--profiles", str(prof), "--out", str(self.out))
         self.assertEqual(code, 0, out)
         self.assertNotIn("sk-secret-value", out + prof.read_text(encoding="utf-8"))
+        # 宣言したのに親の環境にない → doctor は NG、run は警告（全試行がログインできずに終わるのを防ぐ）
+        with mock.patch.dict(os.environ, clean, clear=True):
+            code, out = run_cli("doctor", "--profiles", str(prof), "--out", str(self.out))
+            self.assertEqual(code, 1, out)
+            self.assertIn("ANTHROPIC_API_KEY", out)
+            self.assertIn("設定されていません", out)
+            code, out = run_cli("run", "--tasks", str(self.ex / "tasks" / "arithmetic-no-skill.yaml"), "--profiles", str(prof),
+                                "--out", str(self.out), "--cache-dir", str(self.cache), "--no-llm")
+            self.assertIn("設定されていません", out)
 
     def test_refuses_out_under_instruction_files(self):
         """--out より上に CLAUDE.md などがあると、基準（配布物なし）にも読み込まれるため run は止まる。明示すれば実行し記録する。"""
