@@ -632,6 +632,7 @@ python -m harness_eval calibrate results/<実行ID> --labels labels.yaml
 ```bash
 python -m unittest discover -s tests        # 偽の claude / codex CLI を使うためトークンは使わない
 uv run pytest --cov                         # 開発用（pytest・カバレッジ 80% 以上・ruff は pyproject.toml の dev グループ）
+mkdir -p dist && git archive --format=zip --prefix=agent-harness-eval/ -o dist/agent-harness-eval.zip HEAD -- . ':!tasks'   # 社内配布用の zip（作業メモの tasks/ は含めない）
 ```
 
 `tests/fake_agents/` は実機で観測した出力形式を再現する偽 CLI、`tests/data/` は実機の出力（Claude Code の stream-json、

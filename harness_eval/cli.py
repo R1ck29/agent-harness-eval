@@ -62,7 +62,7 @@ def cmd_plan(a) -> int:
     print(f"組み合わせ {p['pairs']} × 試行 {a.trials} = {p['trials_total']} 試行")
     print(f"  キャッシュで省略: {p['cache_hits']} 試行 ／ 実際にエージェントを呼ぶ: {p['agent_calls']} 回")
     print(f"  概算費用: ${p['estimated_cost_usd']:.4f}（履歴がなく見積もれない呼び出し {p['unknown_cost_calls']} 回）")
-    print(f"  LLM 判定: {'あり（コード判定が全合格の試行のみ）' if p['llm_judge'] else 'なし'}")
+    print(f"  LLM 判定: {'あり（コード判定が全合格の試行のみ。配布物がないと通らない判定の不合格は除く）' if p['llm_judge'] else 'なし'}")
     for agent, spent in (runner.month_spent or {}).items():
         print(f"  今月の実績（{agent}）: ${spent:.4f} ／ 月の予算 ${a.monthly_budget_usd:.2f}（残り ${runner.month_remaining(agent):.4f}）")
     for pid, v in p["cli_versions"].items():
