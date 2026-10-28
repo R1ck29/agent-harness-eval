@@ -344,7 +344,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <rect x="580" y="130" width="300" height="56" rx="6" class="box"/><text x="730" y="153" text-anchor="middle">エージェントを実行</text><text x="730" y="172" text-anchor="middle" class="t-sm">有効な結果をキャッシュに保存</text>
 <text x="450" y="222" text-anchor="middle" class="t-sm">キーの材料：タスク・フィクスチャ・採点スクリプト・プロファイル・配布物の中身・CLI 版・試行番号・経路の変数・（llm があれば）判定の設定</text>
 </svg></div>
-<figcaption>経路の変数（API キー・Bedrock の切り替え・<code>ANTHROPIC_DEFAULT_SONNET_MODEL</code> など）はキーに入ります（キー・トークンは名前だけ、それ以外は値のハッシュも）。ただしサービス側でモデルの別名（sonnet など）が指す実体が変わっても、キーは変わりません。モデル移行の評価やリリース判定では <code>--no-cache</code> を付けるか、モデル ID を固定してください。</figcaption>
+<figcaption>経路の変数（API キー・Bedrock の切り替え・<code>ANTHROPIC_DEFAULT_SONNET_MODEL</code> など）はキーに入ります（キー・トークン・ヘッダは名前だけ、それ以外は値のハッシュも）。ただしサービス側でモデルの別名（sonnet など）が指す実体が変わっても、キーは変わりません。モデル移行の評価やリリース判定では <code>--no-cache</code> を付けるか、モデル ID を固定してください。</figcaption>
 </figure>
 <table>
 <tr><th>トークンを使う場所</th><th>節約の仕組み</th><th>評価の正しさへの影響</th></tr>
@@ -354,7 +354,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <tr><td>LLM 判定</td><td>コード判定が全合格のときだけ呼ぶ（配布物がないと通らない判定の不合格は除く）</td><td>なし（不合格の試行は判定しても合否が変わらない）</td></tr>
 <tr><td>LLM 判定</td><td>haiku・ツールなし・1 ターン・対象は最大 2 万文字（Claude Code で判定する場合）</td><td><code>calibrate</code> で人手ラベルとの一致率を確認</td></tr>
 <tr><td>再試行</td><td>レート制限・過負荷で落ちた試行だけ</td><td>なし（不合格を引き直さない）</td></tr>
-<tr><td>（入れていない）</td><td>失敗が出たらそのタスクの残り試行を打ち切る</td><td>pass@1 と平均スコアが悪い側に偏るため採用しない</td></tr>
+<tr><td>（入れていない）</td><td>早期打ち切り（失敗が出たらそのタスクの残り試行をやめる）</td><td>理由は <a href="design.html#rejected">設計記録「採らなかった案」</a></td></tr>
 </table>
 
 <!-- 8 -->

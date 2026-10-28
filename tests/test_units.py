@@ -113,6 +113,8 @@ class SpecTests(unittest.TestCase):
         w3 = "\n".join(lint([load_task(t)], [load_profile(renamed), load_profile(args)]))
         self.assertIn("n: ", w3)
         self.assertIn("x: ", w3)
+        cont = write(self.tmp / "c.yaml", "id: c\nagent: claude_code\nextra_args: [-c]\n")  # Claude Code の -c は --continue
+        self.assertNotIn("c: ", "\n".join(lint([load_task(t)], [load_profile(cont)])))
 
 
 class ParserTests(unittest.TestCase):
@@ -695,6 +697,7 @@ class HarvestTests(unittest.TestCase):
         # 他の判定が働いていても、何もしなくても通る判定（入力ファイルの有無など）は注意として挙げる（失敗にはしない:
         # 壊してはいけないものを守る判定も同じ形になるため）
         tdir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tdir, True)
         shutil.copytree(ROOT / "examples", tdir / "examples")
         tp = tdir / "examples" / "tasks" / "request-extract.yaml"
         tp.write_text(tp.read_text(encoding="utf-8") + "  - {type: file_exists, path: sales.csv, description: 入力がある}\n", encoding="utf-8")

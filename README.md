@@ -14,7 +14,7 @@ Claude Code と Codex の「ハーネス」（CLAUDE.md / AGENTS.md、Skills、S
 Promptfoo・BenchFlow などの外部エンジンは使いません。
 
 > **図解ガイド**: [`docs/guide.html`](docs/guide.html) をブラウザで開くと、流れと仕組みを図で確認できます（1 ファイル・外部通信なし）。
-> README と図解ガイドは同じ内容をテキスト（どのエディタでも読める）と図（ブラウザ）の 2 形式で載せています。
+> 主要な仕組みは README（テキスト。どのエディタでも読める）と図解ガイド（図。ブラウザ）の 2 形式で載せています。
 > **設計記録**: [`docs/design.html`](docs/design.html) に、既存ツールとの比較・評価の方法・採らなかった案と理由・残るリスクをまとめています。
 
 ### 全体像
@@ -445,7 +445,7 @@ executable: null              # CLI の場所（例: ["C:/tools/claude.exe"]）
   （`ANTHROPIC_API_KEY`・`CLAUDE_CODE_OAUTH_TOKEN`・`CLAUDE_CODE_USE_BEDROCK`・`AWS_BEARER_TOKEN_BEDROCK`・`ANTHROPIC_DEFAULT_SONNET_MODEL`・
   `CODEX_API_KEY` など。一覧は `harness_eval/spec.py` の `ROUTE_VARS`）は、試行の経路と請求先を変えます。値を固定してよいものは `env` に書き、
   親の環境の値を使うもの（秘密の値）は **`inherit_env: [ANTHROPIC_API_KEY]` のように名前だけ**を書きます（値はプロファイルに書かない）。
-  宣言せずに親から引き継ぐと `doctor` が NG（終了コード 1）、`run` が警告します。経路の変数はキャッシュキーに入るため（キー・トークンは名前だけ、それ以外は値のハッシュも）、
+  宣言せずに親から引き継ぐと `doctor` が NG（終了コード 1）、`run` が警告します。経路の変数はキャッシュキーに入るため（キー・トークン・ヘッダは名前だけ、それ以外は値のハッシュも）、
   経路を変えると再実行されます（値は記録しません）。
 - **Bedrock（Claude Code）**: `CLAUDE_CODE_USE_BEDROCK` などを `env`（または `inherit_env`）で。AWS の認証ファイルは、
   ホームを差し替えても本物（`~/.aws/credentials` / `~/.aws/config`）を参照するよう `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE` を自動で設定します（未設定でファイルがある場合）。
@@ -527,7 +527,7 @@ OpenAI API の usage 定義（cached は input の内数）を前提にしてい
  タスク定義 ＋ フィクスチャの中身 ＋ 採点スクリプトの中身
  ＋ プロファイル定義 ＋ 配布物（copy 元・hash_paths）の中身
  ＋ CLI のバージョン ＋ 試行番号
- ＋ 経路の変数（名前。秘密でないものは値のハッシュも。キー・トークンの値は使わない）
+ ＋ 経路の変数（名前。秘密でないものは値のハッシュも。キー・トークン・ヘッダの値は使わない）
  ＋ （llm グレーダーがあるタスクだけ）判定エージェント・モデル・借りるプロファイルの環境変数・実行ファイル
        │
        └─▶ SHA-256 ─▶ .harness-eval-cache/<キー>.json
@@ -536,7 +536,7 @@ OpenAI API の usage 定義（cached は input の内数）を前提にしてい
 | 仕組み | 内容 |
 |---|---|
 | キャッシュ | 上の図の材料がすべて同じ試行は、過去の有効な結果を再利用（`.harness-eval-cache/`）。**変えた配布物のプロファイルだけ再実行**される。タスクの説明・タグ・`paired_negative`、プロファイルの説明・`billing` は含めない（書き換えても再実行しない）。グレーダーや採点スクリプトを直すと、そのタスクは全プロファイルで再実行される。`--no-cache` で無効 |
-| LLM 判定の省略 | コード判定がすべて合格した試行にだけ LLM 判定を実行（配布物がないと通らない判定の不合格は除く）（不合格の試行は判定しても合否が変わらない）。判定は既定で Claude Code の haiku・ツールなし・1 ターン・対象は最大 2 万文字（`--judge-agent codex` は読み取り専用だがツール・ターンの制限はなく費用も不明） |
+| LLM 判定の省略 | コード判定がすべて合格した試行にだけ LLM 判定を実行（配布物がないと通らない判定の不合格は除く。不合格の試行は判定しても合否が変わらないため）。判定は既定で Claude Code の haiku・ツールなし・1 ターン・対象は最大 2 万文字（`--judge-agent codex` は読み取り専用だがツール・ターンの制限はなく費用も不明） |
 | 2 段構成 | 普段は `--tag smoke --no-llm`（1 試行）、リリース前・モデル移行時だけフル（3 試行 + LLM 判定） |
 | 上限 | 試行ごと（`max_turns`・`max_budget_usd`・`timeout_s`）、実行全体（`--max-cost-usd`。推定額の合計で、サブスクリプションも含む）、月（`--monthly-budget-usd`: Claude と Codex を別々の口座として、費用台帳 `--out/spend.jsonl` の今月分を口座ごとに合計し、残りを上限にする。LLM 判定は判定エージェントの口座。`billing: subscription` は数えない。台帳には再試行・中断・`doctor`・`harvest` を含め費用が発生するたびに追記。`--out` を変えると別の台帳になる。`plan` で口座ごとの残りを確認できる）。到達後の試行は未実行として除外。費用が分からない試行（pricing なしの Codex、Codex での判定）は上限の計算に入らず、`--jobs` が 2 以上だと実行中の分だけ超えることがあります（実行前に注意を表示） |
 | 見積もり | `plan` で実行前に呼び出し回数・キャッシュ・過去実績からの概算費用を確認 |
