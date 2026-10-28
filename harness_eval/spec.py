@@ -427,7 +427,8 @@ def lint(tasks: list[Task], profiles: list[Profile]) -> list[str]:
 
 
 _EXEC_CONFIG = {"settings.json", "settings.local.json", ".mcp.json", "mcp.json", "hooks.json", "config.toml"}
-_EXEC_ARGS = {"--mcp-config", "--settings", "--plugin-dir", "-c", "--config"}  # CLI に hooks・MCP・プラグインを渡しうる引数
+# CLI に hooks・MCP・プラグインを渡しうる引数（Claude Code の -c は --continue なので Codex だけ）
+_EXEC_ARGS = {"claude_code": {"--mcp-config", "--settings", "--plugin-dir"}, "codex": {"-c", "--config"}}
 
 
 def _executable_parts(p: Profile) -> list[str]:
@@ -444,5 +445,5 @@ def _executable_parts(p: Profile) -> list[str]:
         dst = Path(str(step.get("to", ""))).name
         if dst in _EXEC_CONFIG:
             found.append(dst)
-    found += [f"extra_args の {a}" for a in p.extra_args if a.split("=")[0] in _EXEC_ARGS]
+    found += [f"extra_args の {a}" for a in p.extra_args if a.split("=")[0] in _EXEC_ARGS[p.agent]]
     return list(dict.fromkeys(found))
