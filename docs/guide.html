@@ -210,7 +210,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 
 <!-- 4 -->
 <h2 id="isolation">5. 隔離：エージェントから何が見えるか</h2>
-<p>普段の設定・スキル・CLAUDE.md は読み込ませず、試行ディレクトリに置いた配布物だけで起動します。外のもので使うのは AWS の認証ファイル（参照のみ）と、指定したときの認証ファイルの複製です。これは「どの設定を読み込むか」の隔離で、ファイルの読み書きを禁止するものではありません（Read や Bash を許可すれば絶対パスで外も読めます）。そのため評価には合成データだけを使います。</p>
+<p>普段の設定（ホームの <code>.claude</code>・<code>.codex</code>）は読み込ませず、試行ディレクトリに置いた配布物で起動します。ただし CLI は作業ディレクトリより上のフォルダの <code>CLAUDE.md</code>・<code>.claude/skills</code>・<code>AGENTS.md</code> も読むため、<code>--out</code> とその上にこれらがあると <code>run</code> は止まり、<code>doctor</code> は NG にします（<code>--out</code> はリポジトリやホームの外に置く）。外のもので使うのは AWS の認証ファイル（参照のみ）と、指定したときの認証ファイルの複製です。これは「どの設定を読み込むか」の隔離で、ファイルの読み書きを禁止するものではありません（Read や Bash を許可すれば絶対パスで外も読めます）。そのため評価には合成データだけを使います。</p>
 <figure>
 <div class="scroll"><svg viewBox="0 0 900 360" role="img" aria-label="エージェント CLI は HOME と設定ディレクトリを一時ホームに向けられ、作業ディレクトリで動く。普段の ~/.claude は読まない。AWS 認証ファイルは参照のみ。認証ファイルは copy_credentials のときだけ複製され、試行後に削除される">
 <defs>
@@ -254,6 +254,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <tr><td><code>AWS_SHARED_CREDENTIALS_FILE</code>・<code>AWS_CONFIG_FILE</code></td><td>本物の <code>~/.aws/…</code></td><td>ホームを差し替えても Bedrock の認証を使える（未設定でファイルがあるときだけ）</td></tr>
 <tr><td><code>CLAUDECODE</code> など親セッションの変数</td><td>削除</td><td>Claude Code の中から実行しても入れ子扱いにならない</td></tr>
 <tr><td>プロファイルの <code>env</code></td><td>追加・上書き</td><td>Bedrock の設定など</td></tr>
+<tr><td>経路を変える変数（API キー・Bedrock の切り替え・モデルの別名など）</td><td>親の値をそのまま渡す</td><td><code>env</code> か <code>inherit_env</code>（名前だけ）で宣言する。宣言のない引き継ぎは <code>doctor</code> が NG</td></tr>
 </table>
 <p>完全には隔離できないもの（Claude Code の同梱スキル、組織の管理設定など）があるため、各試行で実際に読み込まれたスキル・プラグイン・MCP を記録し、レポートの「実行環境の記録」で確認できます。</p>
 

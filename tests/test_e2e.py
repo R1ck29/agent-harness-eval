@@ -300,10 +300,10 @@ class E2E(unittest.TestCase):
         from harness_eval.isolation import ROUTE_VARS
         clean = {k: v for k, v in os.environ.items() if k not in {x for xs in ROUTE_VARS.values() for x in xs}}
         with mock.patch.dict(os.environ, clean, clear=True):
-            code, out = run_cli("doctor", "--profiles", str(self.ex / "profiles"))
+            code, out = run_cli("doctor", "--profiles", str(self.ex / "profiles"), "--out", str(self.out))
             self.assertEqual(code, 0, out)
             os.environ["ANTHROPIC_API_KEY"] = "sk-secret-value"
-            code, out = run_cli("doctor", "--profiles", str(self.ex / "profiles"))
+            code, out = run_cli("doctor", "--profiles", str(self.ex / "profiles"), "--out", str(self.out))
         self.assertEqual(code, 1, out)
         self.assertIn("ANTHROPIC_API_KEY", out)
         self.assertIn("inherit_env", out)  # 直し方は「名前を宣言」（値をプロファイルに書かせない）
@@ -312,9 +312,35 @@ class E2E(unittest.TestCase):
         prof = self.ex / "profiles" / "claude-baseline.yaml"
         prof.write_text(prof.read_text(encoding="utf-8") + "inherit_env: [ANTHROPIC_API_KEY]\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {**clean, "ANTHROPIC_API_KEY": "sk-secret-value"}, clear=True):
-            code, out = run_cli("doctor", "--profiles", str(prof))
+            code, out = run_cli("doctor", "--profiles", str(prof), "--out", str(self.out))
         self.assertEqual(code, 0, out)
         self.assertNotIn("sk-secret-value", out + prof.read_text(encoding="utf-8"))
+
+    def test_refuses_out_under_instruction_files(self):
+        """--out より上に CLAUDE.md などがあると、基準（配布物なし）にも読み込まれるため run は止まる。明示すれば実行し記録する。"""
+        outer = self.tmp / "outer"
+        (outer / ".claude" / "skills" / "leak").mkdir(parents=True)
+        (outer / "CLAUDE.md").write_text("rule", encoding="utf-8")
+        args = ["--tasks", str(self.ex / "tasks" / "arithmetic-no-skill.yaml"), "--profiles", str(self.ex / "profiles" / "claude-baseline.yaml"),
+                "--out", str(outer / "results"), "--cache-dir", str(self.cache), "--no-llm"]
+        code, out = run_cli("run", *args)
+        self.assertEqual(code, 2, out)
+        self.assertIn("CLAUDE.md", out)
+        self.assertFalse((outer / "results").exists())
+        code, out = run_cli("doctor", "--profiles", str(self.ex / "profiles" / "claude-baseline.yaml"), "--out", str(outer / "results"))
+        self.assertEqual(code, 1, out)
+        self.assertIn("CLAUDE.md", out)
+        code, out = run_cli("run", *args, "--allow-ancestor-instructions")
+        self.assertEqual(code, 0, out)
+        run_dir = sorted(d for d in (outer / "results").iterdir() if d.is_dir())[-1]
+        meta = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))["meta"]
+        self.assertTrue(any(p.endswith("CLAUDE.md") for p in meta["ancestor_instructions"]))
+        self.assertIn("CLAUDE.md", (run_dir / "report.html").read_text(encoding="utf-8"))
+
+    def test_gate_missing_summary(self):
+        code, out = run_cli("gate", "--current", str(self.tmp / "nope"), "--previous", str(self.tmp / "nope2"), "--margin", "0.05")
+        self.assertEqual(code, 2, out)
+        self.assertIn("summary.json", out)
 
     def test_judge_account_budget(self):
         """Codex の試行でも、LLM 判定が Claude の口座を使うなら Claude の月の予算で止める。"""
