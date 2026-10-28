@@ -366,12 +366,12 @@ class Runner:
             rec.error = {"type": "harness_error", "message": str(e)[:1000]}
             rec.valid = False
             return rec
-        if self.interrupted.is_set():  # 準備（install など）の間に Ctrl-C された → エージェントを起動しない
-            rec.valid, rec.error = False, {"type": "interrupted", "message": "Ctrl-C で中断"}
-            return rec
         before = snapshot(tp.workdir)
         ph = placeholders(tp, profile)
         cmd = adapter.build_cmd(task, profile, tp.workdir, [fill(a, ph) for a in profile.extra_args])
+        if self.interrupted.is_set():  # 準備（install など）の間に Ctrl-C された → エージェントを起動しない
+            rec.valid, rec.error = False, {"type": "interrupted", "message": "Ctrl-C で中断"}
+            return rec
         pr = run_process(cmd, tp.workdir, env, task.prompt, tp.stdout, tp.stderr, task.timeout_s)
         rec.wall_ms = pr.wall_ms
         out_lines = tp.stdout.read_text(encoding="utf-8", errors="replace").splitlines() if tp.stdout.exists() else []

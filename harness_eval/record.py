@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 # 集計から除外する異常終了（評価対象の失敗ではなく、環境起因）
-EXCLUDED_ERRORS = {"rate_limit", "overloaded", "auth", "network", "launch_failed", "harness_error", "judge_error",
+EXCLUDED_ERRORS = {"rate_limit", "overloaded", "auth", "api_error", "network", "launch_failed", "harness_error", "judge_error",
                    "not_graded", "interrupted"}
 # 失敗として数える異常終了
 

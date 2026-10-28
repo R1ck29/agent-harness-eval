@@ -139,10 +139,10 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(a.parse(mk(subtype="error_max_budget_usd")).error_type, "budget_exceeded")
         self.assertEqual(a.parse(mk(subtype="success", is_error=True, api_error_status=429, result="x")).error_type, "rate_limit")
         self.assertEqual(a.parse(mk(subtype="success", is_error=True, api_error_status=401, result="x")).error_type, "auth")
-        self.assertEqual(a.parse(mk(subtype="success", is_error=True, api_error_status=500, result="x")).error_type, "agent_error")
+        self.assertEqual(a.parse(mk(subtype="success", is_error=True, api_error_status=500, result="x")).error_type, "api_error")
         self.assertEqual(a.parse(["garbage", "{bad"]).error_type, "agent_crash")
         # success 以外の subtype でも API のステータスがあれば環境起因として扱う（再試行・除外の対象）
-        for status, want in ((429, "rate_limit"), (529, "overloaded"), (401, "auth"), (500, "agent_error")):
+        for status, want in ((429, "rate_limit"), (529, "overloaded"), (401, "auth"), (500, "api_error"), (400, "api_error")):
             got = a.parse(mk(subtype="error_during_execution", is_error=True, api_error_status=status, errors=["x"])).error_type
             self.assertEqual(got, want, status)
         # --include-hook-events の実出力（2.1.306。uuid / session_id を除く）
@@ -482,7 +482,11 @@ class AncestorTests(unittest.TestCase):
         write(tmp / "outer" / "inner" / "AGENTS.md", "rule")
         found = ancestor_instructions(out)
         self.assertEqual(sorted(Path(f).relative_to(tmp).as_posix() for f in found),
-                         ["outer/.claude/skills", "outer/CLAUDE.md", "outer/inner/AGENTS.md"])
+                         ["outer/.claude", "outer/CLAUDE.md", "outer/inner/AGENTS.md"])
+        # .claude/ の中身が rules・agents・commands だけでも読み込まれる（実測）ので、フォルダがあれば検出する
+        other = tmp / "other"
+        write(other / ".claude" / "rules" / "r.md", "rule")
+        self.assertEqual([Path(f).name for f in ancestor_instructions(other / "results")], [".claude"])
 
 
 class ScheduleTests(unittest.TestCase):
