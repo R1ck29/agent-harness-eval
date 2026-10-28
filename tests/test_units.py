@@ -18,7 +18,7 @@ from harness_eval.isolation import (build_env, make_trial_paths, run_install, ru
 from harness_eval.metrics import decide, deltas, gate, paired_bootstrap, pass_hat_k, summarize  # noqa: E402
 from harness_eval.runner import append_spend, month_spent, schedule  # noqa: E402
 from harness_eval.adapters import older_than_verified  # noqa: E402
-from harness_eval.isolation import ancestor_instructions, route_signature, route_variables  # noqa: E402
+from harness_eval.isolation import ancestor_instructions, missing_inherited, route_signature, route_variables  # noqa: E402
 from harness_eval.record import TrialRecord  # noqa: E402
 from harness_eval.spec import Grader, SpecError, lint, load_profile, load_task, load_tasks, load_profiles  # noqa: E402
 
@@ -455,6 +455,16 @@ class DoctorTests(unittest.TestCase):
         self.assertNotEqual(route_signature(d, parent), route_signature(d, {k: v for k, v in parent.items() if k != "ANTHROPIC_API_KEY"}))
         with self.assertRaisesRegex(SpecError, "inherit_env"):
             load_profile(write(tmp / "e.yaml", "id: e\nagent: codex\ninherit_env: [ANTHROPIC_API_KEY]\n"))  # codex の経路の変数ではない
+
+    def test_missing_inherited(self):
+        """inherit_env で宣言したのに親の環境にない（空も含む）変数。実行するとログインできないので先に知らせる。"""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        p = load_profile(write(tmp / "p.yaml", "id: p\nagent: claude_code\ninherit_env: [CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_MODEL, "
+                                               "ANTHROPIC_BASE_URL]\nenv: {ANTHROPIC_MODEL: m}\nenv_unset: [ANTHROPIC_BASE_URL]\n"))
+        self.assertEqual(missing_inherited(p, {}), ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"])
+        self.assertEqual(missing_inherited(p, {"CLAUDE_CODE_OAUTH_TOKEN": ""}), ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"])
+        self.assertEqual(missing_inherited(p, {"CLAUDE_CODE_OAUTH_TOKEN": "t", "ANTHROPIC_BASE_URL": "u"}), ["ANTHROPIC_BASE_URL"])
 
     def test_billing_not_in_profile_hash(self):
         tmp = Path(tempfile.mkdtemp())

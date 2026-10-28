@@ -447,7 +447,7 @@ executable: null              # CLI の場所（例: ["C:/tools/claude.exe"]）
   （`ANTHROPIC_API_KEY`・`CLAUDE_CODE_OAUTH_TOKEN`・`CLAUDE_CODE_USE_BEDROCK`・`AWS_BEARER_TOKEN_BEDROCK`・`ANTHROPIC_DEFAULT_SONNET_MODEL`・
   `CODEX_API_KEY` など。一覧は `harness_eval/spec.py` の `ROUTE_VARS`）は、試行の経路と請求先を変えます。値を固定してよいものは `env` に書き、
   親の環境の値を使うもの（秘密の値）は **`inherit_env: [ANTHROPIC_API_KEY]` のように名前だけ**を書きます（値はプロファイルに書かない）。
-  宣言せずに親から引き継ぐと `doctor` が NG（終了コード 1）、`run` が警告します。経路の変数はキャッシュキーに入るため（キー・トークン・ヘッダは名前だけ、それ以外は値のハッシュも）、
+  宣言せずに親から引き継ぐと、また `inherit_env` で宣言したのに設定されていない（別の端末で export した、など）と、`doctor` が NG（終了コード 1）、`run` が警告します。経路の変数はキャッシュキーに入るため（キー・トークン・ヘッダは名前だけ、それ以外は値のハッシュも）、
   経路を変えると再実行されます（値は記録しません）。
 - **Bedrock（Claude Code）**: `CLAUDE_CODE_USE_BEDROCK` などを `env`（または `inherit_env`）で。AWS の認証ファイルは、
   ホームを差し替えても本物（`~/.aws/credentials` / `~/.aws/config`）を参照するよう `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE` を自動で設定します（未設定でファイルがある場合）。

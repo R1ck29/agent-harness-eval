@@ -46,6 +46,13 @@ def route_variables(profile: Profile, environ: dict[str, str]) -> tuple[list[str
 _SECRET = ("KEY", "TOKEN", "HEADERS")  # 名前にこれを含む変数は秘密として扱い、値をキャッシュキーにも使わない
 
 
+def missing_inherited(profile: Profile, environ: dict[str, str]) -> list[str]:
+    """inherit_env で宣言したのに試行に渡らない変数の名前（親の環境にない・空・env_unset で消す。env で決めたものは除く）。
+    API キーやトークンなら、全試行がログインできずに終わる。"""
+    dropped = set(INHERITED_UNSET) | set(profile.env_unset)
+    return [n for n in profile.inherit_env if n not in profile.env and (not environ.get(n) or n in dropped)]
+
+
 def route_signature(profile: Profile, environ: dict[str, str]) -> str:
     """試行に渡る経路の変数のキャッシュキー用の要約。経路を変えれば再実行される。
     秘密（キー・トークン・ヘッダ）は名前だけ。秘密でないもの（モデルの別名の実体・接続先・切り替え）は値の短いハッシュも含め、
