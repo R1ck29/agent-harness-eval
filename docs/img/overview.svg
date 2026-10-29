@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 236" role="img" aria-label="タスク・プロファイル・配布物・フィクスチャを入力に、harness-eval run が 1 試行ずつ隔離して実行・採点・集計し、report.html・summary.json・trials.jsonl を出力する">
+<style>
+svg{--bg:#fbfbfa;--fg:#1d1d1f;--mut:#6b6b70;--card:#ffffff;--accent:#0b6bcb;--accent-bg:#e8f1fb}
+@media (prefers-color-scheme:dark){svg{--bg:#151517;--fg:#ececef;--mut:#a0a0a8;--card:#1e1e22;--accent:#5aa9ff;--accent-bg:#17283b}}
+.bg{fill:var(--bg)}
+text{fill:var(--fg);font-size:13px;font-family:-apple-system,"Segoe UI","Hiragino Sans","Yu Gothic UI","Meiryo",sans-serif}
+.sm{font-size:11.5px;fill:var(--mut)}
+.b{font-weight:600}
+.box{fill:var(--card);stroke:var(--fg);stroke-opacity:.55;stroke-width:1.2}
+.acc{fill:var(--accent-bg);stroke:var(--accent);stroke-width:1.6}
+.ta{fill:var(--accent);font-weight:600}
+.ln{stroke:var(--fg);stroke-opacity:.75;stroke-width:1.4;fill:none}
+.hd{fill:var(--fg);opacity:.75}
+</style>
+<defs><marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="hd"/></marker></defs>
+<rect width="900" height="236" class="bg"/>
+<text x="135" y="18" text-anchor="middle" class="b">用意するもの</text>
+<rect x="20" y="30" width="230" height="40" rx="6" class="box"/><text x="135" y="48" text-anchor="middle">タスク YAML</text><text x="135" y="63" text-anchor="middle" class="sm">何をさせ、どう採点するか</text>
+<rect x="20" y="80" width="230" height="40" rx="6" class="box"/><text x="135" y="98" text-anchor="middle">プロファイル YAML</text><text x="135" y="113" text-anchor="middle" class="sm">どのエージェントに、どの配布物か</text>
+<rect x="20" y="130" width="230" height="40" rx="6" class="box"/><text x="135" y="148" text-anchor="middle">配布物（ハーネス）</text><text x="135" y="163" text-anchor="middle" class="sm">CLAUDE.md・スキル・インストーラ</text>
+<rect x="20" y="180" width="230" height="40" rx="6" class="box"/><text x="135" y="198" text-anchor="middle">フィクスチャ</text><text x="135" y="213" text-anchor="middle" class="sm">入力データ（合成のみ）</text>
+<line x1="250" y1="50" x2="338" y2="100" class="ln" marker-end="url(#m)"/>
+<line x1="250" y1="100" x2="338" y2="114" class="ln" marker-end="url(#m)"/>
+<line x1="250" y1="150" x2="338" y2="130" class="ln" marker-end="url(#m)"/>
+<line x1="250" y1="200" x2="338" y2="144" class="ln" marker-end="url(#m)"/>
+<rect x="340" y="70" width="220" height="94" rx="8" class="acc"/>
+<text x="450" y="94" text-anchor="middle" class="ta">harness-eval run</text>
+<text x="450" y="116" text-anchor="middle">① 隔離して実行</text>
+<text x="450" y="134" text-anchor="middle">② 採点 → ③ 集計</text>
+<text x="450" y="152" text-anchor="middle" class="sm">タスク × プロファイル × 試行回数</text>
+<line x1="560" y1="102" x2="648" y2="60" class="ln" marker-end="url(#m)"/>
+<line x1="560" y1="117" x2="648" y2="117" class="ln" marker-end="url(#m)"/>
+<line x1="560" y1="132" x2="648" y2="174" class="ln" marker-end="url(#m)"/>
+<text x="765" y="18" text-anchor="middle" class="b">出てくるもの</text>
+<rect x="650" y="40" width="230" height="40" rx="6" class="box"/><text x="765" y="58" text-anchor="middle">report.html</text><text x="765" y="73" text-anchor="middle" class="sm">比較表・Δ・失敗分類・試行の詳細</text>
+<rect x="650" y="97" width="230" height="40" rx="6" class="box"/><text x="765" y="115" text-anchor="middle">summary.json</text><text x="765" y="130" text-anchor="middle" class="sm">集計＋CLI 版・ハッシュなど実行環境</text>
+<rect x="650" y="154" width="230" height="40" rx="6" class="box"/><text x="765" y="172" text-anchor="middle">trials.jsonl</text><text x="765" y="187" text-anchor="middle" class="sm">1 行 1 試行の記録</text>
+</svg>

@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Harness Eval リファレンス</title>
+<style>
+:root{--bg:#fbfbfa;--fg:#1d1d1f;--mut:#6b6b70;--line:#d9d9de;--card:#ffffff;--accent:#0b6bcb;--accent-bg:#e8f1fb;--ok:#1a7f37;--ng:#b42318}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#151517;--fg:#ececef;--mut:#a0a0a8;--line:#3a3a40;--card:#1e1e22;--accent:#5aa9ff;--accent-bg:#17283b;--ok:#5cc777;--ng:#ff7a6e}}
+:root[data-theme="dark"]{--bg:#151517;--fg:#ececef;--mut:#a0a0a8;--line:#3a3a40;--card:#1e1e22;--accent:#5aa9ff;--accent-bg:#17283b;--ok:#5cc777;--ng:#ff7a6e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.7 -apple-system,"Segoe UI","Hiragino Sans","Yu Gothic UI","Meiryo",sans-serif}
+main{max-width:1000px;margin:0 auto;padding:32px 16px 64px}
+h1{font-size:26px;line-height:1.3;margin:0 0 6px}
+h2{font-size:19px;margin:44px 0 10px;padding-top:12px;border-top:1px solid var(--line)}
+h3{font-size:16px;margin:22px 0 6px}
+p{margin:8px 0}
+ul{margin:6px 0;padding-left:22px}
+.lead{color:var(--mut);margin-bottom:20px}
+nav{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px;margin:14px 0 4px}
+a{color:var(--accent);text-decoration:none}
+code{font-family:ui-monospace,Consolas,"Courier New",monospace;font-size:.88em;background:var(--accent-bg);padding:1px 5px;border-radius:4px}
+pre{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto;font-size:13px;line-height:1.55}
+pre code{background:none;padding:0}
+pre .c{color:var(--mut)}
+@media (max-width:700px){table{display:block;overflow-x:auto}th{white-space:normal}td code{word-break:break-all}}
+table{border-collapse:collapse;width:100%;margin:12px 0;font-size:14px;background:var(--card)}
+th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
+</style>
+</head>
+<body>
+<main>
+<h1>Agent Harness Eval リファレンス</h1>
+<p class="lead">タスク・プロファイルの書き方、グレーダー、認証、コマンドのオプションの一覧です。仕組みは <a href="guide.html">図解ガイド</a>、設計の理由は <a href="design.html">設計記録</a> にあります。</p>
+<nav>
+<a href="#task">1. タスク</a><a href="#graders">2. グレーダー</a><a href="#lint">3. validate の警告</a><a href="#profile">4. プロファイル</a><a href="#auth">5. 認証</a><a href="#codex">6. Codex で使うとき</a><a href="#commands">7. コマンド</a><a href="#cost">8. 費用の出どころ</a><a href="#labels">9. 較正のラベル</a>
+</nav>
+
+<h2 id="task">1. タスク YAML</h2>
+<pre><code>id: csv-summary-format              <span class="c"># 英数字・_ . -</span>
+description: 月別集計で配布ルールの出力形式が守られるか
+targets: [claude_code, codex]       <span class="c"># 実行するエージェント（既定は両方）</span>
+tags: [instructions, smoke]         <span class="c"># --tag で絞り込む</span>
+fixture: ../fixtures/sales_synthetic   <span class="c"># 試行ごとに作業ディレクトリへ複製（ファイル 1 つでも可）</span>
+prompt: |
+  sales.csv を月別に集計して summary.md にまとめてください。
+limits: {max_turns: 15, timeout_s: 300, max_budget_usd: 0.5}
+allow_tools: [Read, Write, Edit, Bash, Skill]
+deny_tools: []
+paired_negative: arithmetic-no-skill            <span class="c"># 対になる「してはいけない」タスク（任意）</span>
+graders:
+  - type: command
+    run: '{python} {task_dir}/../checks/check_monthly_totals.py {task_dir}/../fixtures/sales_synthetic/sales.csv'
+    weight: 2
+  - type: file_contains
+    path: summary.md
+    pattern: '^\|\s*月\s*\|\s*売上合計\s*\|'
+    category: instruction_violation
+  - type: tool_used
+    tool: Bash|shell
+    input_match: 'rm\s+-rf'
+    max: 0</code></pre>
+<p>相対パスはタスクファイルの場所が基準です。未知のキーはエラーになります。</p>
+<table>
+<tr><th>キー</th><th>意味</th><th>既定</th></tr>
+<tr><td><code>id</code>・<code>prompt</code></td><td>必須。プロンプトは CLI に標準入力で渡す</td><td>—</td></tr>
+<tr><td><code>targets</code></td><td><code>claude_code</code>・<code>codex</code></td><td>両方</td></tr>
+<tr><td><code>fixture</code></td><td>入力データ（合成データだけ）</td><td>なし</td></tr>
+<tr><td><code>limits.max_turns</code>・<code>limits.max_budget_usd</code></td><td>1 試行のターン数・費用の上限（Claude Code のみ）</td><td>20・なし</td></tr>
+<tr><td><code>limits.timeout_s</code></td><td>1 試行の時間の上限。超えたら子孫プロセスごと止める</td><td>600</td></tr>
+<tr><td><code>allow_tools</code>・<code>deny_tools</code></td><td>Claude Code の <code>--allowedTools</code>・<code>--disallowedTools</code>。<code>-p</code> では承認が必要なツール（Write・Edit・Bash など）は許可しないと拒否される</td><td>空</td></tr>
+<tr><td><code>paired_negative</code></td><td>スキル・サブエージェントを「使うべきでない」対のタスク id</td><td>なし</td></tr>
+<tr><td><code>description</code>・<code>tags</code></td><td>説明と絞り込み用のタグ</td><td>空</td></tr>
+</table>
+
+<h2 id="graders">2. グレーダー</h2>
+<table>
+<tr><th>type</th><th>見るもの</th><th>主なキー</th><th>種別</th></tr>
+<tr><td><code>file_exists</code></td><td>作業ディレクトリのファイルの有無</td><td><code>path</code></td><td>結果</td></tr>
+<tr><td><code>file_contains</code></td><td>ファイル内容の正規表現（複数行モード）</td><td><code>path</code>, <code>pattern</code></td><td>結果</td></tr>
+<tr><td><code>regex</code></td><td>最終応答の正規表現</td><td><code>pattern</code></td><td>結果</td></tr>
+<tr><td><code>command</code></td><td>独自スクリプト。終了コード 0 で合格</td><td><code>run</code>, <code>timeout_s</code></td><td>結果</td></tr>
+<tr><td><code>llm</code></td><td>LLM 判定（PASS / FAIL / UNKNOWN）</td><td><code>criteria</code>, <code>focus</code>（<code>final</code> かファイルパス）, <code>max_chars</code></td><td>結果</td></tr>
+<tr><td><code>tool_used</code></td><td>ツール呼び出しの回数</td><td><code>tool</code>（名前の正規表現・完全一致）, <code>input_match</code>, <code>min</code>, <code>max</code>, <code>include_subagents</code></td><td>過程</td></tr>
+<tr><td><code>skill_used</code></td><td>スキル呼び出しの回数</td><td><code>skill</code>, <code>min</code>, <code>max</code></td><td>過程</td></tr>
+<tr><td><code>subagent_used</code></td><td>サブエージェント呼び出しの回数</td><td><code>name</code>, <code>min</code>, <code>max</code></td><td>過程</td></tr>
+<tr><td><code>hook_used</code></td><td>hook の実行回数（Claude Code のみ）</td><td><code>hook</code>（<code>イベント:マッチャー</code> の正規表現・完全一致）, <code>outcome</code>, <code>min</code>, <code>max</code></td><td>過程</td></tr>
+</table>
+<ul>
+<li>全グレーダー共通: <code>weight</code>（既定 1）・<code>negate</code>（判定を反転）・<code>category</code>（失敗分類のタグ。既定は種類ごとに <code>wrong_output</code>・<code>process_violation</code>・<code>skill_selection</code>・<code>delegation</code>・<code>hook</code>）・<code>description</code>。</li>
+<li><code>min</code>・<code>max</code> を省くと「1 回以上」、<code>max</code> だけ書くと「0〜max 回」。</li>
+<li><code>skill_used</code>・<code>subagent_used</code>・<code>hook_used</code> で 1 回以上を求める判定は「配布物がないと通らない判定」として扱います（<a href="guide.html#metrics">図解ガイド 7 章</a>の Δ から両側とも除く。試行の合否とスコアには入る）。</li>
+</ul>
+<h3>command の書き方</h3>
+<ul>
+<li><code>run</code> では <code>{python}</code>（実行中の Python）・<code>{workdir}</code>・<code>{task_dir}</code> を使えます。作業ディレクトリで実行され、環境変数 <code>TRIAL_WORKDIR</code> と <code>TRIAL_RECORD</code>（試行レコード JSON のパス）が渡ります。</li>
+<li><b>置換した値はシェル用に自動で引用されるので、YAML 側で <code>"{task_dir}"</code> のように囲まないでください</b>（空白を含むパスで壊れます）。</li>
+<li>正解は<b>元のフィクスチャ</b>から計算します。作業ディレクトリのファイルはエージェントが書き換えられるからです（同梱の採点スクリプトは元の sales.csv を引数で受け取ります）。</li>
+<li>「形式」と「正しさ」は別の判定に分け、形式の違いで正しさを落とさないようにします（同梱の <code>check_monthly_totals.py</code> は初版でこれを誤り、実出力で見つけて直しました。回帰テストは <code>tests/data/summaries</code>）。</li>
+</ul>
+<h3>ツール名はエージェントで違う</h3>
+<table>
+<tr><th>エージェント</th><th>ツール名</th></tr>
+<tr><td>Claude Code</td><td><code>Bash</code>・<code>Write</code>・<code>Edit</code>・<code>Skill</code>・<code>Agent</code> など</td></tr>
+<tr><td>Codex</td><td><code>shell</code>（コマンド実行）・<code>file_change</code>・<code>web_search</code>・<code>collab:&lt;操作&gt;</code></td></tr>
+<tr><td>共通（MCP）</td><td><code>mcp__&lt;サーバー&gt;__&lt;ツール&gt;</code></td></tr>
+</table>
+<p>両方で同じタスクを使うなら <code>tool: Bash|shell</code> のように両方を書きます。<b>Codex のスキル検出は推定</b>（SKILL.md を読むシェルコマンドから名前を拾う）なので、Codex では成果物を見るグレーダーを主にしてください。</p>
+<h3>hook_used</h3>
+<p>Claude Code の <code>--include-hook-events</code> の記録を数えます（このフラグは <code>hook_used</code> を使うタスクにだけ付けます）。<code>hook</code> は <code>PreToolUse:Bash</code>・<code>SessionStart:startup</code> のような「イベント:マッチャー」、<code>outcome</code> は <code>success</code>（成功）か <code>error</code>（終了コード 2 などでブロック・失敗）です。Codex は hooks を実行しても記録を出さないため、Codex の試行では not_run（スコアの分母から外す）になります。例: 配布物の hook が <code>rm</code> をブロックしたことを確かめる。</p>
+<pre><code>graders:
+  - {type: file_exists, path: a.txt, description: a.txt が残っている}
+  - {type: hook_used, hook: "PreToolUse:Bash", outcome: error, description: hook が rm をブロックした}</code></pre>
+
+<h2 id="lint">3. validate の警告（設計ルール）</h2>
+<table>
+<tr><th>ルール</th><th>validate</th></tr>
+<tr><td>各タスクに「結果を見るグレーダー」と「過程を見るグレーダー」を最低 1 つずつ</td><td>警告</td></tr>
+<tr><td>スキル・サブエージェントを「使うべき」タスクには、<code>paired_negative</code> で「使うべきでない」タスクを対にする</td><td>警告</td></tr>
+<tr><td>配布物なし（<code>install</code> が空）のベースラインプロファイルを 1 つ用意する</td><td>警告</td></tr>
+<tr><td><code>allow_tools</code> を空にしない（Claude Code の <code>-p</code> では承認が必要なツールが拒否される）</td><td>警告</td></tr>
+<tr><td>実行される部品（install の <code>run</code>、hooks・MCP を定義しうる設定ファイル、<code>--mcp-config</code> などの追加引数）を含むプロファイルは、社内でレビュー済みの配布物に限る</td><td>警告</td></tr>
+<tr><td>Codex でのスキル検出・hook_used の制約（上記）</td><td>警告</td></tr>
+<tr><td>タスクのデータは合成フィクスチャだけを使う（社内データを評価に流さない）</td><td>機械では確かめられない（運用で守る）</td></tr>
+</table>
+<p><code>--selftest</code> を付けると、正解例（<code>references/</code>）があるタスクで、採点スクリプトを含む判定が「正解例で通り、何もしなければ落ちる」かを実際に実行して確かめます。何もしなくても通る判定（入力ファイルの有無など）は注意として表示します（壊してはいけないものを守る判定なら意図どおりです）。</p>
+
+<h2 id="profile">4. プロファイル YAML</h2>
+<pre><code>id: claude-ds-lite
+agent: claude_code            <span class="c"># claude_code / codex</span>
+model: sonnet                 <span class="c"># --model / -m に渡す（省略で CLI の既定）</span>
+install:                      <span class="c"># 一時ホームへの配布物の展開（上から順に実行）</span>
+  - copy: ../harnesses/ds-lite/CLAUDE.md
+    to: "{config_dir}/CLAUDE.md"
+  - copy: ../harnesses/ds-lite/skills
+    to: "{config_dir}/skills"
+  - run: '{python} path/to/installer.py --profile ds --target {config_dir}'   <span class="c"># 社内インストーラをそのまま使う（プロファイルのフォルダで実行）</span>
+env:                          <span class="c"># 追加の環境変数（{…} の置換可）。値を固定してよいものだけ</span>
+  CLAUDE_CODE_USE_BEDROCK: "1"
+  AWS_REGION: ap-northeast-1
+inherit_env: []               <span class="c"># 親の環境の値を使う経路の変数（名前だけ。値は書かない）</span>
+env_unset: []                 <span class="c"># 消したい環境変数</span>
+billing: api                  <span class="c"># api / subscription</span>
+extra_args: []                <span class="c"># CLI に足す引数（例: [--mcp-config, "{config_dir}/mcp.json"]）</span>
+permission_mode: null         <span class="c"># Claude Code の --permission-mode</span>
+codex_sandbox: workspace-write
+pricing: null                 <span class="c"># Codex の概算費用用（8 章）</span>
+hash_paths: []                <span class="c"># run で使う配布元など、キャッシュのキーに含めるパス</span>
+isolate_home: true
+isolation_settings: true
+copy_credentials: false
+executable: null              <span class="c"># CLI の場所（例: ["C:/tools/claude.exe"]）</span></code></pre>
+<table>
+<tr><th>キー</th><th>意味</th><th>既定</th></tr>
+<tr><td><code>install</code></td><td><code>copy</code>/<code>to</code> か <code>run</code> の並び。空なら配布物なし（ベースライン）</td><td>空</td></tr>
+<tr><td><code>env</code>・<code>env_unset</code></td><td>試行の環境変数の追加・削除</td><td>空</td></tr>
+<tr><td><code>inherit_env</code></td><td>親の環境の値を使う経路の変数の名前（5 章）</td><td>空</td></tr>
+<tr><td><code>billing</code></td><td><code>api</code>（呼び出しごとに課金）／<code>subscription</code>（定額）。予算での扱いは <a href="guide.html#cost">図解ガイド 8 章</a></td><td><code>api</code></td></tr>
+<tr><td><code>codex_sandbox</code></td><td>Codex の sandbox モード</td><td><code>workspace-write</code></td></tr>
+<tr><td><code>pricing</code></td><td><code>input_per_mtok</code>・<code>cached_input_per_mtok</code>・<code>output_per_mtok</code>（Codex の概算費用用）</td><td>なし</td></tr>
+<tr><td><code>isolate_home</code></td><td><code>HOME</code>・<code>USERPROFILE</code> を一時ホームに向ける</td><td><code>true</code></td></tr>
+<tr><td><code>isolation_settings</code></td><td>Claude Code に claude.ai からのスキル・プラグイン同期を止める <code>--settings</code> を渡す</td><td><code>true</code></td></tr>
+<tr><td><code>copy_credentials</code></td><td>本物の認証ファイルを一時ホームに複製する（試行後に削除）</td><td><code>false</code></td></tr>
+</table>
+<p>置換できるもの: <code>{home}</code>（一時ホーム）・<code>{config_dir}</code>（Claude Code は <code>{home}/.claude</code>、Codex は <code>{home}/.codex</code>）・<code>{workdir}</code>・<code>{profile_dir}</code>・<code>{python}</code>。<code>run</code> の中では値が自動で引用されるので、引用符で囲まないでください。<code>install</code> のコピー先は試行ディレクトリの中に限ります（相対パスは一時ホーム基準）。</p>
+
+<h2 id="auth">5. 認証</h2>
+<p>試行は一時ホームで動くため、ログイン情報が普段の場所にある方式はそのままでは使えません。</p>
+<table>
+<tr><th>方式</th><th>プロファイルに書くこと</th></tr>
+<tr><td>API キー・トークン</td><td><code>inherit_env: [ANTHROPIC_API_KEY]</code> のように<b>名前だけ</b>（値は書かない）</td></tr>
+<tr><td>Bedrock（Claude Code）</td><td><code>env</code> に <code>CLAUDE_CODE_USE_BEDROCK: "1"</code>・<code>AWS_REGION</code> など。AWS の認証ファイルは本物を参照させる（<a href="guide.html#isolation">図解ガイド 5 章</a>）</td></tr>
+<tr><td>ファイルに保存されたログイン（<code>~/.codex/auth.json</code>、Linux の <code>~/.claude/.credentials.json</code>）</td><td><code>copy_credentials: true</code></td></tr>
+<tr><td>サブスクリプション（Pro / Max）</td><td>端末で <code>claude setup-token</code> を実行して長期トークン（推論専用）を作り、<code>export CLAUDE_CODE_OAUTH_TOKEN=…</code> してから実行。プロファイルには <code>inherit_env: [CLAUDE_CODE_OAUTH_TOKEN]</code> と <code>billing: subscription</code>（トークンはチャットやファイルに貼らない）</td></tr>
+<tr><td>macOS のキーチェーンのログイン（<code>claude auth login</code>）</td><td><b>試行では使えない</b>（設定フォルダを分けると未ログインになる）。上のサブスクリプションの方法を使う</td></tr>
+</table>
+<h3>経路を変える変数は宣言する</h3>
+<p>API キー・トークン・Bedrock などへの切り替え・接続先・モデルの別名の実体を変える環境変数（<code>ANTHROPIC_API_KEY</code>・<code>CLAUDE_CODE_OAUTH_TOKEN</code>・<code>CLAUDE_CODE_USE_BEDROCK</code>・<code>AWS_BEARER_TOKEN_BEDROCK</code>・<code>ANTHROPIC_DEFAULT_SONNET_MODEL</code>・<code>OPENAI_API_KEY</code>・<code>CODEX_API_KEY</code> など。一覧は <code>harness_eval/spec.py</code> の <code>ROUTE_VARS</code>）は、試行の経路と請求先を変えます。値を固定してよいものは <code>env</code>、親の環境の値を使うもの（秘密）は <code>inherit_env</code> に名前だけ書きます。</p>
+<ul>
+<li>宣言せずに親から引き継いでいる変数と、<code>inherit_env</code> で宣言したのに設定されていない変数（別の端末で export した、など）があると、<code>doctor</code> が NG（終了コード 1）、<code>run</code> が警告します。</li>
+<li>経路の変数とキャッシュの関係は <a href="guide.html#cost">図解ガイド 8 章</a> にあります。</li>
+</ul>
+<h3>LLM 判定の認証</h3>
+<p>判定も一時ホームで動くため、プロファイルの <code>env</code>・<code>env_unset</code>・<code>copy_credentials</code>・<code>executable</code> を借ります（配布物と追加引数は借りません）。借りる先は <code>--judge-profile</code>、省略時は判定エージェントと同じ種類の <code>--baseline</code>、それもなければ最初の同種プロファイルです。判定が認証エラーなどで動かなかった試行は <code>judge_error</code> として集計から除きます。</p>
+
+<h2 id="codex">6. Codex で使うとき</h2>
+<table>
+<tr><th>項目</th><th>内容</th></tr>
+<tr><td>配置</td><td>Codex 公式の探索場所に合わせる。常時指示は <code>CODEX_HOME/AGENTS.md</code>、ユーザースキルは <code>~/.agents/skills</code>（<code>CODEX_HOME</code> 配下ではない）、プロジェクトのスキルは作業ディレクトリの <code>.agents/skills</code>。SKILL.md は共通形式なのでそのまま複製できる（<code>examples/profiles/codex-ds-lite.yaml</code>）</td></tr>
+<tr><td>hooks</td><td><code>CODEX_HOME/hooks.json</code> の hooks は、一時ホームでは「未信頼」のため <code>codex exec</code> で警告なしに実行されない。普段の利用では一度信頼すれば実行されるので、その状態を再現するため Codex の試行には常に <code>--dangerously-bypass-hook-trust</code> を付ける（一時ホームに入るのは <code>install</code> で置いたものだけ）</td></tr>
+<tr><td>効かない項目</td><td>タスクの <code>max_turns</code>・<code>max_budget_usd</code>・<code>allow_tools</code>・<code>deny_tools</code> とプロファイルの <code>permission_mode</code>（対応するフラグがない）。Codex の試行は <code>timeout_s</code> と <code>codex_sandbox</code> で制限する。ターン数を出さないので、レポートの平均ターンは空欄</td></tr>
+<tr><td>ないもの</td><td>Claude Code のサブエージェント定義を Codex 形式（<code>.codex/agents/*.toml</code>）に変換する機能</td></tr>
+</table>
+
+<h2 id="commands">7. コマンド</h2>
+<p><code>python -m harness_eval &lt;コマンド&gt;</code>（<code>pip install .</code> したなら <code>harness-eval &lt;コマンド&gt;</code>）。<code>--version</code> で版を表示します。</p>
+<table>
+<tr><th>コマンド</th><th>主なオプション</th></tr>
+<tr><td><code>validate</code></td><td><code>--tasks</code>（必須）・<code>--profiles</code>（必須）・<code>--selftest</code></td></tr>
+<tr><td><code>doctor</code></td><td><code>--profiles</code>（必須）・<code>--live</code>（最小の試行を 1 回ずつ実際に実行）・<code>--out</code>（既定 <code>results</code>）</td></tr>
+<tr><td><code>plan</code>・<code>run</code></td><td>下の表</td></tr>
+<tr><td><code>report</code></td><td><code>&lt;結果フォルダ&gt;</code>・<code>--baseline</code></td></tr>
+<tr><td><code>gate</code></td><td><code>--current</code>・<code>--previous</code>・<code>--margin</code>（すべて必須）・<code>--metric</code>（<code>pass_hat_k</code> 既定／<code>pass_at_1</code>／<code>mean_score</code>）・<code>--min-tasks</code>（既定 10）・<code>--hard-category</code>（複数可。<code>unsafe_access</code> は常に含む）</td></tr>
+<tr><td><code>harvest</code></td><td><code>--out</code>（必須）・<code>--source</code>（既定は <a href="guide.html#harvest">図解ガイド 9 章</a>「読む履歴」の場所）・<code>--limit</code>（既定 10）・<code>--model</code>（既定 <code>sonnet</code>）・<code>--profile</code>（認証を借りる claude_code プロファイル YAML）・<code>--executable</code>・<code>--ledger</code>（既定 <code>results/spend.jsonl</code>。<code>run</code> と同じ台帳に数えるなら <code>&lt;run の --out&gt;/spend.jsonl</code>）・<code>--dry-run</code>（件数だけ数える。費用 0）</td></tr>
+<tr><td><code>calibrate</code></td><td><code>&lt;結果フォルダ&gt;</code>・<code>--labels</code>（必須。9 章）</td></tr>
+</table>
+<h3>run・plan のオプション</h3>
+<table>
+<tr><th>オプション</th><th>意味</th><th>既定</th></tr>
+<tr><td><code>--tasks</code>・<code>--profiles</code></td><td>YAML のファイルかディレクトリ（必須）</td><td>—</td></tr>
+<tr><td><code>--trials</code>・<code>--k</code></td><td>1 組あたりの試行回数・pass^k の k</td><td>1・<code>--trials</code> と同じ</td></tr>
+<tr><td><code>--tag</code>・<code>--task</code></td><td>このタグ・id のタスクだけ（複数可）</td><td>すべて</td></tr>
+<tr><td><code>--baseline</code></td><td>Δ の基準にするプロファイル id</td><td>なし</td></tr>
+<tr><td><code>--jobs</code></td><td>並列数（レート制限に注意）</td><td>1</td></tr>
+<tr><td><code>--seed</code></td><td>プロファイルの実行順を決める乱数の種</td><td>0</td></tr>
+<tr><td><code>--no-llm</code></td><td>LLM 判定を実行しない（スモーク用）</td><td>—</td></tr>
+<tr><td><code>--judge-agent</code>・<code>--judge-model</code>・<code>--judge-executable</code>・<code>--judge-profile</code></td><td>LLM 判定のエージェント・モデル・実行ファイル・認証を借りるプロファイル</td><td><code>claude_code</code>・<code>haiku</code>・PATH 上の CLI・5 章</td></tr>
+<tr><td><code>--max-cost-usd</code>・<code>--monthly-budget-usd</code></td><td>実行全体・月の費用上限</td><td>なし</td></tr>
+<tr><td><code>--retry-infra</code>・<code>--retry-wait-s</code></td><td>レート制限・過負荷の再試行回数と待ち秒数（回数に比例して延びる）</td><td>1・20</td></tr>
+<tr><td><code>--no-cache</code>・<code>--cache-dir</code></td><td>キャッシュを使わない・置き場所</td><td>使う・<code>.harness-eval-cache</code></td></tr>
+<tr><td><code>--keep</code></td><td>作業ディレクトリを残す範囲（<code>all</code>／<code>failed</code>／<code>none</code>。<code>none</code> は生ログも消す）</td><td><code>failed</code></td></tr>
+<tr><td><code>--allow-ancestor-instructions</code></td><td><code>--out</code> の上に指示ファイルがあっても実行する（結果に記録）</td><td>—</td></tr>
+<tr><td><code>--out</code></td><td>結果の出力先（リポジトリやホームの外に置く）</td><td><code>results</code></td></tr>
+</table>
+
+<h2 id="cost">8. 費用の出どころ</h2>
+<table>
+<tr><th><code>cost_source</code></th><th>意味</th></tr>
+<tr><td><code>client_estimate</code></td><td>Claude Code が API 単価で計算した推定額（<code>total_cost_usd</code>）。請求額とは異なりうる。サブスクリプションでは呼び出しごとの請求はない</td></tr>
+<tr><td><code>token_estimate</code></td><td>Codex のトークン数とプロファイルの <code>pricing</code> から計算した概算。式は <code>(input − cached) × input単価 + cached × cached単価 + output × output単価</code>（100 万トークンあたり。OpenAI API の usage 定義で cached は input の内数）。社内の請求と照合してから使う</td></tr>
+<tr><td>null（不明）</td><td>取得できない（<code>pricing</code> のない Codex など）。0 で埋めず、総額・合格あたり費用は「不明」</td></tr>
+</table>
+
+<h2 id="labels">9. 較正のラベル（calibrate）</h2>
+<p>LLM 判定と人手ラベルの一致率を出します（約 20 件が目安）。<code>labels.yaml</code> の形式:</p>
+<pre><code>- {task: csv-summary-insight, profile: claude-ds-lite, trial: 0, grader: 2, label: PASS}</code></pre>
+<p><code>grader</code> はタスク内のグレーダーの番号（0 始まり）です。</p>
+</main>
+</body>
+</html>

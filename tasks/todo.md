@@ -1,6 +1,50 @@
 # Harness Eval Work Plan
 
-## Current: merge into one repo (agent-harness-eval v0.4.0) — 2026-10-28
+## Current: docs without redundancy, duplication or stale facts; mechanisms shown as diagrams — 2026-10-29
+
+### Audit findings
+
+- README §3 and §6–§9 repeat guide.html §1–§9 almost verbatim (README says so: "2 形式で載せています").
+- Inside README: the LLM-judge exception footnote 3×, the ancestor-folder rule 4× (plus guide and design §8), the list of
+  excluded end states 3×, verified CLI versions 3× (plus design §8), the Keychain note 2× (plus design §8).
+- guide §2 "使う順番" omits `harvest`, although README's flow starts with it.
+- README opens with history (an external design doc that is not in the repo, the earlier attempt) that belongs in design.html.
+- Install only says "unzip"; the repo is public on GitHub (no `git clone` path). README §9 has an empty code block.
+- GitHub Pages is off, so docs/*.html show as source on GitHub.
+
+### Decision (user, 2026-10-29): one home per fact, HTML for mechanisms, GitHub Pages on
+
+| File | Holds | Does not hold |
+|---|---|---|
+| README.md | what it is, overview image, install, 5-minute commands, map of docs, development | mechanisms, option and key lists, rationale |
+| docs/guide.html | how it works, every mechanism as a diagram (order of use, run flow, one trial, isolation, grading, metrics and gate, cache, harvest, outputs, modules) | YAML keys, command options, rationale |
+| docs/reference.html (new) | how to write tasks and profiles, graders, auth, Codex notes, commands and options, cost formula, labels format | mechanisms, rationale |
+| docs/design.html | why: decisions, lineage, tool survey, method, rejected ideas, risks, CLI facts verified on real binaries, dev-time measurements | how-to |
+| docs/img/overview.svg (new) | the one overview figure, shared by README and guide | |
+
+### Steps
+
+- [x] guide.html rewritten (new run-flow, budget, gate and module figures; harvest in the order-of-use figure)
+- [x] reference.html written from README §4–§5, §9 and the CLI help
+- [x] design.html: took README §10 (§8 CLI facts) and dev-time results (§9); cost section reduced to decision + reason
+- [x] README shrunk to the entry page; docs/index.html redirects to guide.html for Pages
+- [x] Verify: README zero-cost commands run (validate --selftest 4/4 OK, plan, doctor); 63 tests OK; no broken anchors;
+      no 36-char passage shared by two documents; figures checked in light/dark and at desktop width
+- [x] Independent review (fresh subagent, docs vs code); fixed every finding
+- [x] Commit and push; enable GitHub Pages (user approved 2026-10-29)
+
+### Review (2026-10-29)
+
+Independent reviewer findings, all fixed:
+- HIGH: harvest writes to `--ledger` (default results/spend.jsonl), not `--out/spend.jsonl`; README now passes `--ledger "$OUT/spend.jsonl"`.
+- HIGH: gate checks `--min-tasks` before "upper < −m", so a small regression run exits 3; the gate table now lists the order.
+- MEDIUM: cache key also holds the tool version, `--no-llm`, judge prompt and judge CLI version; skipped_prior_fail is
+  left out of the score (it was called "counted as fail" — stale since before this change); 14 facts stated in two places
+  reduced to one home plus links.
+- LOW: sftp in the deny list, k only matters for pass^k, AWS redirect needs isolate_home, harvest --source default,
+  results/<run-id>/ prefix, bootstrap seed is fixed (not --seed), trials.jsonl gets every record.
+
+## Previous: merge into one repo (agent-harness-eval v0.4.0) — 2026-10-28
 
 ### Inputs (read in full, nothing inferred)
 

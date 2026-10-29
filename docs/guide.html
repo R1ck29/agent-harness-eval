@@ -13,13 +13,16 @@ body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.7 -apple-system,"
 main{max-width:1000px;margin:0 auto;padding:32px 16px 64px}
 h1{font-size:26px;line-height:1.3;margin:0 0 6px}
 h2{font-size:19px;margin:44px 0 10px;padding-top:12px;border-top:1px solid var(--line)}
+h3{font-size:16px;margin:22px 0 6px}
 p{margin:8px 0}
+ul{margin:6px 0;padding-left:22px}
 .lead{color:var(--mut);margin-bottom:20px}
 nav{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px;margin:14px 0 4px}
-nav a{color:var(--accent);text-decoration:none}
+a{color:var(--accent);text-decoration:none}
 code{font-family:ui-monospace,Consolas,"Courier New",monospace;font-size:.88em;background:var(--accent-bg);padding:1px 5px;border-radius:4px}
 figure{margin:16px 0 8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
-figure svg{display:block;width:100%;height:auto;color:var(--fg)}
+figure svg,figure img{display:block;width:100%;height:auto;color:var(--fg)}
+.scroll svg,.scroll img{min-width:680px}
 figcaption{font-size:13.5px;color:var(--mut);margin-top:10px}
 .scroll{overflow-x:auto}
 @media (max-width:700px){table{display:block;overflow-x:auto}th{white-space:normal}td code{word-break:break-all}figure{padding:10px}}
@@ -49,122 +52,107 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <body>
 <main>
 <h1>Agent Harness Eval 図解ガイド</h1>
-<p class="lead">Claude Code / Codex の配布物（CLAUDE.md・スキルなど）を、同じタスクで隔離して実行・採点し、配布物なしや前回版と比べる仕組みを図で説明します。詳しい設定項目は README.md、設計の理由（既存ツールとの比較・評価の方法・採らなかった案）は <a href="design.html">設計記録</a> を参照してください。</p>
+<p class="lead">Claude Code / Codex の配布物（CLAUDE.md・スキルなど）を同じタスクで隔離して実行・採点し、配布物なしの基準や前回の版と比べます。このページではその仕組みを図で説明します。YAML の書き方・コマンドのオプションは <a href="reference.html">リファレンス</a>、なぜこの作りなのかは <a href="design.html">設計記録</a> にあります。</p>
 <nav>
-<a href="#overview">1. 全体像</a><a href="#workflow">2. 使う順番</a><a href="#harvest">3. 実際の依頼からタスクを作る</a><a href="#trial">4. 1 試行の流れ</a><a href="#isolation">5. 隔離</a><a href="#grading">6. 採点</a><a href="#metrics">7. 指標</a><a href="#cache">8. トークン節約</a><a href="#outputs">9. 出力</a>
+<a href="#overview">1. 全体像</a><a href="#workflow">2. 使う順番</a><a href="#run">3. run の流れ</a><a href="#trial">4. 1 試行の流れ</a><a href="#isolation">5. 隔離</a><a href="#grading">6. 採点</a><a href="#metrics">7. 指標とリリース判定</a><a href="#cost">8. 費用とトークン節約</a><a href="#harvest">9. 実際の依頼からタスクを作る</a><a href="#outputs">10. 出力と後始末</a><a href="#modules">11. コードの構成</a>
 </nav>
 
-<!-- 1 -->
 <h2 id="overview">1. 全体像</h2>
-<p>用意するのは 4 種類のファイルだけです。harness-eval がそれを「タスク × プロファイル × 試行回数」に展開し、1 試行ずつ隔離して実行・採点・集計します。</p>
+<p>用意するのは 4 種類のファイルです。harness-eval はそれを「タスク × プロファイル × 試行回数」に展開し、1 試行ずつ隔離して実行・採点・集計します。</p>
 <figure>
-<div class="scroll"><svg viewBox="0 0 900 230" role="img" aria-label="タスク・プロファイル・配布物・フィクスチャを入力に、harness-eval が隔離実行・採点・集計し、report.html・summary.json・trials.jsonl を出力する">
-<defs><marker id="m1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="head"/></marker></defs>
-<text x="135" y="16" text-anchor="middle" class="t-b">用意するもの</text>
-<rect x="20" y="28" width="230" height="40" rx="6" class="box"/><text x="135" y="46" text-anchor="middle">タスク YAML</text><text x="135" y="61" text-anchor="middle" class="t-sm">何をさせ、どう採点するか</text>
-<rect x="20" y="78" width="230" height="40" rx="6" class="box"/><text x="135" y="96" text-anchor="middle">プロファイル YAML</text><text x="135" y="111" text-anchor="middle" class="t-sm">どのエージェントに、どの配布物か</text>
-<rect x="20" y="128" width="230" height="40" rx="6" class="box"/><text x="135" y="146" text-anchor="middle">配布物</text><text x="135" y="161" text-anchor="middle" class="t-sm">CLAUDE.md・スキル・インストーラ</text>
-<rect x="20" y="178" width="230" height="40" rx="6" class="box"/><text x="135" y="196" text-anchor="middle">フィクスチャ</text><text x="135" y="211" text-anchor="middle" class="t-sm">入力データ（合成のみ）</text>
-<line x1="250" y1="48" x2="338" y2="98" class="ln" marker-end="url(#m1)"/>
-<line x1="250" y1="98" x2="338" y2="112" class="ln" marker-end="url(#m1)"/>
-<line x1="250" y1="148" x2="338" y2="128" class="ln" marker-end="url(#m1)"/>
-<line x1="250" y1="198" x2="338" y2="142" class="ln" marker-end="url(#m1)"/>
-<rect x="340" y="68" width="220" height="94" rx="8" class="acc"/>
-<text x="450" y="92" text-anchor="middle" class="t-acc">harness-eval run</text>
-<text x="450" y="114" text-anchor="middle">① 隔離して実行</text>
-<text x="450" y="132" text-anchor="middle">② 採点 → ③ 集計</text>
-<text x="450" y="150" text-anchor="middle" class="t-sm">タスク × プロファイル × 試行</text>
-<line x1="560" y1="100" x2="648" y2="58" class="ln" marker-end="url(#m1)"/>
-<line x1="560" y1="115" x2="648" y2="115" class="ln" marker-end="url(#m1)"/>
-<line x1="560" y1="130" x2="648" y2="172" class="ln" marker-end="url(#m1)"/>
-<text x="765" y="16" text-anchor="middle" class="t-b">出てくるもの</text>
-<rect x="650" y="38" width="230" height="40" rx="6" class="box"/><text x="765" y="56" text-anchor="middle">report.html</text><text x="765" y="71" text-anchor="middle" class="t-sm">比較表・Δ・失敗分類・試行の詳細</text>
-<rect x="650" y="95" width="230" height="40" rx="6" class="box"/><text x="765" y="113" text-anchor="middle">summary.json</text><text x="765" y="128" text-anchor="middle" class="t-sm">集計＋CLI 版・ハッシュなど実行環境</text>
-<rect x="650" y="152" width="230" height="40" rx="6" class="box"/><text x="765" y="170" text-anchor="middle">trials.jsonl</text><text x="765" y="185" text-anchor="middle" class="t-sm">1 行 1 試行の記録</text>
-</svg></div>
-<figcaption>入力は 4 種類、出力は 3 ファイル。レポートは 1 ファイルの HTML で、外部への通信はありません。</figcaption>
+<div class="scroll"><img src="img/overview.svg" alt="タスク・プロファイル・配布物・フィクスチャを入力に、harness-eval run が隔離実行・採点・集計し、report.html・summary.json・trials.jsonl を出力する"></div>
+<figcaption>入力は 4 種類、出力は 3 ファイルです。レポートは 1 ファイルの HTML で、外部と通信しません。</figcaption>
 </figure>
 <table>
 <tr><th>用語</th><th>意味</th><th>同梱サンプルの例</th></tr>
 <tr><td>タスク</td><td>エージェントにさせる仕事 1 つ（プロンプト・入力データ・採点方法）</td><td><code>csv-summary-format</code>「sales.csv を月別に集計して」</td></tr>
 <tr><td>プロファイル</td><td>どのエージェントを、どの配布物で動かすか</td><td><code>claude-baseline</code>（配布物なし）・<code>claude-ds-lite</code></td></tr>
-<tr><td>配布物（ハーネス）</td><td>評価したい設定一式。プロファイルの <code>install</code> で一時ホームに展開</td><td><code>examples/harnesses/ds-lite/</code></td></tr>
+<tr><td>配布物（ハーネス）</td><td>評価したい設定一式。プロファイルの <code>install</code> で一時ホームに展開する</td><td><code>examples/harnesses/ds-lite/</code></td></tr>
+<tr><td>フィクスチャ</td><td>タスクの入力データ。試行ごとに作業ディレクトリへ複製する（合成データだけ）</td><td><code>examples/fixtures/sales_synthetic/</code></td></tr>
 <tr><td>試行</td><td>1 タスク × 1 プロファイルを 1 回実行して採点したもの</td><td><code>csv-summary-format / claude-ds-lite #0</code></td></tr>
 <tr><td>グレーダー</td><td>採点ルール 1 つ。結果（ファイル・応答）か過程（ツール・スキル・サブエージェント・hook の呼び出し）を見る</td><td>「summary.md に表ヘッダがある」</td></tr>
 <tr><td>ベースライン</td><td>比較の基準にするプロファイル（通常は配布物なし）</td><td><code>--baseline claude-baseline</code></td></tr>
 </table>
 
-<!-- 2 -->
 <h2 id="workflow">2. 使う順番</h2>
-<p>評価に使うタスクは、まず <code>harvest</code> で自分のセッション履歴から用意します（§3。履歴がなければ同梱の標準タスク）。その後は費用がかからない確認を先に済ませ、エージェントを呼ぶのは必要な分だけにします。普段回すのはスモークだけです。</p>
+<p>費用のかからない確認を先に済ませ、エージェントを呼ぶのは必要な分だけにします。普段回すのはスモーク評価だけです。</p>
 <figure>
-<div class="scroll"><svg viewBox="0 0 960 150" role="img" aria-label="validate、doctor、plan、スモーク、フル、gate の順に使う。普段はスモークだけを回し、フルはリリース前だけ">
+<div class="scroll"><svg viewBox="0 0 960 160" role="img" aria-label="harvest、validate、doctor --live、plan、スモーク、フル、gate の順に使う。普段はスモークだけを回し、フルはリリース前だけ">
 <defs><marker id="m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head"/></marker></defs>
-<rect x="10" y="20" width="140" height="44" rx="6" class="box"/><text x="80" y="47" text-anchor="middle">validate</text>
-<rect x="170" y="20" width="140" height="44" rx="6" class="box"/><text x="240" y="47" text-anchor="middle">doctor --live</text>
-<rect x="330" y="20" width="140" height="44" rx="6" class="box"/><text x="400" y="47" text-anchor="middle">plan</text>
-<rect x="490" y="20" width="140" height="44" rx="6" class="acc"/><text x="560" y="40" text-anchor="middle" class="t-acc">run（スモーク）</text><text x="560" y="56" text-anchor="middle" class="t-sm">--tag smoke --no-llm</text>
-<rect x="650" y="20" width="140" height="44" rx="6" class="box"/><text x="720" y="40" text-anchor="middle">run（フル）</text><text x="720" y="56" text-anchor="middle" class="t-sm">--trials 3</text>
-<rect x="810" y="20" width="140" height="44" rx="6" class="box"/><text x="880" y="47" text-anchor="middle">gate</text>
-<line x1="150" y1="42" x2="168" y2="42" class="ln" marker-end="url(#m2)"/>
-<line x1="310" y1="42" x2="328" y2="42" class="ln" marker-end="url(#m2)"/>
-<line x1="470" y1="42" x2="488" y2="42" class="ln" marker-end="url(#m2)"/>
-<line x1="630" y1="42" x2="648" y2="42" class="ln" marker-end="url(#m2)"/>
-<line x1="790" y1="42" x2="808" y2="42" class="ln" marker-end="url(#m2)"/>
-<text x="80" y="88" text-anchor="middle">YAML の誤り</text><text x="80" y="106" text-anchor="middle" class="t-sm">呼び出し 0</text>
-<text x="240" y="88" text-anchor="middle">認証・配布物の読込</text><text x="240" y="106" text-anchor="middle" class="t-sm">1 回 / プロファイル</text>
-<text x="400" y="88" text-anchor="middle">回数・概算費用</text><text x="400" y="106" text-anchor="middle" class="t-sm">呼び出し 0</text>
-<text x="560" y="88" text-anchor="middle" class="t-acc">配布物を変えるたび</text><text x="560" y="106" text-anchor="middle" class="t-sm">1 試行・コード判定のみ</text>
-<text x="720" y="88" text-anchor="middle">リリース前だけ</text><text x="720" y="106" text-anchor="middle" class="t-sm">3 試行＋LLM 判定</text>
-<text x="880" y="88" text-anchor="middle">前回と比べて判定</text><text x="880" y="106" text-anchor="middle" class="t-sm">通過／不通過／判定不能</text>
-<path d="M720,118 C720,140 560,140 560,118" class="ln-dash" marker-end="url(#m2)"/>
-<text x="640" y="146" text-anchor="middle" class="t-sm">変更が入ればスモークに戻る</text>
+<rect x="8" y="20" width="124" height="44" rx="6" class="dec"/><text x="70" y="40" text-anchor="middle">harvest</text><text x="70" y="56" text-anchor="middle" class="t-sm">→ 人が確認</text>
+<rect x="144" y="20" width="124" height="44" rx="6" class="box"/><text x="206" y="47" text-anchor="middle">validate</text>
+<rect x="280" y="20" width="124" height="44" rx="6" class="box"/><text x="342" y="47" text-anchor="middle">doctor --live</text>
+<rect x="416" y="20" width="124" height="44" rx="6" class="box"/><text x="478" y="47" text-anchor="middle">plan</text>
+<rect x="552" y="20" width="124" height="44" rx="6" class="acc"/><text x="614" y="40" text-anchor="middle" class="t-acc">run（スモーク）</text><text x="614" y="56" text-anchor="middle" class="t-sm">--tag smoke --no-llm</text>
+<rect x="688" y="20" width="124" height="44" rx="6" class="box"/><text x="750" y="40" text-anchor="middle">run（フル）</text><text x="750" y="56" text-anchor="middle" class="t-sm">--trials 3</text>
+<rect x="824" y="20" width="124" height="44" rx="6" class="box"/><text x="886" y="47" text-anchor="middle">gate</text>
+<line x1="132" y1="42" x2="142" y2="42" class="ln" marker-end="url(#m2)"/>
+<line x1="268" y1="42" x2="278" y2="42" class="ln" marker-end="url(#m2)"/>
+<line x1="404" y1="42" x2="414" y2="42" class="ln" marker-end="url(#m2)"/>
+<line x1="540" y1="42" x2="550" y2="42" class="ln" marker-end="url(#m2)"/>
+<line x1="676" y1="42" x2="686" y2="42" class="ln" marker-end="url(#m2)"/>
+<line x1="812" y1="42" x2="822" y2="42" class="ln" marker-end="url(#m2)"/>
+<text x="70" y="88" text-anchor="middle">架空化したタスク</text><text x="70" y="106" text-anchor="middle" class="t-sm">1〜2 回 / 依頼</text>
+<text x="206" y="88" text-anchor="middle">YAML・採点の誤り</text><text x="206" y="106" text-anchor="middle" class="t-sm">呼び出し 0</text>
+<text x="342" y="88" text-anchor="middle">認証・配布物の読込</text><text x="342" y="106" text-anchor="middle" class="t-sm">1 回 / プロファイル</text>
+<text x="478" y="88" text-anchor="middle">回数・概算費用</text><text x="478" y="106" text-anchor="middle" class="t-sm">呼び出し 0</text>
+<text x="614" y="88" text-anchor="middle" class="t-acc">配布物を変えるたび</text><text x="614" y="106" text-anchor="middle" class="t-sm">1 試行・コード判定のみ</text>
+<text x="750" y="88" text-anchor="middle">リリース前だけ</text><text x="750" y="106" text-anchor="middle" class="t-sm">3 試行＋LLM 判定</text>
+<text x="886" y="88" text-anchor="middle">前回と比べて判定</text><text x="886" y="106" text-anchor="middle" class="t-sm">呼び出し 0</text>
+<path d="M750,118 C750,146 614,146 614,118" class="ln-dash" marker-end="url(#m2)"/>
+<text x="682" y="156" text-anchor="middle" class="t-sm">変更が入ればスモークに戻る</text>
 </svg></div>
-<figcaption>validate・plan・doctor（--live なし）は費用 0、doctor --live は「OK と返すだけ」の最小呼び出しです。gate の判定と終了コードは 7 章の表のとおりです。変更のない組み合わせはキャッシュが効くので、スモークを何度回しても呼ばれるのは変えた部分だけです。</figcaption>
+<figcaption>harvest（9 章）は自分のセッション履歴からタスクの下書きを作る工程で、履歴がなければ同梱の標準タスクを使います。validate は <code>--selftest</code> を付けると、採点が正解例で通り、何もしなければ落ちることも確かめます。doctor は <code>--live</code> なしなら費用 0（CLI の版と環境変数の確認）、<code>--live</code> では「OK と返すだけ」の最小呼び出しを 1 回ずつ行います。report（レポートの作り直し）と calibrate（LLM 判定と人手ラベルの照合）もエージェントを呼びません。変更のない組み合わせはキャッシュ（8 章）が効くので、スモークを何度回しても実際に呼ばれるのは変えた部分だけです。</figcaption>
 </figure>
 
-<!-- harvest -->
-<h2 id="harvest">3. 実際の依頼からタスクを作る（harvest）</h2>
-<p>評価は、ユーザーが実際に頼む仕事で行うのがいちばん確かです。<code>harvest</code> は自分のセッション履歴から実際の依頼を集め、同じ種類・同じ難しさのまま、名前・数値・データをすべて架空に置き換えたタスクの下書きを作ります。元の依頼をそのまま実行したり、本物のデータや環境に触れたりはしません。</p>
+<h2 id="run">3. run の流れ</h2>
+<p><code>run</code> は試行の一覧を作って並べ、1 試行ずつ「キャッシュ → 費用の上限 → 実行 → 再試行」の順に処理してから集計します。</p>
 <figure>
-<div class="scroll"><svg viewBox="0 0 960 260" role="img" aria-label="セッション履歴から人が打った依頼を取り出し、架空化して書き換え、自動検査を通った下書きだけを書き出す。元の依頼文はメモリ上だけで扱う。履歴がなければ同梱の標準タスクを使う">
-<defs><marker id="mh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head"/></marker></defs>
-<rect x="5" y="26" width="470" height="80" rx="10" class="grp"/>
-<text x="240" y="18" text-anchor="middle" class="t-acc">元の依頼文はメモリ上だけ（ファイル・ログに書かない）</text>
-<rect x="15" y="40" width="130" height="56" rx="6" class="box"/><text x="80" y="63" text-anchor="middle">セッション履歴</text><text x="80" y="81" text-anchor="middle" class="t-sm">Claude Code・Codex</text>
-<line x1="145" y1="68" x2="173" y2="68" class="ln" marker-end="url(#mh)"/>
-<rect x="175" y="40" width="130" height="56" rx="6" class="box"/><text x="240" y="63" text-anchor="middle">依頼を取り出す</text><text x="240" y="81" text-anchor="middle" class="t-sm">人が打った最初の依頼</text>
-<line x1="305" y1="68" x2="333" y2="68" class="ln" marker-end="url(#mh)"/>
-<rect x="335" y="40" width="130" height="56" rx="6" class="box"/><text x="400" y="63" text-anchor="middle">架空化して書き換え</text><text x="400" y="81" text-anchor="middle" class="t-sm">名前・数値・データ</text>
-<line x1="465" y1="68" x2="493" y2="68" class="ln" marker-end="url(#mh)"/>
-<rect x="495" y="40" width="130" height="56" rx="6" class="box"/><text x="560" y="63" text-anchor="middle">自動検査</text><text x="560" y="81" text-anchor="middle" class="t-sm">漏れ・採点の成立</text>
-<line x1="625" y1="68" x2="653" y2="68" class="ln" marker-end="url(#mh)"/>
-<rect x="655" y="40" width="130" height="56" rx="6" class="box"/><text x="720" y="63" text-anchor="middle">下書き</text><text x="720" y="81" text-anchor="middle" class="t-sm">tasks/h-*.yaml</text>
-<line x1="785" y1="68" x2="813" y2="68" class="ln" marker-end="url(#mh)"/>
-<rect x="815" y="40" width="130" height="56" rx="6" class="acc"/><text x="880" y="63" text-anchor="middle" class="t-acc">人が確認</text><text x="880" y="81" text-anchor="middle" class="t-sm">→ selftest・run</text>
-<line x1="560" y1="96" x2="560" y2="138" class="ln" marker-end="url(#mh)"/>
-<rect x="405" y="140" width="310" height="48" rx="6" class="box"/>
-<text x="560" y="160" text-anchor="middle" class="t-sm">元の名前・数値・文が残る → 作り直し 1 回／見送り</text>
-<text x="560" y="178" text-anchor="middle" class="t-sm">採点が成立しない → 見送り（スクリプトは実行しない）</text>
-<line x1="80" y1="96" x2="80" y2="198" class="ln-dash" marker-end="url(#mh)"/><text x="88" y="150" class="t-sm">履歴がない</text>
-<rect x="15" y="200" width="230" height="44" rx="6" class="box"/><text x="130" y="227" text-anchor="middle">同梱の標準タスク 6 件</text>
-<polyline points="245,222 720,222 720,98" class="ln-dash" marker-end="url(#mh)"/>
+<div class="scroll"><svg viewBox="0 0 900 660" role="img" aria-label="読み込みと検査、試行の一覧作成、並べ替えのあと、試行ごとにキャッシュ・費用上限・実行・再試行・保存を行い、集計して出力する">
+<defs><marker id="m3r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head"/></marker>
+<marker id="m3ra" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head-acc"/></marker></defs>
+<rect x="120" y="20" width="320" height="44" rx="6" class="box"/><text x="280" y="38" text-anchor="middle">① 読み込みと検査</text><text x="280" y="55" text-anchor="middle" class="t-sm">YAML の検証（未知のキーはエラー）</text>
+<line x1="440" y1="42" x2="518" y2="42" class="ln" marker-end="url(#m3r)"/><text x="479" y="35" text-anchor="middle" class="t-sm">問題あり</text>
+<rect x="520" y="20" width="360" height="44" rx="6" class="box"/><text x="700" y="38" text-anchor="middle">止まる</text><text x="700" y="55" text-anchor="middle" class="t-sm">定義の誤り・--out の上に指示ファイル（5 章）</text>
+<line x1="280" y1="64" x2="280" y2="86" class="ln" marker-end="url(#m3r)"/>
+<rect x="120" y="88" width="320" height="44" rx="6" class="box"/><text x="280" y="106" text-anchor="middle">② 試行の一覧を作る</text><text x="280" y="123" text-anchor="middle" class="t-sm">プロファイル × タスク × --trials</text>
+<line x1="280" y1="132" x2="280" y2="154" class="ln" marker-end="url(#m3r)"/>
+<rect x="120" y="156" width="320" height="44" rx="6" class="box"/><text x="280" y="174" text-anchor="middle">③ 並べる（--seed）</text><text x="280" y="191" text-anchor="middle" class="t-sm">同じ試行・タスクのプロファイルを続けて実行</text>
+<line x1="440" y1="178" x2="518" y2="178" class="ln-dash"/>
+<rect x="520" y="132" width="360" height="92" rx="6" class="grp"/>
+<text x="536" y="152" class="t-sm">例: 2 プロファイル × タスク A × 2 試行</text>
+<text x="536" y="174">試行 0：A / base → A / ds-lite</text>
+<text x="536" y="194">試行 1：A / ds-lite → A / base</text>
+<text x="536" y="214" class="t-sm">先頭を巡回し、混雑・モデル更新の影響を偏らせない</text>
+<line x1="280" y1="200" x2="280" y2="246" class="ln" marker-end="url(#m3r)"/>
+<rect x="20" y="236" width="870" height="270" rx="10" class="grp"/>
+<text x="36" y="500" class="t-sm">④ 試行ごと（--jobs で並列）</text>
+<rect x="120" y="248" width="320" height="40" rx="6" class="dec"/><text x="280" y="273" text-anchor="middle">同じ入力の結果がキャッシュにある？</text>
+<line x1="440" y1="268" x2="518" y2="268" class="ln-acc" marker-end="url(#m3ra)"/><text x="479" y="261" text-anchor="middle" class="t-sm">はい</text>
+<rect x="520" y="248" width="360" height="40" rx="6" class="acc"/><text x="700" y="273" text-anchor="middle" class="t-acc">過去の結果を再利用（呼び出し 0）</text>
+<line x1="280" y1="288" x2="280" y2="310" class="ln" marker-end="url(#m3r)"/><text x="292" y="303" class="t-sm">いいえ</text>
+<rect x="120" y="312" width="320" height="40" rx="6" class="dec"/><text x="280" y="337" text-anchor="middle">費用の上限に到達？（8 章）</text>
+<line x1="440" y1="332" x2="518" y2="332" class="ln" marker-end="url(#m3r)"/><text x="479" y="325" text-anchor="middle" class="t-sm">はい</text>
+<rect x="520" y="312" width="360" height="40" rx="6" class="box"/><text x="700" y="337" text-anchor="middle">未実行（budget_stop）</text>
+<line x1="280" y1="352" x2="280" y2="374" class="ln" marker-end="url(#m3r)"/><text x="292" y="367" class="t-sm">いいえ</text>
+<rect x="120" y="376" width="320" height="40" rx="6" class="box"/><text x="280" y="401" text-anchor="middle">1 試行を実行・採点（4 章・6 章）</text>
+<polyline points="120,396 80,396 80,332 118,332" class="ln-dash" marker-end="url(#m3r)"/>
+<text x="36" y="430" class="t-sm">rate_limit・overloaded：</text>
+<text x="36" y="446" class="t-sm">待って再試行（--retry-infra 回まで）</text>
+<line x1="280" y1="416" x2="280" y2="446" class="ln" marker-end="url(#m3r)"/>
+<rect x="120" y="448" width="320" height="44" rx="6" class="box"/><text x="280" y="466" text-anchor="middle">キャッシュに保存</text><text x="280" y="483" text-anchor="middle" class="t-sm">除外・未実行・中断・timeout は保存しない</text>
+<line x1="440" y1="470" x2="518" y2="470" class="ln-dash"/>
+<rect x="520" y="450" width="360" height="40" rx="6" class="box"/><text x="700" y="475" text-anchor="middle">どの結果も trials.jsonl に 1 行追記</text>
+<line x1="280" y1="506" x2="280" y2="528" class="ln" marker-end="url(#m3r)"/>
+<rect x="120" y="530" width="320" height="44" rx="6" class="box"/><text x="280" y="548" text-anchor="middle">⑤ 集計（7 章）</text><text x="280" y="565" text-anchor="middle" class="t-sm">pass@1・pass^k・Δ と 95% 区間・費用・失敗分類</text>
+<line x1="280" y1="574" x2="280" y2="596" class="ln" marker-end="url(#m3r)"/>
+<rect x="120" y="598" width="320" height="44" rx="6" class="acc"/><text x="280" y="616" text-anchor="middle" class="t-acc">⑥ 出力（10 章）</text><text x="280" y="633" text-anchor="middle" class="t-sm">summary.json・report.html</text>
 </svg></div>
-<figcaption>書き換えは Claude Code を一時ホーム・ツールなし・会話を保存しない設定で呼びます。</figcaption>
+<figcaption>trials.jsonl には、キャッシュの再利用・未実行（budget_stop）を含むすべての試行が 1 行ずつ追記され、中断しても残ります。再試行するのは環境起因（レート制限・過負荷）で落ちた試行だけです。不合格の試行を「良い結果が出るまで」引き直すことはしません。並べ方の理由は <a href="design.html#method">設計記録 4 章</a> にあります。</figcaption>
 </figure>
-<table>
-<tr><th>心配</th><th>対策</th></tr>
-<tr><td>社外秘が残る</td><td>固有名詞・数値・日付・表名を架空化。元の識別子・URL・メール・大文字の名前・年月・4 桁以上の数値・25 文字以上の同じ文が残った案は自動で作り直し／見送り。日本語の会社名・人名は機械では判定できないため、人の確認が必須</td></tr>
-<tr><td>依頼文がファイルやログに残る</td><td>メモリ上だけで扱い、表示は件数だけ。書き換えの呼び出しも新しい履歴を作らず、テレメトリのプロンプト記録も外す</td></tr>
-<tr><td>LLM が書いた採点スクリプト</td><td>harvest では実行しない（構文の確認だけ）。人が読んだあとに <code>validate --selftest</code> で、正解例で通り何もしなければ落ちるかを確かめる</td></tr>
-<tr><td>本物の環境で実行してしまう</td><td>合成データだけで完結する形に書き換える。Claude Code では ssh・curl・Hive・Trino などを禁止（<code>Bash(ssh *)</code> の禁止が効くことを実機で確認。Bash 自体は使えるので最善の努力）。Codex はサンドボックス（既定でネットワーク不可）で制限。<code>.claude/</code>・<code>CLAUDE.md</code> などの設定ファイルは置かせない</td></tr>
-<tr><td>採点が不公平</td><td>正解例で通り、何もしなければ落ちることを自動確認。依頼で求めていない判定は外す</td></tr>
-</table>
-<p>開発時に合成の依頼 3 件で試すと、3 件とも元の名前・識別子が残らない下書きになり、配布物なしの haiku で 3/3 解けました。ただし改善 SQL の書き方を 1 通りに決め打ちする採点スクリプトも出たので、使う前に「正しいが書き方の違う答えを落とさないか」を確認してください。</p>
 
-<!-- 3 -->
 <h2 id="trial">4. 1 試行の流れ</h2>
-<p>1 試行は 4 つの部品の間を順に進みます。エージェントに渡るのは「配布物だけを置いた一時ホーム」と「フィクスチャを複製した作業ディレクトリ」です。</p>
+<p>1 試行は 4 つの部品の間を順に進みます。エージェントに渡すのは「配布物だけを置いた一時ホーム」と「フィクスチャを複製した作業ディレクトリ」です。</p>
 <figure>
 <div class="scroll"><svg viewBox="0 0 960 570" role="img" aria-label="runner が準備を依頼し、isolation が一時ホームと作業ディレクトリを作って配布物を展開し、CLI を起動、出力をパースして graders で採点し、最後に一時ホームを必ず削除する">
 <defs><marker id="m3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head"/></marker></defs>
@@ -174,7 +162,6 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <text x="830" y="24" text-anchor="middle" class="t-b">graders（採点）</text>
 <line x1="110" y1="36" x2="110" y2="508" class="lane"/><line x1="350" y1="36" x2="350" y2="508" class="lane"/>
 <line x1="590" y1="36" x2="590" y2="508" class="lane"/><line x1="830" y1="36" x2="830" y2="508" class="lane"/>
-<!-- 準備 -->
 <rect x="20" y="56" width="180" height="36" rx="6" class="box"/><text x="110" y="79" text-anchor="middle">試行ディレクトリ作成</text>
 <line x1="200" y1="74" x2="258" y2="74" class="ln" marker-end="url(#m3)"/><text x="229" y="67" text-anchor="middle" class="t-sm">準備</text>
 <rect x="260" y="56" width="180" height="36" rx="6" class="box"/><text x="350" y="79" text-anchor="middle">home/・workdir/ 作成</text>
@@ -184,7 +171,6 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <rect x="260" y="160" width="180" height="36" rx="6" class="box"/><text x="350" y="183" text-anchor="middle">環境変数を差し替え</text>
 <line x1="350" y1="196" x2="350" y2="210" class="ln" marker-end="url(#m3)"/>
 <rect x="260" y="212" width="180" height="36" rx="6" class="box"/><text x="350" y="235" text-anchor="middle">install で配布物を展開</text>
-<!-- 起動 -->
 <rect x="20" y="264" width="180" height="36" rx="6" class="box"/><text x="110" y="287" text-anchor="middle">コマンド組み立て</text>
 <line x1="200" y1="282" x2="498" y2="282" class="ln" marker-end="url(#m3)"/><text x="350" y="275" text-anchor="middle" class="t-sm">起動（プロンプトは標準入力）</text>
 <rect x="500" y="264" width="180" height="36" rx="6" class="box"/><text x="590" y="287" text-anchor="middle">cwd = workdir/ で実行</text>
@@ -192,25 +178,21 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <rect x="500" y="316" width="180" height="36" rx="6" class="box"/><text x="590" y="339" text-anchor="middle">stdout.jsonl に記録</text>
 <line x1="590" y1="352" x2="590" y2="364" class="ln" marker-end="url(#m3)"/>
 <rect x="500" y="366" width="180" height="46" rx="6" class="box"/><text x="590" y="385" text-anchor="middle">終了</text><text x="590" y="402" text-anchor="middle" class="t-sm">timeout_s なら子孫ごと停止</text>
-<!-- パース -->
 <line x1="500" y1="386" x2="202" y2="386" class="ln" marker-end="url(#m3)"/><text x="350" y="379" text-anchor="middle" class="t-sm">stream-json / JSONL</text>
 <rect x="20" y="366" width="180" height="46" rx="6" class="box"/><text x="110" y="385" text-anchor="middle">パース → 試行レコード</text><text x="110" y="402" text-anchor="middle" class="t-sm">ツール・スキル・hook・費用</text>
-<!-- 採点 -->
 <rect x="20" y="424" width="180" height="36" rx="6" class="box"/><text x="110" y="447" text-anchor="middle">採点を依頼</text>
 <line x1="200" y1="442" x2="738" y2="442" class="ln" marker-end="url(#m3)"/><text x="470" y="435" text-anchor="middle" class="t-sm">試行レコード ＋ workdir/</text>
 <rect x="740" y="424" width="180" height="36" rx="6" class="box"/><text x="830" y="447" text-anchor="middle">コード判定 → LLM 判定</text>
 <polyline points="830,460 830,494 202,494" class="ln" marker-end="url(#m3)"/><text x="520" y="487" text-anchor="middle" class="t-sm">スコア・各グレーダーの結果</text>
 <rect x="20" y="476" width="180" height="36" rx="6" class="box"/><text x="110" y="499" text-anchor="middle">合否・失敗タグ</text>
-<!-- 後始末 -->
 <rect x="20" y="526" width="900" height="34" rx="6" class="acc"/>
 <text x="470" y="548" text-anchor="middle" class="t-acc">後始末：home/ は必ず削除（例外・Ctrl-C でも）／ workdir/ は --keep に従う（既定は不合格だけ残す）</text>
 </svg></div>
-<figcaption>runner は試行の前にキャッシュと費用上限を確認し、レート制限・過負荷で落ちた試行だけを再試行します（図には含めていません）。</figcaption>
+<figcaption>試行レコードはエージェントの種類によらない共通の形です。CLI ごとの出力形式の違いはパースの段階で吸収します。</figcaption>
 </figure>
 
-<!-- 4 -->
 <h2 id="isolation">5. 隔離：エージェントから何が見えるか</h2>
-<p>普段の設定（ホームの <code>.claude</code>・<code>.codex</code>）は読み込ませず、試行ディレクトリに置いた配布物で起動します。ただし CLI は作業ディレクトリより上のフォルダの指示・スキル・ルール・サブエージェントも読むため、<code>--out</code> とその上に <code>CLAUDE.md</code>・<code>AGENTS.md</code>・<code>.mcp.json</code> や <code>.claude/</code>・<code>.codex/</code>・<code>.agents/</code> フォルダ があると <code>run</code> は止まり、<code>doctor</code> は NG にします（<code>--out</code> はリポジトリやホームの外に置く）。外のもので使うのは AWS の認証ファイル（参照のみ）と、指定したときの認証ファイルの複製です。これは「どの設定を読み込むか」の隔離で、ファイルの読み書きを禁止するものではありません（Read や Bash を許可すれば絶対パスで外も読めます）。そのため評価には合成データだけを使います。</p>
+<p>普段の設定（ホームの <code>.claude</code>・<code>.codex</code>）は読み込ませず、試行ディレクトリに置いた配布物だけで起動します。外のファイルで使うのは AWS の認証ファイル（参照のみ）と、指定したときに複製する認証ファイルだけです。</p>
 <figure>
 <div class="scroll"><svg viewBox="0 0 900 360" role="img" aria-label="エージェント CLI は HOME と設定ディレクトリを一時ホームに向けられ、作業ディレクトリで動く。普段の ~/.claude は読まない。AWS 認証ファイルは参照のみ。認証ファイルは copy_credentials のときだけ複製され、試行後に削除される">
 <defs>
@@ -222,15 +204,12 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <rect x="20" y="185" width="230" height="44" rx="6" class="box"/><text x="135" y="204" text-anchor="middle">~/.aws/credentials・config</text><text x="135" y="220" text-anchor="middle" class="t-sm">Bedrock の認証</text>
 <rect x="20" y="265" width="230" height="44" rx="6" class="box"/><text x="135" y="284" text-anchor="middle">~/.claude/・~/.codex/</text><text x="135" y="300" text-anchor="middle" class="t-sm">普段の設定・スキル</text>
 <rect x="330" y="185" width="200" height="50" rx="8" class="box"/><text x="430" y="215" text-anchor="middle" class="t-b">エージェント CLI</text>
-<!-- 普段の環境へ -->
 <line x1="330" y1="208" x2="252" y2="207" class="ln-dash" marker-end="url(#m4)"/><text x="291" y="199" text-anchor="middle" class="t-sm">参照のみ</text>
 <line x1="330" y1="228" x2="252" y2="284" class="ln-dash"/>
 <line x1="283" y1="248" x2="299" y2="264" class="x"/><line x1="299" y1="248" x2="283" y2="264" class="x"/>
 <text x="306" y="261" class="t-sm">読まない</text>
-<!-- 複製 -->
 <line x1="250" y1="127" x2="648" y2="127" class="ln-acc" stroke-dasharray="6 4" marker-end="url(#m4a)"/>
 <text x="450" y="119" text-anchor="middle" class="t-acc">copy_credentials: true のときだけ複製</text>
-<!-- 試行ディレクトリ -->
 <rect x="610" y="20" width="270" height="320" rx="10" class="grp"/>
 <text x="745" y="42" text-anchor="middle" class="t-sm">results/…/trials/&lt;タスク&gt;/&lt;プロファイル&gt;/&lt;n&gt;/</text>
 <rect x="630" y="55" width="230" height="110" rx="8" class="acc"/>
@@ -240,25 +219,31 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <text x="745" y="124" text-anchor="middle">.claude/ か .codex/</text><text x="745" y="140" text-anchor="middle" class="t-sm">配布物を install で展開</text>
 <rect x="630" y="185" width="230" height="44" rx="6" class="box"/><text x="745" y="204" text-anchor="middle">workdir/</text><text x="745" y="220" text-anchor="middle" class="t-sm">フィクスチャの複製</text>
 <rect x="630" y="250" width="230" height="40" rx="6" class="box"/><text x="745" y="275" text-anchor="middle">stdout.jsonl・stderr.txt</text>
-<!-- CLI から試行ディレクトリへ -->
 <line x1="530" y1="196" x2="628" y2="158" class="ln" marker-end="url(#m4)"/><text x="566" y="168" text-anchor="middle" class="t-sm">HOME・設定</text>
 <line x1="530" y1="210" x2="628" y2="207" class="ln" marker-end="url(#m4)"/><text x="580" y="202" text-anchor="middle" class="t-sm">cwd</text>
 <line x1="530" y1="224" x2="628" y2="268" class="ln" marker-end="url(#m4)"/><text x="566" y="262" text-anchor="middle" class="t-sm">出力</text>
 </svg></div>
-<figcaption>「設定」は Claude Code の CLAUDE_CONFIG_DIR、Codex の CODEX_HOME。Claude Code には claude.ai からのスキル・プラグイン同期を止める設定も渡します。</figcaption>
+<figcaption>「設定」は Claude Code の <code>CLAUDE_CONFIG_DIR</code>、Codex の <code>CODEX_HOME</code> です。</figcaption>
 </figure>
 <table>
 <tr><th>環境変数</th><th>試行中の値</th><th>理由</th></tr>
 <tr><td><code>HOME</code>・<code>USERPROFILE</code></td><td><code>home/</code></td><td>普段のユーザー設定・スキルを読ませない（<code>isolate_home: false</code> で無効）</td></tr>
 <tr><td><code>CLAUDE_CONFIG_DIR</code> / <code>CODEX_HOME</code></td><td><code>home/.claude</code> / <code>home/.codex</code></td><td>配布物だけを置いた設定ディレクトリで起動する</td></tr>
-<tr><td><code>AWS_SHARED_CREDENTIALS_FILE</code>・<code>AWS_CONFIG_FILE</code></td><td>本物の <code>~/.aws/…</code></td><td>ホームを差し替えても Bedrock の認証を使える（未設定でファイルがあるときだけ）</td></tr>
+<tr><td><code>AWS_SHARED_CREDENTIALS_FILE</code>・<code>AWS_CONFIG_FILE</code></td><td>本物の <code>~/.aws/…</code></td><td>ホームを差し替えても Bedrock の認証を使える（<code>isolate_home: true</code> で、未設定かつファイルがあるときだけ）</td></tr>
 <tr><td><code>CLAUDECODE</code> など親セッションの変数</td><td>削除</td><td>Claude Code の中から実行しても入れ子扱いにならない</td></tr>
 <tr><td>プロファイルの <code>env</code></td><td>追加・上書き</td><td>Bedrock の設定など</td></tr>
-<tr><td>経路を変える変数（API キー・Bedrock の切り替え・モデルの別名など）</td><td>親の値をそのまま渡す</td><td><code>env</code> か <code>inherit_env</code>（名前だけ）で宣言する。宣言のない引き継ぎは <code>doctor</code> が NG</td></tr>
+<tr><td>経路を変える変数（API キー・Bedrock の切り替え・モデルの別名など）</td><td>親の値をそのまま渡す</td><td>経路と請求先が変わるので、プロファイルで宣言させる（<a href="reference.html#auth">リファレンス「認証」</a>）</td></tr>
 </table>
-<p>完全には隔離できないもの（Claude Code の同梱スキル、組織の管理設定など）があるため、各試行で実際に読み込まれたスキル・プラグイン・MCP を記録し、レポートの「実行環境の記録」で確認できます。</p>
+<p>Claude Code にはさらに <code>--settings {"syncClaudeAiSkills":false,"syncClaudeAiPlugins":false}</code> を渡し、claude.ai アカウントから同期されるスキル・プラグインが混ざるのを防ぎます。</p>
 
-<!-- 5 -->
+<h3>隔離できないもの</h3>
+<ul>
+<li><b>上のフォルダの指示</b>：CLI は作業ディレクトリより上のフォルダにある指示・スキル・ルール・サブエージェント・コマンドも読み込みます（一時ホームでは防げません）。配布物なしの基準にも混ざって比較が壊れるため、<code>--out</code> とその上に <code>CLAUDE.md</code>・<code>CLAUDE.local.md</code>・<code>AGENTS.md</code>・<code>AGENTS.override.md</code>・<code>.mcp.json</code> や <code>.claude/</code>・<code>.codex/</code>・<code>.agents/</code> フォルダがあると、<code>run</code> は止まり、<code>doctor</code> は NG にします。<code>--out</code> はリポジトリやホームの外（例: macOS <code>/Users/Shared/harness-eval</code>、Windows <code>C:\harness-eval</code>）に置いてください。承知の上で実行するなら <code>--allow-ancestor-instructions</code> を付けます（結果とレポートに記録されます）。OS の一時フォルダは Codex が拒否するので使えません。</li>
+<li><b>同梱スキル・組織の管理設定</b>：Claude Code に同梱のスキルや組織の managed settings は読み込まれます。各試行で実際に読み込まれたスキル・プラグイン・MCP を記録し、レポートの「実行環境の記録」と <code>doctor --live</code> で確認できます。</li>
+<li><b>ファイルアクセス</b>：これは「どの設定を読み込むか」の隔離で、ファイルの読み書きを禁止するものではありません（Read や Bash を許可すれば絶対パスで外も読めます）。評価には合成データだけを使います。</li>
+<li><b>配布物の実行物</b>：hooks・MCP サーバー・install の <code>run</code> は利用者の権限で動き、sandbox はありません。社内でレビュー済みの配布物だけを評価してください（<code>validate</code> が警告します）。</li>
+</ul>
+
 <h2 id="grading">6. 採点：試行が合格・不合格・除外のどれになるか</h2>
 <p>環境のせいで落ちた試行は「失敗」に数えません。LLM 判定はコード判定が全部通ったときだけ呼ぶので、結果を変えずに判定の費用を省けます。</p>
 <figure>
@@ -277,7 +262,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <line x1="250" y1="200" x2="250" y2="230" class="ln" marker-end="url(#m5)"/>
 <rect x="100" y="232" width="300" height="44" rx="6" class="dec"/><text x="250" y="252" text-anchor="middle">コード判定が全合格※</text><text x="250" y="268" text-anchor="middle">かつ 異常終了なし？</text>
 <line x1="400" y1="254" x2="498" y2="254" class="ln-acc" marker-end="url(#m5a)"/><text x="449" y="247" text-anchor="middle" class="t-sm">いいえ</text>
-<rect x="500" y="232" width="280" height="44" rx="6" class="acc"/><text x="640" y="251" text-anchor="middle" class="t-acc">LLM 判定は呼ばない（節約）</text><text x="640" y="267" text-anchor="middle" class="t-sm">skipped_prior_fail＝不合格扱い</text>
+<rect x="500" y="232" width="280" height="44" rx="6" class="acc"/><text x="640" y="251" text-anchor="middle" class="t-acc">LLM 判定は呼ばない（節約）</text><text x="640" y="267" text-anchor="middle" class="t-sm">skipped_prior_fail（試行は既に不合格）</text>
 <polyline points="780,254 800,254 800,398 402,398" class="ln-acc" marker-end="url(#m5a)"/>
 <line x1="250" y1="276" x2="250" y2="310" class="ln" marker-end="url(#m5)"/><text x="262" y="297" class="t-sm">はい</text>
 <rect x="100" y="312" width="300" height="36" rx="6" class="box"/><text x="250" y="335" text-anchor="middle">LLM 判定（llm グレーダーがあれば）</text>
@@ -292,19 +277,30 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <line x1="250" y1="492" x2="250" y2="528" class="ln" marker-end="url(#m5)"/><text x="262" y="515" class="t-sm">はい</text>
 <rect x="175" y="530" width="150" height="36" rx="18" class="box"/><text x="250" y="553" text-anchor="middle" class="ok">合格</text>
 </svg></div>
-<figcaption>※ 配布物がないと通らない判定（スキルなどを使うことの要求）の不合格では LLM 判定を省きません（基準との比較用スコアに必要なため）。スコアの分母は実際に判定したグレーダーだけです（呼ばなかった LLM 判定は入れません）。UNKNOWN（判定モデルが判断できなかった）は合格にしません。<code>--no-llm</code> のときの LLM 判定は not_run としてスコアの分母から外し、実行されたグレーダーが 1 つもない試行は not_graded として除外します。</figcaption>
+<figcaption>※ 配布物がないと通らない判定（スキル・サブエージェント・hook を 1 回以上使うことの要求）だけが不合格のときは、LLM 判定を省きません（基準との比較用のスコアに必要なため）。スコアの分母は実際に判定したグレーダーだけです（呼ばなかった LLM 判定は skipped_prior_fail として分母から外します。コード判定で落ちているので、試行はどのみち不合格です）。UNKNOWN（判定モデルが判断できなかった）は合格にしません。<code>--no-llm</code> のときの LLM 判定は not_run として分母から外し、実行されたグレーダーが 1 つもない試行は not_graded として除外します。</figcaption>
 </figure>
 <table>
 <tr><th>試行の状態</th><th>例</th><th>pass@1・pass^k の分母</th><th>キャッシュ</th></tr>
 <tr><td class="ok">合格</td><td>全グレーダー合格</td><td>入る</td><td>保存</td></tr>
-<tr><td class="ng">不合格</td><td>形式違反・<code>timeout</code>・<code>max_turns</code>・<code>budget_exceeded</code>・<code>agent_error</code></td><td>入る</td><td>保存（<code>timeout</code> は保存しない）</td></tr>
-<tr><td>除外</td><td><code>rate_limit</code>・<code>overloaded</code>・<code>auth</code>・<code>api_error</code>・<code>network</code>・<code>launch_failed</code>・<code>harness_error</code>・<code>judge_error</code>・<code>not_graded</code>・<code>interrupted</code></td><td>入らない（件数と理由を表示）</td><td>保存しない</td></tr>
-<tr><td>未実行</td><td><code>--max-cost-usd</code>・<code>--monthly-budget-usd</code>（Claude・Codex の口座ごと）に到達（<code>budget_stop</code>）</td><td>入らない（件数を表示）</td><td>保存しない</td></tr>
+<tr><td class="ng">不合格</td><td>形式違反・タイムアウトなど（7 章の失敗分類）</td><td>入る</td><td>保存（<code>timeout</code> は一時的な原因でも起きるので保存しない）</td></tr>
+<tr><td>除外</td><td><code>rate_limit</code>・<code>overloaded</code>・<code>auth</code>・<code>api_error</code>（モデル ID の誤りなど他の API エラー）・<code>network</code>（Codex が再接続を繰り返しただけ）・<code>launch_failed</code>・<code>harness_error</code>・<code>judge_error</code>・<code>not_graded</code>・<code>interrupted</code>（Ctrl-C）</td><td>入らない（件数と理由をレポートに表示）</td><td>保存しない</td></tr>
+<tr><td>未実行</td><td>費用の上限に到達（<code>budget_stop</code>）</td><td>入らない（件数を表示）</td><td>保存しない</td></tr>
 </table>
+<p>グレーダーの種類と書き方は <a href="reference.html#graders">リファレンス「グレーダー」</a> にあります。</p>
 
-<!-- 6 -->
-<h2 id="metrics">7. 指標：pass@1 と pass^k の違い</h2>
-<p>pass@1 は「平均的にどれくらいできるか」、pass^k は「k 回続けて使っても毎回できるか」です。配布ツールは同じ人が何度も使うので、pass^k を主指標にします。</p>
+<h2 id="metrics">7. 指標とリリース判定</h2>
+<table>
+<tr><th>指標</th><th>定義</th></tr>
+<tr><td>試行スコア</td><td>合格したグレーダーの重み ÷ 判定したグレーダーの重み</td></tr>
+<tr><td>試行の合格</td><td>スコア 1.0 かつ失敗扱いの異常終了なし</td></tr>
+<tr><td>pass@1</td><td>タスクごとに「合格した有効試行 ÷ 有効試行」。全体はタスク平均</td></tr>
+<tr><td>pass^k</td><td>タスクごとに k 回続けて合格する確率。有効試行 n 回中 c 回合格なら C(c,k) ÷ C(n,k)。n ＝ k なら「全部合格で 1、それ以外 0」。n &lt; k のタスクは計算せず、計算できたタスク数をレポートに出す。全体はタスク平均。<b>同じ人が何度も使う配布物では主指標</b></td></tr>
+<tr><td>Δ</td><td>比較プロファイル − 基準プロファイル（両方に値があるタスクだけ）。配布物がないと通らない判定を両側とも除いた値で計算し、95% 区間を付ける（区間が 0 をまたげば差があるとは言えない）。v0.3.0 以前の結果は除けないので全判定の値で計算し、レポートに注意を出す</td></tr>
+<tr><td>合格あたりのコスト</td><td>総コスト ÷ 合格試行数。コスト不明の試行があれば出さない（0 で埋めない）</td></tr>
+<tr><td>失敗分類</td><td>不合格の試行に付くタグ。異常終了の種類（<code>timeout</code>・<code>max_turns</code>・<code>budget_exceeded</code>・<code>agent_error</code>・<code>agent_crash</code>）と、落ちたグレーダーの <code>category</code>（既定値は <a href="reference.html#graders">リファレンス「グレーダー」</a>）</td></tr>
+</table>
+<h3>pass@1 と pass^k の違い</h3>
+<p>pass@1 は「平均的にどれくらいできるか」、pass^k は「k 回続けて使っても毎回できるか」です。配布物を変えて「たまにしか失敗しなくなった」という差は、pass@1 では小さく見え、pass^k では大きく出ます。</p>
 <table>
 <tr><th>タスク</th><th>3 試行の結果</th><th>pass@1</th><th>pass^3</th><th>pass^2 ＝ C(c,2) ÷ C(3,2)</th></tr>
 <tr><td>A</td><td><span class="ok">✓ ✓ ✓</span>（c = 3）</td><td class="n">100%</td><td class="n">1</td><td class="n">3 ÷ 3 ＝ 1</td></tr>
@@ -312,20 +308,43 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <tr><td>C</td><td><span class="ng">✗ ✗</span> <span class="ok">✓</span>（c = 1）</td><td class="n">33%</td><td class="n">0</td><td class="n">0 ÷ 3 ＝ 0</td></tr>
 <tr><th>全体（タスク平均）</th><td></td><td class="n"><b>67%</b></td><td class="n"><b>0.33</b></td><td class="n"><b>0.44</b></td></tr>
 </table>
-<p>有効試行 n 回中 c 回合格のとき pass^k ＝ C(c,k) ÷ C(n,k)。n ＝ k なら「全部合格で 1、それ以外 0」です。有効試行が k 回未満のタスクは計算せず、レポートに「計算できたタスク数」を出します。Δ は比較プロファイルから基準プロファイルを引いた値で、両方に値があるタスクだけで計算します。配布物なしの基準と比べるときは、配布物がないと通らない判定（スキル・サブエージェント・hook を使うことの要求）を両側とも除きます。差にはタスク単位のブートストラップによる 95% 区間を付けます（試行を独立な標本として数えない。区間が 0 をまたげば差があるとは言えない）。</p>
-<p>リリース判定（<code>gate</code>）は、前回と今回の同じプロファイルの差の区間を、結果を見る前に決めた非劣性マージン m（<code>--margin</code>、毎回指定）で判定します。</p>
+<h3>リリース判定（gate）</h3>
+<p>前回と今回の同じプロファイルについて、タスクごとの差を作り、タスクを復元抽出するブートストラップで差の 95% 区間を出します（試行を独立な標本として数えません）。その区間を、結果を見る前に決めた非劣性マージン m（<code>--margin</code>、毎回指定）と比べます。</p>
+<figure>
+<div class="scroll"><svg viewBox="0 0 900 230" role="img" aria-label="差の 95% 区間の下端が −m 以上なら通過、上端が −m 未満なら不通過、−m をまたげば判定不能">
+<line x1="120" y1="190" x2="860" y2="190" class="ln"/>
+<line x1="380" y1="30" x2="380" y2="196" class="ln-acc" stroke-dasharray="6 4"/><text x="380" y="214" text-anchor="middle" class="t-acc">−m</text>
+<line x1="620" y1="30" x2="620" y2="196" class="ln-dash"/><text x="620" y="214" text-anchor="middle">0（差なし）</text>
+<text x="140" y="214" class="t-sm">← 悪化</text><text x="860" y="214" text-anchor="end" class="t-sm">改善 →</text>
+<text x="20" y="64" class="ok">通過</text>
+<line x1="450" y1="60" x2="700" y2="60" class="ln" stroke-width="4"/><circle cx="575" cy="60" r="5" class="head"/>
+<text x="720" y="64" class="t-sm">下端 ≥ −m（悪化しても m 以内）</text>
+<text x="20" y="114" class="ng">不通過</text>
+<line x1="150" y1="110" x2="340" y2="110" class="ln" stroke-width="4"/><circle cx="245" cy="110" r="5" class="head"/>
+<text x="400" y="114" class="t-sm">上端 &lt; −m（はっきり悪化）</text>
+<text x="20" y="164">判定不能</text>
+<line x1="280" y1="160" x2="560" y2="160" class="ln" stroke-width="4"/><circle cx="420" cy="160" r="5" class="head"/>
+<text x="580" y="164" class="t-sm">−m をまたぐ（区間が広すぎる）</text>
+</svg></div>
+<figcaption>横線が「今回 − 前回」の差の 95% 区間、点が推定値です。比較できたタスクが <code>--min-tasks</code> 未満なら、区間の位置にかかわらず判定不能です。指標は <code>--metric</code>（既定 pass^k）。前回より下がったタスクの一覧は参考として表示しますが、判定には使いません。</figcaption>
+</figure>
+<p>判定は上の行から順に決まります。複数のプロファイルを比べるときは、1 つでも不通過なら不通過、すべて通過したときだけ通過です。</p>
 <table>
-<tr><th>判定</th><th>条件</th><th>終了コード</th></tr>
-<tr><td class="ok">通過</td><td>区間の下端 ≥ −m（悪化していても m 以内と言える）</td><td class="n">0</td></tr>
-<tr><td class="ng">不通過</td><td>区間の上端 &lt; −m（はっきり悪化）、安全違反（<code>unsafe_access</code> など）が 1 件でもある、または比較できない（k・LLM 判定の有無・タスク定義が違う、今回の結果にプロファイル・タスクがない、指標を算出できない）</td><td class="n">1</td></tr>
-<tr><td>判定不能</td><td>それ以外、または比較できたタスクが <code>--min-tasks</code>（既定 10）未満。タスクが少ないと区間は実際より狭く出やすいため</td><td class="n">3</td></tr>
+<tr><th>順</th><th>条件</th><th>判定</th><th>終了コード</th></tr>
+<tr><td class="n">1</td><td>定義の誤り、結果のフォルダ（<code>summary.json</code>・<code>trials.jsonl</code>）がない</td><td>判定できない</td><td class="n">2</td></tr>
+<tr><td class="n">2</td><td>安全違反の失敗分類（既定 <code>unsafe_access</code>。<code>--hard-category</code> で追加）が 1 件でもある、または比較できない（LLM 判定の有無・タスク定義が違う、pass^k で k が違う、今回の結果にプロファイル・タスクがない、指標を算出できない）</td><td class="ng">不通過</td><td class="n">1</td></tr>
+<tr><td class="n">3</td><td>比較できたタスクが <code>--min-tasks</code>（既定 10）未満（区間がどこにあっても）</td><td>判定不能</td><td class="n">3</td></tr>
+<tr><td class="n">4</td><td>区間の上端 &lt; −m</td><td class="ng">不通過</td><td class="n">1</td></tr>
+<tr><td class="n">5</td><td>区間の下端 ≥ −m</td><td class="ok">通過</td><td class="n">0</td></tr>
+<tr><td class="n">6</td><td>それ以外（区間が −m をまたぐ）</td><td>判定不能</td><td class="n">3</td></tr>
 </table>
+<p>タスクが少ないと区間は実際より狭く出やすいので、判断には 20 タスク以上・3 試行以上を目安にしてください（理由は <a href="design.html#method">設計記録 4 章</a>）。</p>
 
-<!-- 7 -->
-<h2 id="cache">8. トークン節約：変えたところだけ実行する</h2>
+<h2 id="cost">8. 費用とトークン節約</h2>
+<h3>キャッシュ：変えたところだけ実行する</h3>
 <p>試行の入力をすべてハッシュにしてキャッシュのキーにします。配布物を変えたプロファイルだけキーが変わるので、そのプロファイルだけが再実行されます。</p>
 <figure>
-<div class="scroll"><svg viewBox="0 0 900 250" role="img" aria-label="変更していないプロファイルは前回と同じキャッシュキーになり結果を再利用、CLAUDE.md を変えたプロファイルはキーが変わりエージェントを実行する">
+<div class="scroll"><svg viewBox="0 0 900 200" role="img" aria-label="変更していないプロファイルは前回と同じキャッシュキーになり結果を再利用、CLAUDE.md を変えたプロファイルはキーが変わりエージェントを実行する">
 <defs>
 <marker id="m7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head"/></marker>
 <marker id="m7a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head-acc"/></marker>
@@ -343,35 +362,163 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <rect x="340" y="136" width="180" height="44" rx="6" class="box"/><text x="430" y="163" text-anchor="middle">新しいキー</text>
 <line x1="520" y1="158" x2="578" y2="158" class="ln" marker-end="url(#m7)"/><text x="549" y="151" text-anchor="middle" class="t-sm">ミス</text>
 <rect x="580" y="130" width="300" height="56" rx="6" class="box"/><text x="730" y="153" text-anchor="middle">エージェントを実行</text><text x="730" y="172" text-anchor="middle" class="t-sm">有効な結果をキャッシュに保存</text>
-<text x="450" y="222" text-anchor="middle" class="t-sm">キーの材料：タスク・フィクスチャ・採点スクリプト・プロファイル・配布物の中身・CLI 版・試行番号・経路の変数・（llm があれば）判定の設定</text>
 </svg></div>
-<figcaption>経路の変数（API キー・Bedrock の切り替え・<code>ANTHROPIC_DEFAULT_SONNET_MODEL</code> など）はキーに入ります（キー・トークン・ヘッダは名前だけ、それ以外は値のハッシュも）。ただしサービス側でモデルの別名（sonnet など）が指す実体が変わっても、キーは変わりません。モデル移行の評価やリリース判定では <code>--no-cache</code> を付けるか、モデル ID を固定してください。</figcaption>
+<figcaption>キャッシュは <code>.harness-eval-cache/&lt;キー&gt;.json</code> に置かれます。<code>--no-cache</code> のときは読みも書きもしません（<code>doctor</code> も書きません）。</figcaption>
 </figure>
 <table>
+<tr><th>キーに入るもの（1 つでも変われば再実行）</th><th>キーに入れないもの（書き換えても再実行しない）</th></tr>
+<tr><td>
+<ul>
+<li>タスク定義・フィクスチャ・採点スクリプトの中身（グレーダーを直すと、そのタスクは全プロファイルで再実行）</li>
+<li>プロファイル定義・配布物（copy 元・<code>hash_paths</code>）の中身</li>
+<li>CLI のバージョン・試行番号・harness-eval の版（ツールを更新すると全試行を再実行）</li>
+<li>経路の変数の名前（秘密でないものは値のハッシュも。キー・トークン・ヘッダの値は使わない）</li>
+<li>llm グレーダーがあるタスクだけ: <code>--no-llm</code> の有無・判定エージェント・モデル・判定プロンプト・判定 CLI の版・借りるプロファイルの環境変数・実行ファイル</li>
+</ul>
+</td><td>
+<ul>
+<li>タスクの説明・タグ・<code>paired_negative</code></li>
+<li>プロファイルの説明・<code>billing</code></li>
+</ul>
+</td></tr>
+</table>
+<p><b>注意</b>：サービス側でモデルの別名（<code>sonnet</code> など）が指す実体が変わっても、キーは変わりません。モデル移行の評価やリリース判定では <code>--no-cache</code> を付けるか、モデル ID を固定してください。</p>
+
+<h3>費用の上限：3 段階</h3>
+<figure>
+<div class="scroll"><svg viewBox="0 0 900 250" role="img" aria-label="月の予算（口座ごと）の中に 1 回の実行の上限があり、その中に 1 試行の上限がある。試行の上限に達すると不合格、実行・月の上限に達すると以降の試行は未実行">
+<rect x="20" y="20" width="560" height="210" rx="10" class="box"/>
+<text x="36" y="44" class="t-b">月（--monthly-budget-usd）</text>
+<text x="36" y="62" class="t-sm">Claude・Codex の口座ごとに、費用台帳 spend.jsonl の今月分を引いた残り</text>
+<rect x="60" y="78" width="500" height="136" rx="8" class="box"/>
+<text x="76" y="100" class="t-b">1 回の実行（--max-cost-usd）</text>
+<text x="76" y="118" class="t-sm">推定額の合計。サブスクリプションも含む</text>
+<rect x="100" y="132" width="440" height="66" rx="6" class="acc"/>
+<text x="116" y="154" class="t-acc">1 試行（タスクの limits）</text>
+<text x="116" y="174" class="t-sm">max_budget_usd・max_turns・timeout_s</text>
+<line x1="540" y1="165" x2="618" y2="165" class="ln-acc"/>
+<rect x="620" y="138" width="260" height="56" rx="6" class="box"/><text x="750" y="161" text-anchor="middle" class="ng">その試行は不合格</text><text x="750" y="180" text-anchor="middle" class="t-sm">budget_exceeded・max_turns・timeout</text>
+<line x1="580" y1="60" x2="618" y2="60" class="ln"/>
+<rect x="620" y="32" width="260" height="56" rx="6" class="box"/><text x="750" y="55" text-anchor="middle">以降の試行は未実行</text><text x="750" y="74" text-anchor="middle" class="t-sm">budget_stop（集計から除く）</text>
+</svg></div>
+</figure>
+<ul>
+<li>費用台帳 <code>--out/spend.jsonl</code> には、再試行・中断・<code>doctor</code> を含め、費用が発生するたびに 1 行追記します。<code>--out</code> を変えると別の台帳になります。<code>harvest</code> は <code>--ledger</code>（既定 <code>results/spend.jsonl</code>）に書くので、<code>run</code> と同じ台帳に数えるには <code>--ledger &lt;run の --out&gt;/spend.jsonl</code> を付けます。口座ごとの残りは <code>plan</code> で確認できます。</li>
+<li>LLM 判定の費用は判定エージェントの口座に入ります。<code>billing: subscription</code> のプロファイルは呼び出しごとの請求がないため、月の予算には数えません（<code>--max-cost-usd</code> には数えます）。</li>
+<li>費用が分からない試行（<code>pricing</code> のない Codex、Codex での判定）は上限の計算に入りません。<code>--jobs</code> が 2 以上だと、実行中の分だけ上限を超えることがあります（実行前に注意を表示）。</li>
+<li>総額はエージェントと LLM 判定の合計です。どちらかが不明な試行が 1 つでもあれば「不明」と表示します。費用の出どころ（<code>cost_source</code>）は <a href="reference.html#cost">リファレンス「費用の出どころ」</a> にあります。</li>
+</ul>
+
+<h3>そのほかの節約</h3>
+<table>
 <tr><th>トークンを使う場所</th><th>節約の仕組み</th><th>評価の正しさへの影響</th></tr>
-<tr><td>エージェントの試行</td><td>キャッシュ（入力が同じなら再利用）</td><td>なし</td></tr>
-<tr><td>エージェントの試行</td><td>スモーク（1 試行）とフル（3 試行）の使い分け</td><td>スモークは傾向の確認用と割り切る。判断はフルで</td></tr>
-<tr><td>エージェントの試行</td><td>試行ごと（max_turns・max_budget_usd・timeout_s）・実行全体（--max-cost-usd）・月（--monthly-budget-usd）の上限</td><td>上限到達は「不合格」または「未実行」として明示</td></tr>
-<tr><td>LLM 判定</td><td>コード判定が全合格のときだけ呼ぶ（配布物がないと通らない判定の不合格は除く）</td><td>なし（不合格の試行は判定しても合否が変わらない）</td></tr>
-<tr><td>LLM 判定</td><td>haiku・ツールなし・1 ターン・対象は最大 2 万文字（Claude Code で判定する場合）</td><td><code>calibrate</code> で人手ラベルとの一致率を確認</td></tr>
-<tr><td>再試行</td><td>レート制限・過負荷で落ちた試行だけ</td><td>なし（不合格を引き直さない）</td></tr>
+<tr><td>エージェントの試行</td><td>スモーク（1 試行・コード判定のみ）とフル（3 試行＋LLM 判定）の使い分け</td><td>スモークは傾向の確認用と割り切り、判断はフルで行う</td></tr>
+<tr><td>LLM 判定</td><td>コード判定が全合格のときだけ呼ぶ（6 章）</td><td>なし（不合格の試行は判定しても合否が変わらない）</td></tr>
+<tr><td>LLM 判定</td><td>既定は Claude Code の haiku・ツールなし・1 ターン・対象は最大 2 万文字（<code>--judge-agent codex</code> は読み取り専用だが、ツール・ターンの制限はなく費用も不明）</td><td><code>calibrate</code> で人手ラベルとの一致率を確認する</td></tr>
+<tr><td>再試行</td><td>レート制限・過負荷で落ちた試行だけ（3 章）</td><td>なし（不合格を引き直さない）</td></tr>
 <tr><td>（入れていない）</td><td>早期打ち切り（失敗が出たらそのタスクの残り試行をやめる）</td><td>理由は <a href="design.html#rejected">設計記録「採らなかった案」</a></td></tr>
 </table>
 
-<!-- 8 -->
-<h2 id="outputs">9. 出力と後始末</h2>
+<h2 id="harvest">9. 実際の依頼からタスクを作る（harvest）</h2>
+<p>評価は、ユーザーが実際に頼む仕事で行うのがいちばん確かです。<code>harvest</code> は自分のセッション履歴から実際の依頼を集め、同じ種類・同じ難しさのまま、名前・数値・データをすべて架空に置き換えたタスクの下書きを作ります。元の依頼をそのまま実行したり、本物のデータや環境に触れたりはしません。</p>
+<figure>
+<div class="scroll"><svg viewBox="0 0 960 260" role="img" aria-label="セッション履歴から人が打った依頼を取り出し、架空化して書き換え、自動検査を通った下書きだけを書き出す。元の依頼文はメモリ上だけで扱う。履歴がなければ同梱の標準タスクを使う">
+<defs><marker id="mh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head"/></marker></defs>
+<rect x="5" y="26" width="470" height="80" rx="10" class="grp"/>
+<text x="240" y="18" text-anchor="middle" class="t-acc">元の依頼文はメモリ上だけ（ファイル・ログに書かない）</text>
+<rect x="15" y="40" width="130" height="56" rx="6" class="box"/><text x="80" y="63" text-anchor="middle">セッション履歴</text><text x="80" y="81" text-anchor="middle" class="t-sm">Claude Code・Codex</text>
+<line x1="145" y1="68" x2="173" y2="68" class="ln" marker-end="url(#mh)"/>
+<rect x="175" y="40" width="130" height="56" rx="6" class="box"/><text x="240" y="63" text-anchor="middle">依頼を取り出す</text><text x="240" y="81" text-anchor="middle" class="t-sm">各セッションの最初の依頼</text>
+<line x1="305" y1="68" x2="333" y2="68" class="ln" marker-end="url(#mh)"/>
+<rect x="335" y="40" width="130" height="56" rx="6" class="box"/><text x="400" y="63" text-anchor="middle">架空化して書き換え</text><text x="400" y="81" text-anchor="middle" class="t-sm">名前・数値・データ</text>
+<line x1="465" y1="68" x2="493" y2="68" class="ln" marker-end="url(#mh)"/>
+<rect x="495" y="40" width="130" height="56" rx="6" class="box"/><text x="560" y="63" text-anchor="middle">自動検査</text><text x="560" y="81" text-anchor="middle" class="t-sm">漏れ・採点の成立</text>
+<line x1="625" y1="68" x2="653" y2="68" class="ln" marker-end="url(#mh)"/>
+<rect x="655" y="40" width="130" height="56" rx="6" class="box"/><text x="720" y="63" text-anchor="middle">下書き</text><text x="720" y="81" text-anchor="middle" class="t-sm">tasks/h-*.yaml など</text>
+<line x1="785" y1="68" x2="813" y2="68" class="ln" marker-end="url(#mh)"/>
+<rect x="815" y="40" width="130" height="56" rx="6" class="acc"/><text x="880" y="63" text-anchor="middle" class="t-acc">人が確認</text><text x="880" y="81" text-anchor="middle" class="t-sm">→ selftest・run</text>
+<line x1="560" y1="96" x2="560" y2="138" class="ln" marker-end="url(#mh)"/>
+<rect x="405" y="140" width="310" height="66" rx="6" class="box"/>
+<text x="560" y="160" text-anchor="middle" class="t-sm">元の名前・数値・文が残る → 作り直し 1 回／見送り</text>
+<text x="560" y="178" text-anchor="middle" class="t-sm">採点が成立しない → 見送り（スクリプトは実行しない）</text>
+<text x="560" y="196" text-anchor="middle" class="t-sm">依頼で求めていない判定 → その判定だけ外す</text>
+<line x1="80" y1="96" x2="80" y2="198" class="ln-dash" marker-end="url(#mh)"/><text x="88" y="150" class="t-sm">履歴がない</text>
+<rect x="15" y="200" width="230" height="44" rx="6" class="box"/><text x="130" y="227" text-anchor="middle">同梱の標準タスク 6 件</text>
+<polyline points="245,222 380,222 380,120 720,120 720,98" class="ln-dash" marker-end="url(#mh)"/>
+</svg></div>
+<figcaption>書き換えは Claude Code を、OS の一時フォルダの一時ホーム・ツールなし・会話を保存しない（<code>--no-session-persistence</code>）・構造化出力の設定で呼びます。書き出すのは <code>--out</code> の <code>tasks/</code>・<code>fixtures/</code>・<code>checks/</code>・<code>references/</code>（正解例）で、既にあるファイルは上書きしません。</figcaption>
+</figure>
+<h3>読む履歴</h3>
+<p><code>CLAUDE_CONFIG_DIR</code>・<code>CODEX_HOME</code> を設定していればその場所を読みます。チームの履歴をまとめて使うなら <code>--source</code> にフォルダか履歴ファイルを並べます。</p>
+<table>
+<tr><th>読む履歴</th><th>中身</th><th>取り出すもの</th></tr>
+<tr><td>Claude Code <code>history.jsonl</code></td><td>入力欄に打った文。貼り付けは <code>[Pasted text #1 +N lines]</code> と <code>pastedContents</code></td><td>貼り付けを展開した依頼文</td></tr>
+<tr><td>Claude Code <code>projects/*/*.jsonl</code></td><td>会話の記録。人が打った文は <code>turnOrigin: "human"</code></td><td>ツール結果・通知・メタ情報を除いた依頼文</td></tr>
+<tr><td>Codex <code>history.jsonl</code></td><td><code>{"session_id","ts","text"}</code>（既定で保存）</td><td><code>text</code></td></tr>
+<tr><td>Codex <code>sessions/**/rollout-*.jsonl</code></td><td><code>event_msg</code> の <code>user_message</code></td><td><code>message</code></td></tr>
+</table>
+<p>ツール結果・通知・<code>/</code> で始まるコマンド・20 文字未満の文は除き、各セッションの最初の依頼を新しい順に <code>--limit</code> 件使います。</p>
+<h3>守っていること</h3>
+<table>
+<tr><th>心配</th><th>対策</th></tr>
+<tr><td>依頼文の社外秘が残る</td><td>書き換えの指示で、固有名詞・数値・日付・表名などを架空にする。元の依頼にある識別子（<code>db.table</code>・snake_case・ファイル名）・URL・メール・大文字の名前（<code>NOVA</code> など）・年月・4 桁以上の数値（4 桁は合成データの値との偶然の一致を除く）や、25 文字以上の同じ文が残った案は、残った値を具体的に伝えて 1 回作り直させ、それでも残れば見送る（全角半角・大文字小文字・改行・年月の書き方の違いは無視して比べる）。<b>日本語の固有名詞（会社名・人名）は機械では判定できないため、人の確認が必須</b></td></tr>
+<tr><td>依頼文がファイルやログに残る</td><td>元の依頼文はメモリ上だけで扱い、表示は件数だけ。書き換えの呼び出しでも新しい履歴を作らない。テレメトリのプロンプト記録（<code>OTEL_LOG_USER_PROMPTS</code>・<code>OTEL_LOG_TOOL_DETAILS</code>）の環境変数は外して呼ぶ（組織の管理設定で有効にされている場合は外せない）</td></tr>
+<tr><td>LLM が書いた採点スクリプト</td><td><code>harvest</code> では実行しない（構文の確認だけ）。実行するのは、人が中身を読んだあとの <code>validate --selftest</code> と <code>run</code></td></tr>
+<tr><td>設定ファイルを紛れ込ませる</td><td>合成データの置き場所に、<code>.</code> で始まるもの（<code>.claude/</code>・<code>.mcp.json</code>）と <code>CLAUDE.md</code>・<code>CLAUDE.local.md</code>・<code>AGENTS.md</code>・<code>AGENTS.override.md</code> は置かせない</td></tr>
+<tr><td>本物の環境で実行してしまう</td><td>合成データだけで完結する形に書き換える。Claude Code では <code>ssh</code>・<code>scp</code>・<code>sftp</code>・<code>curl</code>・<code>wget</code>・<code>trino</code>・<code>hive</code>・<code>beeline</code>・<code>psql</code>・<code>mysql</code>・WebFetch・WebSearch を禁止する。ただし Bash 自体は許可するので、Python からの通信などまでは防げない（最善の努力）。Codex にはこの禁止が効かないので、<code>codex_sandbox: workspace-write</code>（既定でネットワーク不可）で制限する。Bedrock 認証のため本物の AWS 認証ファイルは参照できる状態なので、合成データ以外を置かない</td></tr>
+<tr><td>接続を試みても気づけない</td><td>生成したタスクには「本物の環境（ssh・DB・Web）に接続しようとしていない」という過程の判定を必ず付ける（禁止で止められた呼び出しも記録に残るので、試みも数える）</td></tr>
+<tr><td>採点が不公平</td><td>正解例で通り、何もしなければ落ちることを自動で確かめる。依頼で求めていない判定（例: 最終応答に特定の店名）は外す</td></tr>
+<tr><td>未ログインのまま全件失敗</td><td>認証エラーなら最初の 1 件で止める（<code>--profile</code> で認証を借りるプロファイルを指定できる）</td></tr>
+</table>
+<p>書き換えた依頼文は、元の依頼と同じく Claude（社内なら Bedrock）に送られます。</p>
+<p><b>確認するときの観点</b>：① 会社名・人名・社内システム名が残っていないか ② 依頼の性質（難しさ・曖昧さ）が元と同じか ③ 採点スクリプトが「正しいが書き方の違う答え」を落とさないか。直したら <code>validate --selftest</code> → <code>run</code> で使います。</p>
+<p><b>限界</b>：1 回の指示で完結する評価なので、確認の質問に人が答えて続く会話全体は再現できません（「確認すべき場面で確認したか」までを見ます）。各セッションの最初の依頼だけを使うため、途中で出た別の依頼は拾いません。</p>
+
+<h2 id="outputs">10. 出力と後始末</h2>
 <table>
 <tr><th>場所</th><th>中身</th><th>残る期間</th></tr>
-<tr><td><code>results/&lt;実行ID&gt;/report.html</code></td><td>レポート（比較表・Δ・タスク別・失敗分類・実行環境・試行の詳細）</td><td>残る</td></tr>
-<tr><td><code>results/&lt;実行ID&gt;/summary.json</code></td><td>集計と実行メタデータ（CLI 版・プロファイル/タスクのハッシュ・オプション）</td><td>残る</td></tr>
+<tr><td><code>results/&lt;実行ID&gt;/report.html</code></td><td>レポート（比較表・Δ・タスク別・失敗分類・実行環境の記録・試行の詳細）</td><td>残る</td></tr>
+<tr><td><code>results/&lt;実行ID&gt;/summary.json</code></td><td>集計と実行メタデータ（CLI 版・プロファイル/タスクのハッシュ・判定モデル・オプション）</td><td>残る</td></tr>
 <tr><td><code>results/&lt;実行ID&gt;/trials.jsonl</code></td><td>1 行 1 試行の記録（最終応答・ツール呼び出しの入力を含む）</td><td>残る</td></tr>
-<tr><td><code>trials/…/&lt;n&gt;/stdout.jsonl</code>・<code>stderr.txt</code></td><td>エージェントの生出力</td><td><code>--keep none</code> で削除</td></tr>
+<tr><td><code>results/&lt;実行ID&gt;/trials/&lt;タスク&gt;/&lt;プロファイル&gt;/&lt;n&gt;/stdout.jsonl</code>・<code>stderr.txt</code></td><td>エージェントの生出力（プロンプトと応答を含む）</td><td><code>--keep none</code> で削除</td></tr>
 <tr><td><code>trials/…/&lt;n&gt;/workdir/</code></td><td>エージェントが作ったファイル</td><td>既定は不合格の試行だけ残す（<code>--keep</code>）</td></tr>
-<tr><td><code>trials/…/&lt;n&gt;/home/</code></td><td>一時ホーム（認証ファイルの複製を含みうる）</td><td>試行の終わりに必ず削除</td></tr>
+<tr><td><code>trials/…/&lt;n&gt;/home/</code></td><td>一時ホーム（認証ファイルの複製を含みうる）</td><td>試行の終わりに必ず削除（中断時も）</td></tr>
 <tr><td><code>.harness-eval-cache/</code></td><td>キャッシュ（試行の記録と同じ内容）</td><td>残る</td></tr>
-<tr><td><code>results/spend.jsonl</code></td><td>費用台帳（費用が発生するたびに 1 行 {at, usd, run_id, agent, billing} を追記。<code>--monthly-budget-usd</code> が Claude・Codex の口座ごとに今月分を合計。<code>billing: subscription</code> は数えない）</td><td>残る</td></tr>
+<tr><td><code>results/spend.jsonl</code></td><td>費用台帳（1 行 <code>{at, usd, run_id, agent, billing}</code>）</td><td>残る</td></tr>
 </table>
-<p>trials.jsonl・キャッシュ・レポートには最終応答とツール呼び出しの入力が残ります。評価には合成データだけを使い、結果とキャッシュを社外に出さないでください。Ctrl-C で中断すると未開始の試行は取り消され、実行中のエージェントも止まります。完了済みの試行はキャッシュにあるので、同じコマンドを再実行すると続きから進みます。</p>
+<p><code>--keep none</code> でも、trials.jsonl・キャッシュ・report.html には最終応答とツール呼び出しの入力（書き込んだ内容やコマンド）が残ります。評価には合成データだけを使い、結果フォルダとキャッシュを社外に出さないでください。</p>
+<p><b>中断（Ctrl-C）</b>：未開始の試行は取り消し、実行中のエージェントは子プロセスごと止めます（トークンを使い続けません）。その実行の集計とレポートは作られませんが、<code>trials.jsonl</code> には完了済みの試行が残ります。完了した試行はキャッシュ済みなので、同じコマンドを再実行すると続きから進みます（中断で止めた試行は <code>interrupted</code> としてキャッシュせず、やり直します）。</p>
+
+<h2 id="modules">11. コードの構成</h2>
+<figure>
+<div class="scroll"><svg viewBox="0 0 900 290" role="img" aria-label="cli.py が runner・report・harvest を呼び、runner は spec・isolation・adapters・graders・record・metrics を使う">
+<defs><marker id="mm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head"/></marker></defs>
+<rect x="20" y="128" width="120" height="44" rx="6" class="acc"/><text x="80" y="148" text-anchor="middle" class="t-acc">cli.py</text><text x="80" y="164" text-anchor="middle" class="t-sm">コマンド</text>
+<rect x="220" y="40" width="160" height="44" rx="6" class="box"/><text x="300" y="60" text-anchor="middle">runner.py</text><text x="300" y="76" text-anchor="middle" class="t-sm">司令塔（3 章）</text>
+<rect x="220" y="128" width="160" height="44" rx="6" class="box"/><text x="300" y="148" text-anchor="middle">report.py</text><text x="300" y="164" text-anchor="middle" class="t-sm">HTML レポート</text>
+<rect x="220" y="216" width="160" height="44" rx="6" class="box"/><text x="300" y="236" text-anchor="middle">harvest.py</text><text x="300" y="252" text-anchor="middle" class="t-sm">履歴 → 下書き（9 章）</text>
+<line x1="140" y1="140" x2="218" y2="66" class="ln" marker-end="url(#mm)"/>
+<line x1="140" y1="150" x2="218" y2="150" class="ln" marker-end="url(#mm)"/>
+<line x1="140" y1="160" x2="218" y2="234" class="ln" marker-end="url(#mm)"/>
+<rect x="520" y="16" width="360" height="34" rx="6" class="box"/><text x="536" y="38">spec.py</text><text x="610" y="38" class="t-sm">YAML → Task / Profile（未知のキーはエラー）</text>
+<rect x="520" y="60" width="360" height="34" rx="6" class="box"/><text x="536" y="82">isolation.py</text><text x="630" y="82" class="t-sm">一時ホーム・環境変数・install・プロセス実行</text>
+<rect x="520" y="104" width="360" height="34" rx="6" class="box"/><text x="536" y="126">adapters.py</text><text x="630" y="126" class="t-sm">CLI ごとのコマンドと出力パース</text>
+<rect x="520" y="148" width="360" height="34" rx="6" class="box"/><text x="536" y="170">graders.py</text><text x="630" y="170" class="t-sm">採点（6 章）</text>
+<rect x="520" y="192" width="360" height="34" rx="6" class="box"/><text x="536" y="214">record.py</text><text x="630" y="214" class="t-sm">エージェントによらない試行レコード</text>
+<rect x="520" y="236" width="360" height="34" rx="6" class="box"/><text x="536" y="258">metrics.py</text><text x="630" y="258" class="t-sm">指標・Δ・リリース判定（7 章）</text>
+<line x1="380" y1="56" x2="518" y2="33" class="ln" marker-end="url(#mm)"/>
+<line x1="380" y1="60" x2="518" y2="77" class="ln" marker-end="url(#mm)"/>
+<line x1="380" y1="64" x2="518" y2="121" class="ln" marker-end="url(#mm)"/>
+<line x1="380" y1="68" x2="518" y2="165" class="ln" marker-end="url(#mm)"/>
+<line x1="380" y1="72" x2="518" y2="209" class="ln" marker-end="url(#mm)"/>
+<line x1="380" y1="76" x2="518" y2="253" class="ln" marker-end="url(#mm)"/>
+<line x1="380" y1="150" x2="518" y2="253" class="ln-dash" marker-end="url(#mm)"/>
+<line x1="380" y1="232" x2="518" y2="82" class="ln-dash" marker-end="url(#mm)"/>
+<line x1="380" y1="236" x2="518" y2="126" class="ln-dash" marker-end="url(#mm)"/>
+<line x1="380" y1="240" x2="518" y2="170" class="ln-dash" marker-end="url(#mm)"/>
+</svg></div>
+<figcaption>すべて <code>harness_eval/</code> の中です。点線は report・harvest が使う主な部品です。cli は各コマンドのために spec・isolation・adapters・metrics も直接使います。</figcaption>
+</figure>
 </main>
 </body>
 </html>

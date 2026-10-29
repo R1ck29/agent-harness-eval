@@ -32,9 +32,9 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <body>
 <main>
 <h1>Agent Harness Eval 設計記録</h1>
-<p class="lead">なぜこの作りなのか（採用・不採用の理由、評価の方法、残るリスク）の記録です。使い方と仕組みは <a href="guide.html">図解ガイド</a> と README を見てください。最終更新 2026-10-28（v0.4.0）。</p>
+<p class="lead">なぜこの作りなのか（採用・不採用の理由、評価の方法、確かめた事実、残るリスク）の記録です。仕組みは <a href="guide.html">図解ガイド</a>、書き方とオプションは <a href="reference.html">リファレンス</a> にあります。最終更新 2026-10-29（v0.4.0）。</p>
 <nav>
-<a href="#decision">1. 結論</a><a href="#lineage">2. 統合の経緯</a><a href="#tools">3. 既存ツールとの比較</a><a href="#method">4. 評価の方法</a><a href="#cost">5. 費用と経路</a><a href="#trust">6. 信頼の境界</a><a href="#rejected">7. 採らなかった案</a><a href="#risks">8. 残るリスク</a><a href="#sources">9. 根拠</a>
+<a href="#decision">1. 結論</a><a href="#lineage">2. 統合の経緯</a><a href="#tools">3. 既存ツールとの比較</a><a href="#method">4. 評価の方法</a><a href="#cost">5. 費用と経路</a><a href="#trust">6. 信頼の境界</a><a href="#rejected">7. 採らなかった案</a><a href="#facts">8. 確かめた CLI の挙動</a><a href="#measured">9. 開発時の実測</a><a href="#risks">10. 残るリスク</a><a href="#sources">11. 根拠</a>
 </nav>
 
 <h2 id="decision">1. 結論</h2>
@@ -82,46 +82,44 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 
 <h2 id="method">4. 評価の方法</h2>
 <h3>指標</h3>
-<p>pass@1・pass^k・比較用の値（*_cmp）の定義と計算例は README「指標」と図解ガイド 7 章にあります。配布するハーネスでは毎回できるかを見る pass^k を主指標にし、配布物なしとの Δ は配布物がないと通らない判定を両側とも除いた値で比べます（§2 の 2）。</p>
+<p>pass@1・pass^k・Δ の定義と計算例は <a href="guide.html#metrics">図解ガイド 7 章</a> にあります。配布するハーネスは同じ人が何度も使うので、毎回できるかを見る pass^k を主指標にする。Δ の扱いの理由は §2 の 2。</p>
 <h3>比べ方</h3>
 <ul>
-<li>単位はタスク。同じタスクの試行は独立ではないので、試行を標本として数えない。タスクごとの値の差を作り、タスクを復元抽出するブートストラップで 95% 区間を出す（同じ seed なら同じ結果）。</li>
+<li>単位はタスク。同じタスクの試行は独立ではないので、試行を標本として数えない。タスクごとの値の差を作り、タスクを復元抽出するブートストラップで 95% 区間を出す（乱数の種は固定なので、同じ結果からは何度計算しても同じ区間になる。<code>--seed</code> は実行順だけに効く）。</li>
 <li>リリース判定（<code>gate</code>）は前回と今回の同じプロファイルを比べる。非劣性マージン m は<b>毎回明示</b>する（結果を見てから決めないため、既定値を持たない）。</li>
 </ul>
-<p>判定（通過・不通過・判定不能）の条件と終了コードの表は図解ガイド 7 章と README「リリースゲートと較正」にあります。</p>
+<p>判定（通過・不通過・判定不能）の条件と終了コードは <a href="guide.html#metrics">図解ガイド 7 章</a> にあります。</p>
 <p>少ないタスクではパーセンタイル・ブートストラップの区間は実際より狭く出やすい（レビュー時の模擬で、12 タスク・正規分布の差のとき被覆率は 0.90 程度）。最低タスク数はそのための歯止めで、判断に使うなら 20 タスク以上を目安にする。前回より下がったタスクの一覧は判定には使わず、診断として出す。</p>
 <h3>雑音を減らす工夫</h3>
 <ul>
-<li>同じ（試行・タスク）の各プロファイルを続けて実行し、先に走るプロファイルを試行ごとに入れ替える（<code>--seed</code>）。</li>
+<li>プロファイルを交互に並べて実行する（§2 の 3。並べ方の図は <a href="guide.html#run">図解ガイド 3 章</a>）。</li>
 <li>レート制限・過負荷・認証・ネットワーク不通・判定を呼べないなど環境起因の終了は「除外」にし、失敗として数えない。再試行するのは環境起因だけ。</li>
 <li>各試行は空の一時ホーム・作業ディレクトリから始める（前の試行の残りが答えを漏らさない）。</li>
 </ul>
 <h3>採点</h3>
 <ul>
-<li>コードで決められるもの（ファイル・正規表現・独自スクリプト・ツール呼び出しの回数）を先に使う。LLM 判定は、配布物の有無に関係なく既に不合格の試行では呼ばない（配布物がないと通らない判定の不合格は除く）。観点を 1 つに絞り、根拠がなければ UNKNOWN を返させ、人手ラベル約 20 件との一致率を <code>calibrate</code> で確かめる。</li>
+<li>コードで決められるもの（ファイル・正規表現・独自スクリプト・ツール呼び出しの回数）を先に使う。LLM 判定は補助にとどめ、合否が変わらない試行では呼ばない（規則は <a href="guide.html#grading">図解ガイド 6 章</a>）。観点を 1 つに絞り、根拠がなければ UNKNOWN を返させ、人手ラベル約 20 件との一致率を <code>calibrate</code> で確かめる。</li>
 <li>正解は元のフィクスチャから計算する（作業ディレクトリのファイルはエージェントが書き換えられる）。</li>
 <li>採点の反証: 正解例で通り、何もしなければ落ちることを <code>validate --selftest</code> で確かめる（同梱タスクと harvest の下書き）。</li>
 </ul>
 
 <h2 id="cost">5. 費用と経路</h2>
+<p>仕組みは <a href="guide.html#cost">図解ガイド 8 章</a>、書き方は <a href="reference.html#auth">リファレンス 5 章</a>・<a href="reference.html#cost">8 章</a> にあります。ここでは判断の理由だけを記録します。</p>
 <table>
-<tr><th>費用の出どころ（<code>cost_source</code>）</th><th>意味</th></tr>
-<tr><td><code>client_estimate</code></td><td>Claude Code が API 単価で計算した推定額（<code>total_cost_usd</code>）。請求額ではない</td></tr>
-<tr><td><code>token_estimate</code></td><td>Codex のトークン数とプロファイルの <code>pricing</code> から計算した概算</td></tr>
-<tr><td>null（不明）</td><td>取得できない。0 で埋めず、総額・合格あたり費用は「不明」</td></tr>
+<tr><th>判断</th><th>理由</th></tr>
+<tr><td>費用の出どころ（<code>cost_source</code>）を区別し、不明を 0 で埋めない</td><td>CLI の推定額を「報告値」と呼ぶと請求額と誤解される。0 で埋めると合格あたり費用が実際より安く見える</td></tr>
+<tr><td>月の予算は Claude と Codex を別々の口座として数える。口座の記録がない旧形式の台帳の行は、どちらにも数える</td><td>旧評価基盤で決めた予算の方針（別々の月額上限）。旧形式の扱いは安全側に倒した</td></tr>
+<tr><td><code>billing: subscription</code> は月の予算に数えないが、<code>--max-cost-usd</code> には数える</td><td>定額契約に架空の請求額を付けない。一方で 1 回の実行の大きさの歯止めは必要</td></tr>
+<tr><td>経路を変える環境変数は、<code>env</code> か <code>inherit_env</code>（名前だけ）で宣言させる。宣言のない引き継ぎと、宣言したのに未設定の変数は <code>doctor</code> が NG</td><td>試行は親の環境を引き継ぐため、残っていた API キーなどで経路・口座・モデルが黙って変わる。値をプロファイルに書かせると秘密が漏れる（レビューで指摘を受けて名前だけに変更）。未設定の検知は、別の端末で export して全試行が未ログインになった実測から</td></tr>
+<tr><td>経路の変数をキャッシュのキーに入れる。秘密でないものは値の短いハッシュも入れ、キー・トークン・ヘッダの値は使わない</td><td>経路を変えたのに過去の結果を再利用しないため。秘密の値はハッシュでもファイルに残さない</td></tr>
 </table>
-<ul>
-<li>月の予算（<code>--monthly-budget-usd</code>）は Claude と Codex で別々の口座として数える。LLM 判定の費用は判定エージェントの口座に入る。口座の記録がない旧形式の台帳の行は、どちらにも数える（安全側）。</li>
-<li><code>billing: subscription</code> のプロファイルは呼び出しごとの請求がないため、推定額は台帳に残すが月の予算には数えない。<code>--max-cost-usd</code>（1 回の実行の大きさの上限）には数える。</li>
-<li>経路・請求先・モデルの実体を変える環境変数（各 CLI の実行ファイルに名前があることを確認したもの）を親から黙って引き継ぐと、意図しない口座で動き、キャッシュにも反映されない。値を固定するものは <code>env</code>、親の値を使うもの（秘密）は <code>inherit_env</code> に名前だけ書く。宣言のない引き継ぎと、宣言したのに設定されていない変数（実測: 別の端末で export して全試行が未ログインになった）は <code>doctor</code> が NG、<code>run</code> が警告（LLM 判定の経路も含む）。</li>
-<li>キャッシュキーには経路の変数が入る。秘密でないもの（モデルの別名の実体・接続先・切り替え）は値の短いハッシュも入れ、値を変えれば再実行される。キー・トークン・ヘッダの値は使わない。</li>
-</ul>
 
 <h2 id="trust">6. 信頼の境界</h2>
+<p><b>判断</b>：sandbox は持たない。隔離は「どの設定を読み込むか」に限り、評価の対象を「社内でレビュー済みの配布物」と「合成データ」に絞る運用で安全を保つ。</p>
 <ul>
-<li>隔離は「どの設定を読み込むか」の隔離で、ファイルアクセスやネットワークの制限ではない。評価には合成データだけを使う。</li>
-<li>配布物の hooks・MCP サーバー・install の <code>run</code> は利用者の権限で動く。sandbox がないため、未レビューの実行物を安全に評価する手段はない（旧評価基盤 の T2/T3 に当たるものは扱わない）。社内でレビュー済みの配布物だけを評価し、<code>validate</code> の警告で実行される部品に気づけるようにしている。</li>
-<li><code>harvest</code> は LLM が書いた採点スクリプトを実行しない（人が読んだ後の <code>validate --selftest</code> で実行）。元の依頼文はメモリ上だけで扱う。</li>
+<li>理由: Docker などの sandbox は社内の配布・インストールの制約で使えない（§1）。sandbox がなければ、未レビューの実行物（旧評価基盤の T2/T3 に当たるもの）を安全に評価する手段はないので、扱わないと決めて <code>validate</code> の警告で気づけるようにした。</li>
+<li><code>harvest</code> が LLM の書いた採点スクリプトを実行しないのも同じ理由（§7「生成された採点スクリプトを静的検査して自動実行」）。</li>
+<li>何が隔離され、何が隔離されないかは <a href="guide.html#isolation">図解ガイド 5 章</a> にあります。</li>
 </ul>
 
 <h2 id="rejected">7. 採らなかった案</h2>
@@ -142,18 +140,46 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <tr><td>plugin eval のケース形式との相互変換</td><td>今は必要としている利用者がいない</td></tr>
 </table>
 
-<h2 id="risks">8. 残るリスク・未確認</h2>
+<h2 id="facts">8. 実機・ソースで確かめた CLI の挙動</h2>
+<p><code>doctor</code> は、ここで確かめた版（Claude Code 2.1.304・Codex 0.163.0）より古い CLI を知らせます。</p>
+<table>
+<tr><th>版</th><th>確かめたこと</th><th>本ツールでの扱い</th></tr>
+<tr><td>Claude Code 2.1.304</td><td><code>-p</code> はプロンプトを標準入力から読む（複数行・引用符・日本語を含めて確認）</td><td>プロンプトは標準入力で渡す（コマンドライン長や引用符の影響を受けない）</td></tr>
+<tr><td>Claude Code 2.1.304</td><td><code>-p</code> で <code>--output-format stream-json</code> には <code>--verbose</code> が必須。<code>CLAUDE_CONFIG_DIR</code> 配下の CLAUDE.md とスキルが読まれる。Skill ツールの入力は <code>{"skill": 名前, "args": …}</code>。init イベントに CLI 版・モデル・読み込まれたスキル/プラグイン/MCP が入る</td><td>この形でパースし、読み込まれた構成要素を試行ごとに記録する</td></tr>
+<tr><td>Claude Code</td><td>一時ホームでも claude.ai アカウントのスキル/プラグイン同期で配布物以外が混ざる（実測 94 件）。<code>syncClaudeAiSkills:false</code>・<code>syncClaudeAiPlugins:false</code> で 23 件に減り、残りは同梱スキルと実行環境側で管理されたプラグインだった</td><td><code>--settings</code> で同期を止め、残りはレポートで見えるようにする</td></tr>
+<tr><td>Claude Code 2.1.295・Codex 0.146.1</td><td>作業ディレクトリより上の <code>CLAUDE.md</code>、<code>.claude/</code> の skills・rules・agents・commands、git ルートまでの <code>AGENTS.md</code> が一時ホームでも読まれる（最終レビューで実測）</td><td><code>--out</code> の上に指示ファイルがあれば <code>run</code> を止める（<code>harvest</code> の書き換えは OS の一時フォルダで動くので、この確認はしない）</td></tr>
+<tr><td>Claude Code 2.1.295</td><td>macOS のキーチェーンに保存したログインは、<code>CLAUDE_CONFIG_DIR</code> を分けると一時ホームでも本物のホームでも「Not logged in」になる（2026-10-28）</td><td><code>claude setup-token</code> の長期トークンを <code>inherit_env</code> で渡す方法を案内する</td></tr>
+<tr><td>Claude Code 2.1.306</td><td><code>--include-hook-events</code> で hook ごとに <code>hook_started</code>/<code>hook_response</code>（<code>hook_name</code>・<code>exit_code</code>・<code>outcome</code>）が出る。PreToolUse hook が <code>rm</code> をブロックした試行で <code>outcome: error</code>・<code>exit_code: 2</code></td><td><code>hook_used</code> の元データ</td></tr>
+<tr><td>Claude Code 2.1.308</td><td>対話モードを疑似端末で操作し、<code>history.jsonl</code>（貼り付けを含む）と <code>projects/*/*.jsonl</code> の形式を確認</td><td><code>harvest</code> の読み取り</td></tr>
+<tr><td>Codex 0.163.0</td><td><code>codex exec --json</code> のイベントは <code>thread.started</code>/<code>turn.*</code>/<code>item.*</code>/<code>error</code> のフラットな形（<code>codex-rs/exec/src/exec_events.rs</code>。一部の記事にある「エンベロープ形式」はソースにない）。<code>error</code> イベントは再接続の通知で致命的ではない</td><td>この形でパースする</td></tr>
+<tr><td>Codex 0.163.0</td><td>ネットワーク不通時は終了せず <code>Reconnecting...</code> の <code>error</code> だけが続く</td><td>タイムアウトが必須。この形で終わった試行は <code>network</code>（除外）</td></tr>
+<tr><td>Codex 0.163.0</td><td>OS の一時ディレクトリ配下の <code>CODEX_HOME</code> では補助バイナリの作成を拒否する警告が出る</td><td>試行ディレクトリは <code>--out</code> の下に作る</td></tr>
+<tr><td>Codex 0.163.0</td><td><code>--max-turns</code> に当たるフラグがない</td><td>Codex の試行は <code>timeout_s</code> だけで止まる</td></tr>
+<tr><td>Codex 0.163.0</td><td>一時ホームの hooks は信頼確認がないと実行されず、<code>--json</code> に hook の記録も出ない。<code>--dangerously-bypass-hook-trust</code> を付けると実行され、その旨の通知が <code>error</code> アイテムとして 2 回出る</td><td>常にこのフラグを付け、通知は警告として記録するだけ。Codex の <code>hook_used</code> は not_run</td></tr>
+<tr><td>Codex 0.163.0（ソース）</td><td><code>history.jsonl</code> は既定で保存、rollout は <code>event_msg</code> の <code>user_message</code>（この環境から API に接続できず履歴が書かれないため、<code>message-history</code>・<code>protocol</code> のソースで確認）</td><td><code>harvest</code> の読み取り</td></tr>
+</table>
+
+<h2 id="measured">9. 開発時の実測</h2>
+<p>傾向の確認用です（試行が少ないので、判断の根拠にはしません）。</p>
+<table>
+<tr><th>何を</th><th>条件</th><th>結果</th></tr>
+<tr><td>同梱サンプル（形式ルール・スキル）</td><td>Claude Code 2.1.304 + haiku、<code>--tag smoke --tag skills --no-llm</code>（3 タスク × 1 試行）</td><td>claude-baseline: pass@1 33%（表ヘッダ・最多月の形式の <code>instruction_violation</code>、スキル未使用の <code>skill_selection</code>）、$0.0087。claude-ds-lite: 100%、$0.0093</td></tr>
+<tr><td>依頼どおりの抽出・曖昧な依頼</td><td>Claude Code 2.1.308 + haiku、<code>request-extract</code>・<code>request-ambiguous</code> を 2 試行ずつ</td><td>抽出はどちらも 2/2。曖昧な依頼では ds-lite（確認ルールあり）が 2/2 で確認の質問を返し、ベースラインは 1/2（もう 1 回は質問せず「該当データなし」と答えた）</td></tr>
+<tr><td><code>harvest</code></td><td>合成の依頼 3 件、sonnet で書き換え（2 回の試行で計 7 回の呼び出し）</td><td>3 件とも元の名前・識別子が残らず、haiku（配布物なし）で 3/3 解けた。書き換えは 1 回あたり約 $0.06〜0.15。改善 SQL の書き方を 1 通りに決め打ちする採点スクリプトが出たので、人の確認で「正しいが書き方の違う答え」を落とさないかを見る必要がある</td></tr>
+</table>
+
+<h2 id="risks">10. 残るリスク・未確認</h2>
 <ul>
-<li>Windows の実機、Codex での実際のエージェント実行は未確認。macOS のキーチェーンのログインは試行では使えないことを確認した（設定フォルダを分けると未ログインになる。サブスクリプションでは <code>claude setup-token</code> の長期トークンを <code>inherit_env: [CLAUDE_CODE_OAUTH_TOKEN]</code> で渡す）。社内では最初に <code>doctor</code>・<code>doctor --live</code>・<code>harvest --dry-run</code> を通す。</li>
-<li>統合を行った開発機の CLI（Claude Code 2.1.295・Codex 0.146.1）は、起動フラグと出力形式を確かめた版（2.1.304・0.163.0）より古い。使うフラグはどちらのヘルプにもある（Claude の <code>--max-turns</code> は非表示の既存フラグ）が、出力形式の違いは <code>doctor --live</code> で確かめる。</li>
-<li>CLI は作業ディレクトリより上のフォルダの指示・スキル・ルール・サブエージェントを一時ホームでも読む（最終レビューで、上位の <code>CLAUDE.md</code>、<code>.claude/</code> の skills・rules・agents・commands、git ルートまでの <code>AGENTS.md</code> を実測）。配布物なしの基準を汚すため、<code>CLAUDE.md</code>・<code>AGENTS.md</code>・<code>.mcp.json</code> や <code>.claude/</code>・<code>.codex/</code>・<code>.agents/</code> フォルダ が <code>--out</code> とその上にあれば <code>run</code> は止まり <code>doctor</code> は NG にする。<code>--out</code> はリポジトリやホームの外に置く必要がある。<code>harvest</code> の書き換えは OS の一時フォルダで動き、この確認はしない。</li>
-<li>Claude Code の同梱スキル・組織の管理設定は一時ホームでも読み込まれる。試行ごとに実際に読み込まれた構成要素を記録し、レポートで見えるようにしている。</li>
-<li>少ないタスクでは区間が狭く出やすい（§4）。判断には 20 タスク以上・3 試行以上を目安にする。</li>
+<li><b>Windows は未検証</b>（テストは Linux と macOS、Python 3.10〜3.13）。パスは pathlib、タイムアウト時の停止は <code>taskkill /T</code> を使う実装。CLI が npm の <code>claude.cmd</code> だと <code>--settings</code> の JSON などが cmd.exe を経由するので、問題が出たら <code>executable:</code> で実体（<code>.exe</code> や <code>node</code> + スクリプト）を指定する。社内の Windows 端末で <code>doctor --live</code> とスモーク評価を一度通してから展開する。</li>
+<li><b>Codex での実際のエージェント実行は未確認</b>（開発環境から OpenAI API に接続できない）。パーサは実出力（失敗時）とソースのイベント定義から作ったテストデータで検証している。社内では最初に <code>doctor --live</code> を通す。</li>
+<li>開発機の CLI（Claude Code 2.1.295・Codex 0.146.1）は §8 で確かめた版より古い。使うフラグはどちらのヘルプにもある（Claude の <code>--max-turns</code> は非表示の既存フラグ）が、出力形式の違いは <code>doctor --live</code> で確かめる。</li>
+<li>上のフォルダの指示・同梱スキル・組織の管理設定は一時ホームでは隔離できない（<a href="guide.html#isolation">図解ガイド 5 章</a>）。</li>
 <li><code>harvest</code> の架空化は日本語の固有名詞を機械で判定できない。下書きは人が確認してから使う。</li>
 <li><code>doctor</code> は LLM 判定の経路を見ない（判定の有無は実行時の指定で決まるため）。判定が親の環境で動くときの経路の警告は <code>run</code> が出す。</li>
+<li>MCP のモックサーバーは同梱していない（<code>install</code> で設定ファイルを置き、<code>extra_args</code> で <code>--mcp-config</code> を渡す）。</li>
 </ul>
 
-<h2 id="sources">9. 根拠</h2>
+<h2 id="sources">11. 根拠</h2>
 <ul>
 <li>Anthropic: <a href="https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents">Demystifying evals for AI agents</a>（タスク・試行・採点、pass@k と pass^k、判定の較正、試行ごとのクリーンな環境）</li>
 <li>Anthropic: <a href="https://www.anthropic.com/research/statistical-approach-to-model-evals">A statistical approach to model evaluations</a>（タスク単位のクラスタ、paired の差）</li>
@@ -163,7 +189,7 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <li>OpenAI: <a href="https://openai.com/index/why-we-no-longer-evaluate-swe-bench-verified/">Why we no longer evaluate SWE-bench Verified</a>（汚染）、<a href="https://developers.openai.com/blog/eval-skills">Testing Agent Skills Systematically with Evals</a></li>
 <li>OSS: <a href="https://www.promptfoo.dev/docs/guides/test-agent-skills/">Promptfoo</a>、<a href="https://meridianlabs-ai.github.io/inspect_swe/">inspect_swe</a>、<a href="https://docs.harborframework.com/llms.txt">Harbor</a>、<a href="https://github.com/benchflow-ai/benchflow">BenchFlow</a>、<a href="https://github.com/mgechev/skillgrade">skillgrade</a>、<a href="https://pypi.org/project/mdarena/">mdarena</a></li>
 <li>論文: <a href="https://arxiv.org/abs/2602.12670">SkillsBench</a>、<a href="https://arxiv.org/abs/2603.15401">SWE-Skills-Bench</a>、<a href="https://arxiv.org/abs/2605.27922">Harness-Bench</a>、<a href="https://arxiv.org/abs/2406.12045">τ-bench（pass^k）</a></li>
-<li>実機・ソースで確かめた CLI の挙動は README の「制約と注意」に記録している</li>
+<li>実機・ソースで確かめた CLI の挙動は §8 に記録している</li>
 </ul>
 </main>
 </body>
