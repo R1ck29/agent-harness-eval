@@ -648,3 +648,7 @@ Codex の失敗時 JSONL、採点スクリプトの回帰用の実出力）で�
 ## 採らなかった案
 
 理由とともに [`docs/design.html`](docs/design.html) の「採らなかった案」にまとめています（Promptfoo・BenchFlow などの外部エンジン、`claude plugin eval` だけで済ませる案、早期打ち切り、トークン節約のフラグなど）。
+
+## ライセンス
+
+MIT（[`LICENSE`](LICENSE)）。

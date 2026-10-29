@@ -7,6 +7,7 @@ name = "agent-harness-eval"
 version = "0.4.0"
 description = "Claude Code / Codex のハーネス（CLAUDE.md・Skills・Hooks・MCP など）を同じタスクで実行・採点・比較する"
 requires-python = ">=3.10"
+license = { text = "MIT" }
 dependencies = ["PyYAML>=6.0"]
 
 [project.scripts]
