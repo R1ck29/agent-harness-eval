@@ -7,6 +7,8 @@ Claude Code と Codex の「ハーネス」（CLAUDE.md / AGENTS.md・Skills・S
 
 - 「タスク × プロファイル × 試行回数」を 1 コマンドで実行し、合格率・毎回合格する率（pass^k）・費用・失敗の種類を出す
 - 差には 95% 区間と、良くなった・悪くなったタスクの数が付く。リリース判定は、事前に決めた許容幅で 通過／不通過／判定不能
+- train タスクの失敗から、改善役（読み取りだけの `claude -p`）が配布物の変更案を作る（`improve`）。評価用のタスク（holdout）は
+  権限設定で読ませず、効くことを起動のたびに確かめる
 - 配布物の変更案は、改善に使っていない評価用のタスク（holdout）で現行と比べて採否を出す（`promote`。自己改善ループの関門）
 - 各試行は一時ホームで隔離し、普段の `~/.claude` / `~/.codex` には触らない
 - 採点はコード判定が基本（独自スクリプトも可）。LLM 判定は補助
@@ -16,7 +18,7 @@ Claude Code と Codex の「ハーネス」（CLAUDE.md / AGENTS.md・Skills・S
 
 | 知りたいこと | 文書 |
 |---|---|
-| 仕組み（図解）: 使う順番・実行の流れ・隔離・採点・指標・費用・harvest・出力・自己改善ループ（`promote`） | 図解ガイド — [Web](https://r1ck29.github.io/agent-harness-eval/guide.html) / [`docs/guide.html`](docs/guide.html) |
+| 仕組み（図解）: 使う順番・実行の流れ・隔離・採点・指標・費用・harvest・出力・自己改善ループ（`improve`・`promote`） | 図解ガイド — [Web](https://r1ck29.github.io/agent-harness-eval/guide.html) / [`docs/guide.html`](docs/guide.html) |
 | タスク・プロファイルの書き方、グレーダー、認証、コマンドのオプション | リファレンス — [Web](https://r1ck29.github.io/agent-harness-eval/reference.html) / [`docs/reference.html`](docs/reference.html) |
 | なぜこの作りか、既存ツールとの比較、確かめた CLI の挙動、残るリスク | 設計記録 — [Web](https://r1ck29.github.io/agent-harness-eval/design.html) / [`docs/design.html`](docs/design.html) |
 
