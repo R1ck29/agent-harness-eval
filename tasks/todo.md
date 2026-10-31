@@ -1,6 +1,113 @@
 # Harness Eval Work Plan
 
-## Current: self-improvement loop, evaluation side (v0.5.0) on top of the restructured docs — 2026-10-31
+## Current: the improver (`improve`, v0.6.0) — 2026-10-31
+
+Asked by the v0.5 session (user, 2026-10-31: "やり残しなく"): build the improver that v0.5 left outside the tool
+(design.html §10 残タスク 1–3, guide §11 step 3). Scope: an isolated `claude -p` that reads only the failed train
+trials of one run folder and the current harness, drafts itemized INV / DOM deltas with predicted fixes; deny rules
+for the holdout `--out` and task definitions, verified on the real CLI first; pre-checks; three-profile skill
+comparison. Fleet layer (OTEL aggregation, staged rollout) stays out of scope.
+
+### Real-CLI verification of the deny rule (done first; full table in the shared notes folder)
+
+The local CLI (Claude Code 2.1.295) has no login of its own, and the desktop app's proxy must not be borrowed. Permission
+checks run inside the CLI, so the real binary was driven by a local mock Messages API (127.0.0.1, dummy key) that
+issues exact tool calls and records the tool_result the CLI sends back:
+- `--add-dir <root>` in `default` mode without a deny rule: the holdout canary leaks via absolute Read, Grep, Glob, a
+  symlink in the cwd and the `/tmp` alias. With `Read(//<abs>/secret/**)` in `--settings`: every one is blocked, the
+  control file outside the denied folder is still read, Grep/Glob from the parent skip the denied folder, Write into
+  it is blocked. Same in `bypassPermissions`. → **the deny rule blocks absolute-path reads (verified).**
+- Without `--add-dir`, `default` and `acceptEdits` already refuse every read outside the cwd in `-p`.
+- 2.1.295 `-p` starts in **auto** mode when `--permission-mode` is not given → the improver passes `default` and
+  checks the init event.
+- `--json-schema` adds a `StructuredOutput` tool; the stream-json result carries `structured_output` and
+  `permission_denials`.
+Not verified: a run with a real model (no login here), the Windows form of the rule. Hence the self-check below.
+
+### Design
+
+- **Read-only improver.** `claude -p --permission-mode default --tools Read,Glob,Grep --json-schema …` in a fresh OS
+  temp folder holding *copies* of the allowed material only:
+  `harness/` (the current harness laid out as it is installed under `{config_dir}`) and
+  `failures/<task>/task.md` + `failures/<task>/<n>/result.json` (+ `transcript.jsonl` when the run kept it).
+  It cannot write files; it returns deltas as structured output and the tool applies them. No Bash, so the deny rule
+  cannot be bypassed with `cat`. The temp folder is deleted afterwards (it holds prompts and transcripts).
+- **Two barriers.** (1) cwd-only reads in `default` mode; (2) `permissions.deny` `Read(//…/**)` for every
+  `--holdout-out`, every task-definition root (the parent of each `--tasks` path, plus fixture/grader/reference files
+  tasks point to) and the run folder itself. The init event must show `permissionMode: default` and no tool beyond
+  Read/Glob/Grep/StructuredOutput, otherwise the result is discarded.
+- **Self-check before every run (zero cost).** The same CLI, flags and rule form are run against an in-process mock
+  Messages API with a canary folder, `--add-dir` granting access so the deny rule is the only barrier. If the canary
+  leaks, the control read fails, or the probe cannot run → `improve` stops (exit 2) and says why. This is what makes the
+  Windows rule form and future CLI versions safe: they verify themselves on the machine that runs the improver.
+- **Inputs checked:** `--run` must contain only `split: train` tasks (holdout or dev in the run → stop); `--profile`
+  must be in the run; install must be `copy` steps into `{config_dir}` (a `run` installer cannot be edited → stop).
+- **Deltas** `{id, kind: INV|DOM, file, op: add|replace|remove, old, new, reason, fixes: [task ids]}`; `file` is a
+  Markdown path inside `harness/`. Applied in order to a copy; a delta that cannot apply (old not found exactly once,
+  path escape) is listed as not applied. `fixes` outside the given failed tasks are dropped with a note.
+- **Pre-checks (reject the whole candidate before evaluation, exit 1):**
+  1. added text carries train-task-specific strings (task ids, fixture file names, identifiers / numbers / ≥25-char
+     copies from train prompts — `harvest.leaked` on the added text, minus what the current harness already has);
+  2. touches grader files (non-Markdown target, path outside `harness/`, a grader / reference file name as target or
+     mentioned in the added text);
+  3. grows always-loaded instructions (characters of CLAUDE.md, AGENTS.md, rules/**/*.md) beyond
+     `--max-growth-chars` (default 0). Skill descriptions are not counted here — skills go through the three profiles.
+- **Outputs** in `--out`: `harness/`, `dev/<current-id>.yaml` (same id, for the dev `gate`),
+  `holdout/candidate.yaml` (`--candidate-id`, for `promote`) — both `copy: ../harness`, so the harness hash is equal;
+  for each added or changed skill `skills/<name>/{none,description,full}.yaml` + their harness trees;
+  `improve.json` (deltas, applied/not, predictions, pre-check problems, source run id and hashes, cost,
+  permission-denial count; no prompts or transcripts). Spend goes to the ledger.
+- **Predictions checked next round:** `--previous <old improve.json>` reports which predicted tasks now pass in
+  `--run` (the train run of the candidate that became current); the hit rate goes into improve.json and the improver
+  sees it.
+- **`skill-variants` command:** the same three profiles for a hand-written skill (`--profile`, `--skill`, `--out`).
+- Version 0.6.0. design.html §7: the "improve を組み込む" row becomes "decided otherwise (2026-10-31)".
+
+### Steps (task-graph.json)
+
+- [x] probe: mock Messages API + read-isolation self-check (harness_eval/mockapi.py). Real 2.1.295: ok with the deny
+      rule, leak without, also with 20 special characters in the denied folder name
+- [x] candidate: harness materialization, delta application, pre-checks, always-loaded size, skill variants
+      (harness_eval/candidate.py)
+- [x] improve: `improve` and `skill-variants` commands (harness_eval/improve.py, cli.py), fake improver, e2e; one
+      `improve` run on the real CLI with a mock model: material read, holdout / task definition / grader reads denied
+      ("denied by your permission settings"), canary absent from every request, candidate written
+- [x] docs: guide §1/§2/§5/§11 (new figure)/§12, reference (improve, skill-variants, outputs, improve.json), design
+      §7/§8/§10/§11, README; no broken anchors, no new 36-char passage shared by two documents, figures rendered
+- [x] verify: Python 3.10–3.13 (138 passed, 1 skipped each), ruff clean, coverage 92%; independent whole-diff review
+      (no CRITICAL/HIGH; 4 MEDIUM + 5 LOW fixed); graph nodes probe, candidate, improve verified by independent reviewers; PR
+
+### Review log
+
+- probe attempt 1 FAIL (reviewer): a holdout path with `[` defeats the real deny while the probe tested a plain path
+  (false ok); Glob step could not detect name disclosure; only step results inspected. Fixed: `[ ]` escaped (verified
+  on 2.1.295), the probe's denied folder carries the real paths' special characters, leak = canary in any request body
+  or secret file name in a non-error result, Read/Grep/Glob controls.
+- probe attempt 2 FAIL: a backslash in a POSIX path still leaks even escaped (2.1.295), and the probe's sorted
+  character set hid it; the Windows form had a single slash. Fixed: paths with `\` refuse to run (`unusable_path`),
+  special characters placed mid-name (the probe now reports the backslash leak itself), Windows `//C:/…` and `//c/…`.
+- candidate attempt 1 FAIL: Windows-style paths escaped the harness, write errors crashed, the `<ngram>` sentinel
+  disabled copy detection, tokens split across deltas, `@` imports / agents not counted, `{profile_dir}` not resolved.
+  All fixed with regression tests.
+- candidate attempt 2 FAIL: the new `@`-import check rejected `@dataclass`, `@pytest.fixture`, `@types/node` and an
+  import followed by `。`; decode errors; grader stem matched inside words. Fixed with regression tests.
+- Both nodes reached max_attempts=2. The user ran `graphctl grant-attempt` for both (2026-10-31, "allow one more after
+  fixes"); attempt 3: probe PASS, candidate PASS (LOW: non-UTF-8 file rewritten on add — fixed, now not applied).
+- Whole-diff review (fresh reviewer): no CRITICAL/HIGH. Fixed: skill-variant YAML assets loaded as profiles (trees moved
+  to skill-trees/), task split/content changed after the run, transcripts that mention the holdout / task definitions /
+  non-train ids withheld (skipped_material), proxies bypassed for the self-check, malformed --previous → exit 2,
+  OTEL prompt logging forced off, same_harness needs a previous candidate, skill names must form ids, messages.
+- improve node: PASS (LOW notes: typed --previous, run-step check order — both fixed).
+- Return-channel research (Outlook / mailto / OTel; from the coordinating session) recorded in design §10, not built.
+
+### Handoff (v0.6.0)
+
+Not done: an improve run with a real model (the dev Mac's CLI has no login; permissions were verified on the real CLI
+with a local mock model), Windows (rule form `//C:/…` and `//c/…` unverified — the self-check stops improve if neither
+works). Next: after `claude setup-token`, run `improve` once on a real train run and read improve.json
+(`isolation_check`, `permission_denials`, `skipped_material`).
+
+## Previous: self-improvement loop, evaluation side (v0.5.0) on top of the restructured docs — 2026-10-31
 
 ### Inputs (read in full, nothing inferred)
 
