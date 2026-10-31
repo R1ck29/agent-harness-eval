@@ -74,7 +74,8 @@ Not verified: a run with a real model (no login here), the Windows form of the r
       ("denied by your permission settings"), canary absent from every request, candidate written
 - [x] docs: guide §1/§2/§5/§11 (new figure)/§12, reference (improve, skill-variants, outputs, improve.json), design
       §7/§8/§10/§11, README; no broken anchors, no new 36-char passage shared by two documents, figures rendered
-- [ ] verify: Python 3.10–3.13 (131 passed each), ruff clean, coverage 91% — done; independent whole-diff review, PR
+- [x] verify: Python 3.10–3.13 (138 passed, 1 skipped each), ruff clean, coverage 92%; independent whole-diff review
+      (no CRITICAL/HIGH; 4 MEDIUM + 5 LOW fixed); graph nodes probe, candidate, improve verified by independent reviewers; PR
 
 ### Review log
 
@@ -90,8 +91,21 @@ Not verified: a run with a real model (no login here), the Windows form of the r
   All fixed with regression tests.
 - candidate attempt 2 FAIL: the new `@`-import check rejected `@dataclass`, `@pytest.fixture`, `@types/node` and an
   import followed by `。`; decode errors; grader stem matched inside words. Fixed with regression tests.
-- Both nodes reached max_attempts=2. The user's graph rule needs a person's `grant-attempt`; asked the parent session
-  (2026-10-31). The fixes and the downstream work went ahead meanwhile; the graph records stay as they are until then.
+- Both nodes reached max_attempts=2. The user ran `graphctl grant-attempt` for both (2026-10-31, "allow one more after
+  fixes"); attempt 3: probe PASS, candidate PASS (LOW: non-UTF-8 file rewritten on add — fixed, now not applied).
+- Whole-diff review (fresh reviewer): no CRITICAL/HIGH. Fixed: skill-variant YAML assets loaded as profiles (trees moved
+  to skill-trees/), task split/content changed after the run, transcripts that mention the holdout / task definitions /
+  non-train ids withheld (skipped_material), proxies bypassed for the self-check, malformed --previous → exit 2,
+  OTEL prompt logging forced off, same_harness needs a previous candidate, skill names must form ids, messages.
+- improve node: PASS (LOW notes: typed --previous, run-step check order — both fixed).
+- Return-channel research (Outlook / mailto / OTel; from the coordinating session) recorded in design §10, not built.
+
+### Handoff (v0.6.0)
+
+Not done: an improve run with a real model (the dev Mac's CLI has no login; permissions were verified on the real CLI
+with a local mock model), Windows (rule form `//C:/…` and `//c/…` unverified — the self-check stops improve if neither
+works). Next: after `claude setup-token`, run `improve` once on a real train run and read improve.json
+(`isolation_check`, `permission_denials`, `skipped_material`).
 
 ## Previous: self-improvement loop, evaluation side (v0.5.0) on top of the restructured docs — 2026-10-31
 
