@@ -574,6 +574,8 @@ class ImproveE2E(unittest.TestCase):
         self.assertEqual(code, 2, out)
         bad = write(self.tmp / "prev.json", "[1, 2]")
         self.assertEqual(self.improve(run, self.tmp / "c-prev", None, "--previous", str(bad))[0], 2)
+        typed = write(self.tmp / "prev2.json", '{"candidate": "x", "predictions": {}}')
+        self.assertEqual(self.improve(run, self.tmp / "c-prev3", None, "--previous", str(typed))[0], 2)
         self.assertEqual(self.improve(run, self.tmp / "c-prev2", None, "--previous", str(self.tmp / "none.json"))[0], 2)
         f = self.ex / "tasks" / "csv-summary-format.yaml"  # 実行のあとで分割を変えたタスクは渡さない
         f.write_text(f.read_text(encoding="utf-8").replace("split: train", "split: holdout"), encoding="utf-8")
@@ -600,7 +602,7 @@ class ImproveE2E(unittest.TestCase):
         run = self.train_run(runner)
         code, out = self.improve(run, self.tmp / "c-run", runner)
         self.assertEqual(code, 2, out)
-        self.assertIn("run", out)
+        self.assertIn("install[0] が run です", out)
         lite = self.ex / "profiles" / "claude-ds-lite.yaml"
         run = self.train_run(lite)
         code, out = self.improve(run, self.tmp / "c-none", lite)

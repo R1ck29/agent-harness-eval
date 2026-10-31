@@ -18,8 +18,8 @@ from typing import Any, Callable
 
 from . import __version__
 from .adapters import _classify_message, _status_type
-from .candidate import (KINDS, OPS, apply_deltas, changed_skills, materialize, prechecks, profile_raw, write_profile,
-                        write_skill_variants)
+from .candidate import (KINDS, OPS, apply_deltas, changed_skills, install_targets, materialize, prechecks, profile_raw,
+                        write_profile, write_skill_variants)
 from .isolation import TrialPaths, ancestor_instructions, build_env, copy_credentials, make_trial_paths, run_process
 from .mockapi import improver_cmd, init_problem, parse_stream, read_isolation_check, special_chars, unusable_path
 from .record import TrialRecord
@@ -194,14 +194,17 @@ def check_predictions(prev: dict[str, Any], recs: list[TrialRecord], meta: dict[
     for r in recs:
         if r.valid:
             by_task.setdefault(r.task_id, []).append(r)
-    predicted = sorted(prev.get("predictions") or {})
+    preds = prev.get("predictions") or {}
+    if not isinstance(preds, dict) or not isinstance(prev.get("candidate") or {}, dict) or not isinstance(prev.get("deltas") or [], list):
+        raise SpecError("--previous の中身が improve.json の形ではありません")
+    predicted = sorted(preds)
     fixed = [t for t in predicted if by_task.get(t) and all(r.passed for r in by_task[t])]
     missed = [t for t in predicted if by_task.get(t) and t not in fixed]
     before = (prev.get("candidate") or {}).get("harness_hash")
     same = bool(before) and before == meta.get("profiles", {}).get(profile_id, {}).get("harness_hash")
     return {"predicted": predicted, "fixed": fixed, "not_fixed": missed, "not_run": [t for t in predicted if t not in by_task],
             "hit_rate": len(fixed) / (len(fixed) + len(missed)) if fixed or missed else None, "same_harness": same,
-            "deltas": [{k: d.get(k) for k in ("id", "kind", "file", "reason", "fixes")} for d in prev.get("deltas") or []]}
+            "deltas": [{k: d.get(k) for k in ("id", "kind", "file", "reason", "fixes")} for d in prev.get("deltas") or [] if isinstance(d, dict)]}
 
 
 def run_improver(o: ImproveOptions, tp: TrialPaths, prompt: str, deny: list[Path],
@@ -229,6 +232,7 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
     """戻り値: (終了コード, improve.json の中身)。0 候補あり／1 事前検査で見送り／2 止めた（隔離を確かめられない・改善役の失敗）／
     3 材料なし（失敗した train の試行がない）。"""
     meta, failed, mine = train_failures(o.run_dir, o.profile)
+    install_targets(o.profile)  # 編集できない配布物（install の run）なら、材料の有無によらず先に止める
     if o.out.exists() and any(o.out.iterdir()):
         raise SpecError(f"{o.out} は空ではありません（候補ごとに新しいフォルダを指定してください）")
     report: dict[str, Any] = {
