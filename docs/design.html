@@ -86,7 +86,7 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <h3>比べ方</h3>
 <ul>
 <li>単位はタスク。同じタスクの試行は独立ではないので、試行を標本として数えない。タスクごとの値の差を作り、タスクを復元抽出するブートストラップで 95% 区間を出す（乱数の種は固定なので、同じ結果からは何度計算しても同じ区間になる。<code>--seed</code> は実行順だけに効く）。</li>
-<li>リリース判定（<code>gate</code>）は前回と今回の同じプロファイルを比べる。非劣性マージン m は<b>毎回明示</b>する（結果を見てから決めないため、既定値を持たない）。</li>
+<li>リリース判定（<code>gate</code>）は前回と今回の同じプロファイルを比べる。非劣性マージン（許容する悪化の幅）は<b>毎回明示</b>する（結果を見てから決めないため、既定値を持たない）。</li>
 <li>変更案の採否（<code>promote</code>）は、同じ実行の中の候補と現行を比べる優越性の判定で、リリース判定とは分ける（§10）。</li>
 </ul>
 <p>判定（通過・不通過・判定不能）の条件と終了コードは <a href="guide.html#metrics">図解ガイド 7 章</a> にあります。</p>
@@ -122,6 +122,19 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <li><code>harvest</code> が LLM の書いた採点スクリプトを実行しないのも同じ理由（§7「生成された採点スクリプトを静的検査して自動実行」）。</li>
 <li>何が隔離され、何が隔離されないかは <a href="guide.html#isolation">図解ガイド 5 章</a> にあります。</li>
 </ul>
+<h3><code>harvest</code> の安全策</h3>
+<table>
+<tr><th>心配</th><th>対策</th></tr>
+<tr><td>依頼文の社外秘が残る</td><td>書き換えの指示で、固有名詞・数値・日付・表名などを架空にする。元の依頼にある識別子（<code>db.table</code>・snake_case・ファイル名）・URL・メール・大文字の名前（<code>NOVA</code> など）・年月・4 桁以上の数値（4 桁は合成データの値との偶然の一致を除く）や、25 文字以上の同じ文が残った案は、残った値を具体的に伝えて 1 回作り直させ、それでも残れば見送る（全角半角・大文字小文字・改行・年月の書き方の違いは無視して比べる）。日本語の固有名詞は機械で判定できない（§11）</td></tr>
+<tr><td>依頼文がファイルやログに残る</td><td>元の依頼文はメモリ上だけで扱い、表示は件数だけ。書き換えの呼び出しでも新しい履歴を作らない。テレメトリのプロンプト記録（<code>OTEL_LOG_USER_PROMPTS</code>・<code>OTEL_LOG_TOOL_DETAILS</code>）の環境変数は外して呼ぶ（組織の管理設定で有効にされている場合は外せない）</td></tr>
+<tr><td>LLM が書いた採点スクリプト</td><td><code>harvest</code> では実行しない（構文の確認だけ）。実行するのは、人が中身を読んだあとの <code>validate --selftest</code> と <code>run</code></td></tr>
+<tr><td>設定ファイルを紛れ込ませる</td><td>合成データの置き場所に、<code>.</code> で始まるもの（<code>.claude/</code>・<code>.mcp.json</code>）と指示ファイル（<code>CLAUDE.md</code>・<code>AGENTS.md</code> など。一覧は <a href="guide.html#isolation">図解ガイド 5 章</a>）は置かせない</td></tr>
+<tr><td>本物の環境で実行してしまう</td><td>合成データだけで完結する形に書き換える。Claude Code では <code>ssh</code>・<code>scp</code>・<code>sftp</code>・<code>curl</code>・<code>wget</code>・<code>trino</code>・<code>hive</code>・<code>beeline</code>・<code>psql</code>・<code>mysql</code>・WebFetch・WebSearch を禁止する。ただし Bash 自体は許可するので、Python からの通信などまでは防げない（最善の努力）。Codex にはこの禁止が効かないので、<code>codex_sandbox: workspace-write</code>（既定でネットワーク不可）で制限する。Bedrock 認証のため本物の AWS 認証ファイルは参照できる状態なので、合成データ以外を置かない</td></tr>
+<tr><td>接続を試みても気づけない</td><td>生成したタスクには「本物の環境（ssh・DB・Web）に接続しようとしていない」という過程の判定を必ず付ける（禁止で止められた呼び出しも記録に残るので、試みも数える）</td></tr>
+<tr><td>採点が不公平</td><td>正解例で通り、何もしなければ落ちることを自動で確かめる。依頼で求めていない判定（例: 最終応答に特定の店名）は外す</td></tr>
+<tr><td>未ログインのまま全件失敗</td><td>認証エラーなら最初の 1 件で止める（<code>--profile</code> で認証を借りるプロファイルを指定できる）</td></tr>
+</table>
+
 
 <h2 id="rejected">7. 採らなかった案</h2>
 <table>
@@ -137,7 +150,7 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <tr><td>LLM 判定の <code>--system-prompt</code> 差し替え・<code>--json-schema</code></td><td>実測で入力トークンが減らない／費用が同程度で、今の解析に失敗がない</td></tr>
 <tr><td>試行の <code>--exclude-dynamic-system-prompt-sections</code>・<code>--bare</code></td><td>節約の余地が小さい一方、プロンプトの形や CLAUDE.md・ログインの読み込みが変わり、配布物どおりの評価にならない</td></tr>
 <tr><td>生成された採点スクリプトを静的検査して自動実行</td><td>Python の安全性は静的に確かめきれない（許可した標準モジュールだけでもコマンド実行や通信ができる書き方が見つかった）</td></tr>
-<tr><td>提供元ゲートウェイでの強制停止・別の認証情報で封印した holdout・egress の強制と持ち出し攻撃のテスト（旧評価基盤 の未着手項目）</td><td>社内ゲートウェイ・別の認証情報・sandbox が必要で、この配布形態では実現できない。台帳による上限、架空化したタスク、レビュー済みの配布物だけを評価する運用で代える。holdout の封印は、フォルダの分離（単独で別の <code>--out</code> に実行し、他の分割と混ぜると止める）と holdout 利用台帳（見た回数を数える）で代える（v0.5.0）</td></tr>
+<tr><td>提供元ゲートウェイでの強制停止・別の認証情報で封印した holdout・egress の強制と持ち出し攻撃のテスト（旧評価基盤 の未着手項目）</td><td>社内ゲートウェイ・別の認証情報・sandbox が必要で、この配布形態では実現できない。台帳による上限、架空化したタスク、レビュー済みの配布物だけを評価する運用で代える。holdout の封印は、フォルダの分離（holdout 専用の <code>--out</code> に単独で実行し、他の分割と混ぜると止める）と holdout 利用台帳（見た回数を数える）で代える（v0.5.0）</td></tr>
 <tr><td><code>promote</code> に「同じ回数の best-of-N」の対照を入れる（v0.5.0 で検討）</td><td>配布物の変更は利用時に 1 依頼 1 回の実行なので、利用時の計算量は候補と現行で同じ。best-of-N は 1 依頼に複数回の実行を使う手法（Harness² のタスクごとの適応や、arXiv:2607.12227 が比べた試験時の手法）を比べるための対照。候補を多数試したことによる偶然の勝ちは、改善に使わない holdout と α / m の補正で扱う。配布物そのものが複数回の実行を使う場合（自己一貫性のスキルなど）は、合格あたりコストで比べる</td></tr>
 <tr><td>改善役（変更案を作るエージェント）を組み込む <code>improve</code>（v0.5.0 で検討）</td><td>研究では効果を決めるのは改善案の作り方より採否の関門だった（§10）。先に関門を固め、改善役は外に置く（2026-10-29 に利用者と決定）。次の版の候補</td></tr>
 <tr><td>昇格した候補を人の確認なしに全員へ配る</td><td>正解のない自己評価で採否を決めると held-out で改善が消える・評価を改竄する例がある（arXiv:2607.12227、Darwin Gödel Machine）。Windows は開発機で試験できない。昇格は「人が確認する価値がある」の意味にし、配布は承認のあと段階的に行う</td></tr>
@@ -169,6 +182,7 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <tr><th>何を</th><th>条件</th><th>結果</th></tr>
 <tr><td>同梱サンプル（形式ルール・スキル）</td><td>Claude Code 2.1.304 + haiku、<code>--tag smoke --tag skills --no-llm</code>（3 タスク × 1 試行）</td><td>claude-baseline: pass@1 33%（表ヘッダ・最多月の形式の <code>instruction_violation</code>、スキル未使用の <code>skill_selection</code>）、$0.0087。claude-ds-lite: 100%、$0.0093</td></tr>
 <tr><td>依頼どおりの抽出・曖昧な依頼</td><td>Claude Code 2.1.308 + haiku、<code>request-extract</code>・<code>request-ambiguous</code> を 2 試行ずつ</td><td>抽出はどちらも 2/2。曖昧な依頼では ds-lite（確認ルールあり）が 2/2 で確認の質問を返し、ベースラインは 1/2（もう 1 回は質問せず「該当データなし」と答えた）</td></tr>
+<tr><td>採点スクリプト <code>check_monthly_totals.py</code></td><td>初版を実機の出力に当てた</td><td>形式（表の書き方）の違いで正しい集計を落としていた。「形式」と「正しさ」を別の判定に分けて直し、実出力を回帰テスト（<code>tests/data/summaries</code>）にした</td></tr>
 <tr><td><code>harvest</code></td><td>合成の依頼 3 件、sonnet で書き換え（2 回の試行で計 7 回の呼び出し）</td><td>3 件とも元の名前・識別子が残らず、haiku（配布物なし）で 3/3 解けた。書き換えは 1 回あたり約 $0.06〜0.15。改善 SQL の書き方を 1 通りに決め打ちする採点スクリプトが出たので、人の確認で「正しいが書き方の違う答え」を落とさないかを見る必要がある</td></tr>
 </table>
 

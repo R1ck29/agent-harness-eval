@@ -5,9 +5,9 @@ Claude Code と Codex の「ハーネス」（CLAUDE.md / AGENTS.md・Skills・S
 
 <img src="docs/img/overview.svg" alt="タスク・プロファイル・配布物・フィクスチャを入力に、harness-eval run が 1 試行ずつ隔離して実行・採点・集計し、report.html・summary.json・trials.jsonl を出力する" width="100%">
 
-- 「タスク × プロファイル × 試行回数」を 1 コマンドで実行し、pass@1・pass^k・費用・失敗分類を出す
-- 比較はタスク単位の 95% 区間と、改善・悪化したタスクの数（符号検定）つき。リリース判定は事前に決めたマージンで 通過／不通過／判定不能
-- 自己改善ループの関門: タスクを train / dev / holdout に分け、配布物の変更案を holdout で現行と比べて採否を判定する（`promote`）
+- 「タスク × プロファイル × 試行回数」を 1 コマンドで実行し、合格率・毎回合格する率（pass^k）・費用・失敗の種類を出す
+- 差には 95% 区間と、良くなった・悪くなったタスクの数が付く。リリース判定は、事前に決めた許容幅で 通過／不通過／判定不能
+- 配布物の変更案は、改善に使っていない評価用のタスク（holdout）で現行と比べて採否を出す（`promote`。自己改善ループの関門）
 - 各試行は一時ホームで隔離し、普段の `~/.claude` / `~/.codex` には触らない
 - 採点はコード判定が基本（独自スクリプトも可）。LLM 判定は補助
 - 依存は Python 3.10+ と PyYAML だけ。各 CLI（`claude -p` / `codex exec --json`）を直接呼ぶ
@@ -29,7 +29,9 @@ git clone https://github.com/R1ck29/agent-harness-eval.git
 ```
 
 ```bash
-cd agent-harness-eval && pip install -r requirements.txt && python -m harness_eval --version
+cd agent-harness-eval
+pip install -r requirements.txt
+python -m harness_eval --version
 ```
 
 - 社内では GitHub のリポジトリページの **Code → Download ZIP** で取得した zip を展開し（フォルダ名は `agent-harness-eval-main`。上の `cd` はこのフォルダへ）、PyYAML は Artifactory 経由で入れます。
@@ -38,11 +40,15 @@ cd agent-harness-eval && pip install -r requirements.txt && python -m harness_ev
 
 ## 5 分で試す（同梱サンプル）
 
-結果の置き場所（`--out`）は**リポジトリとホームの外**にします。上のフォルダに `CLAUDE.md` や `.claude/` があると、
-エージェントがそれを読んで比較が壊れるため、`run` が止まります（[図解ガイド 5 章](docs/guide.html#isolation)）。
+- **結果の置き場所（`--out`）はリポジトリとホームの外**にします。上のフォルダに `CLAUDE.md` や `.claude/` があると、
+  エージェントがそれを読んで比較が壊れるため、`run` が止まります（[図解ガイド 5 章](docs/guide.html#isolation)）。
+- **認証**：試行は一時ホームで動くので、普段のログイン（macOS のキーチェーン）は届きません。Bedrock なら
+  `examples/profiles/claude-*.yaml` の 2 つに `env:` を、サブスクリプションなら `claude setup-token` のトークンを `inherit_env` で
+  渡します（書き方は `claude-baseline.yaml` のコメントと [リファレンス 5 章](docs/reference.html#auth)）。
+- **Windows（PowerShell）**：1 行目を `$OUT="C:\harness-eval"` にし、行末の `\` を `` ` `` に置き換えます。
 
 ```bash
-OUT=/Users/Shared/harness-eval   # Windows なら C:\harness-eval など
+OUT=/Users/Shared/harness-eval
 
 # ① 定義の検証（費用 0）。--selftest で採点が正解例で通り、何もしなければ落ちることも確かめる
 python -m harness_eval validate --tasks examples/tasks --profiles examples/profiles --selftest
@@ -62,16 +68,22 @@ python -m harness_eval run --tasks examples/tasks --profiles examples/profiles/c
 python -m harness_eval run --tasks examples/tasks --profiles examples/profiles/claude-*.yaml \
     --trials 3 --baseline claude-baseline --max-cost-usd 5 --out "$OUT"
 
-# ⑥ リリース判定：前回の結果と比べる（判定の決まり方と終了コードは図解ガイド 7 章）
-python -m harness_eval gate --current "$OUT/<今回の実行ID>" --previous "$OUT/<前回の実行ID>" --margin 0.05
+# ⑥ リリース判定：配布物を変えたら ⑤ と同じオプションでもう一度 run し、変更前と変更後の実行 ID を比べる
+#    （同梱サンプルは 6 タスクで、判定に必要な 10 タスクに届かないため結果は「判定不能」。手順の確認用）
+python -m harness_eval gate --current "$OUT/<変更後の実行ID>" --previous "$OUT/<変更前の実行ID>" --margin 0.05
 ```
 
-結果は `$OUT/<実行ID>/report.html` に出ます。自分の仕事に近いタスクで評価するなら、自分のセッション履歴から
-架空化したタスクの下書きを作れます（`harvest`、[図解ガイド 9 章](docs/guide.html#harvest)）。
+結果は `$OUT/<実行ID>/report.html` に出ます。判定の決まり方は [図解ガイド 7 章](docs/guide.html#metrics)、
+配布物の変更案を holdout で採否判定する使い方は [図解ガイド 11 章](docs/guide.html#loop) にあります。
+
+自分の仕事に近いタスクで評価するなら、自分のセッション履歴から架空化したタスクの下書きを作ります（`harvest`、[図解ガイド 9 章](docs/guide.html#harvest)）。
 
 ```bash
-python -m harness_eval harvest --out my-tasks --limit 10 --ledger "$OUT/spend.jsonl"   # 件数だけ見るなら --dry-run。下書きは人が確認してから validate --selftest へ
+python -m harness_eval harvest --out my-tasks --limit 10 --ledger "$OUT/spend.jsonl"   # 下書きの書き出し先が my-tasks。件数だけ見るなら --dry-run
 ```
+
+下書き（`my-tasks/tasks/`）を人が確認して直したら、`validate --tasks my-tasks/tasks --profiles … --selftest` で採点を確かめ、
+`run --tasks my-tasks/tasks …` で使います。
 
 **同梱サンプル**（履歴がないときに `harvest` が書き出す標準タスクも兼ねる）: 合成の売上 CSV（`examples/fixtures`）を使う 6 タスクと、
 小さな配布物 `examples/harnesses/ds-lite`（CLAUDE.md の出力形式ルール・「曖昧なら確認」ルール＋月別集計スキル）。

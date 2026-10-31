@@ -10,3 +10,4 @@ install:
   # 社内の配布インストーラをそのまま使う場合の例（{python} は実行中の Python に置き換わる）:
   # - run: '{python} path/to/installer.py --profile ds --target {config_dir}'
 # hash_paths: [path/to/installer]   # run で使う配布元も変更検知（キャッシュ判定）に含める
+# 認証（Bedrock・サブスクリプション）は claude-baseline.yaml のコメントと同じものをここにも書く

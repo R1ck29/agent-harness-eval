@@ -280,7 +280,8 @@ def gate(current: dict[str, Any], previous: dict[str, Any], metric: str, margin:
     """前回（previous）と今回（current）の同じプロファイルを比べ、リリースしてよいかを 3 値で返す。
 
     戻り値: decision（pass / fail / inconclusive）、problems（比較できない・安全違反。1 つでもあれば fail）、
-    regressions（前回より下がったタスク。判定には使わない診断）、profiles（プロファイル別の差・区間・判定）。"""
+    regressions（前回より下がったタスクの一覧。診断用で、件数は max_regressions を指定したときだけ判定に使う）、
+    profiles（プロファイル別の差・区間・改善と悪化の数・判定）。"""
     problems = _comparability(current, previous, metric)
     regressions: list[str] = []
     per_profile: dict[str, dict[str, Any]] = {}

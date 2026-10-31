@@ -484,6 +484,27 @@ class E2E(unittest.TestCase):
                             "--min-tasks", "2", "--max-regressions", "0")
         self.assertIn("改善 0・悪化 0", out)
 
+    def test_dev_gate_same_id_new_harness(self):
+        """図解ガイド 11 章の手順 4: 候補の配布物を現行と同じ id のプロファイルにして dev を実行し、gate で前回（現行）と比べる。"""
+        tasks = self.ex / "tasks"
+        for name in ("csv-summary-format", "arithmetic-no-skill"):
+            f = tasks / f"{name}.yaml"
+            f.write_text(f.read_text(encoding="utf-8") + "\nsplit: dev\n", encoding="utf-8")
+        prof = self.ex / "profiles"
+        nxt = prof / "next" / "claude-baseline-next.yaml"  # 配布物は ds-lite、id は現行（claude-baseline）と同じ
+        nxt.parent.mkdir()
+        nxt.write_text((prof / "claude-ds-lite.yaml").read_text(encoding="utf-8").replace("id: claude-ds-lite", "id: claude-baseline")
+                       .replace("../harnesses/", "../../harnesses/"), encoding="utf-8")
+        common = ["--tasks", str(tasks), "--split", "dev", "--out", str(self.out), "--cache-dir", str(self.cache), "--no-llm"]
+        self.assertEqual(run_cli("run", *common, "--profiles", str(prof / "claude-baseline.yaml"))[0], 0)
+        self.assertEqual(run_cli("run", *common, "--profiles", str(nxt))[0], 0)
+        prev, cur = self.runs()[-2:]
+        code, out = run_cli("gate", "--current", str(cur), "--previous", str(prev), "--margin", "0.05", "--min-tasks", "2",
+                            "--max-regressions", "0")
+        self.assertIn(code, (0, 3), out)  # 比べられる（定義の違いで止まらない）。悪化がないので不通過にならない
+        self.assertIn("悪化 0", out)
+        self.assertNotIn("止める理由", out)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -49,6 +49,15 @@ class SpecTests(unittest.TestCase):
                                                  "request-extract", "request-ambiguous"})
         self.assertEqual(len(profiles), 4)
 
+    def test_glob_patterns_expanded(self):
+        """PowerShell・cmd はワイルドカードを展開しないので、ツール側で展開する（README のコマンドをどのシェルでも使える）。"""
+        profiles = load_profiles([str(ROOT / "examples" / "profiles" / "claude-*.yaml")])
+        self.assertEqual({p.id for p in profiles}, {"claude-baseline", "claude-ds-lite"})
+        with self.assertRaisesRegex(SpecError, "見つかりません"):
+            load_profiles([str(ROOT / "examples" / "profiles" / "nothing-*.yaml")])
+        odd = write(self.tmp / "p[1].yaml", "id: odd\nagent: claude_code\n")  # 名前に [ を含む実在のファイル
+        self.assertEqual([p.id for p in load_profiles([str(odd)])], ["odd"])
+
     def test_unknown_key_rejected(self):
         p = write(self.tmp / "t.yaml", "id: a\nprompt: x\ngraders: [{type: regex, pattern: x}]\ntimeout: 3\n")
         with self.assertRaisesRegex(SpecError, "未知のキー"):

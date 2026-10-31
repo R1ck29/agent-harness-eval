@@ -74,6 +74,32 @@ rejected alternatives: best-of-N control, built-in `improve`, credential-sealed 
   the same harness under two ids is one candidate; `content_hash()` unchanged, caches stay valid.
 - Attempt 2: PASS.
 
+### Follow-up (2026-10-31, user: "やり残しなく。仕組みの説明・使い方は無駄なくわかりやすく")
+
+- Real environment, zero cost: `doctor` runs on this Mac (Claude Code 2.1.295) and correctly reports NG for an
+  undeclared `ANTHROPIC_BASE_URL` inherited from the Claude desktop app; `harvest --dry-run` finds 1,151 requests
+  (10 candidates). `doctor --live`, a smoke run and a real holdout run were NOT done: there is no API key or
+  `CLAUDE_CODE_OAUTH_TOKEN` here, the Keychain login does not reach trials, and routing trials through the desktop
+  app's base URL would borrow another session's credentials. The user has to run `claude setup-token` first.
+- Cold-read review (fresh reader, README → guide → reference) found 15 issues; applied: README auth/Windows notes,
+  ⑥ gate rewritten (needs two runs; samples give 判定不能), plain-language feature bullets, harvest next steps;
+  guide §1 glossary (pass@1/pass^k, Δ, 除外, 配布物がないと通らない判定, split), §2 caption trimmed, §6 footnote as a
+  list, §7 margin no longer called "m" (m = candidates only), exit 2 renamed "エラー（判定しない）", gate row 2 as a
+  list, §9 safeguards table moved to design §6 (guide keeps 4 bullets), §10 paths as `<--out>/…`, §11 rewritten as
+  a numbered procedure with the dev `gate` step (same profile id) and `promote` (different ids), holdout uses one
+  dedicated `--out`; reference: glob note, `--out` default warning, anecdote moved to design §9.
+  Not applied: renaming "配布物がないと通らない判定" everywhere (it is printed by the report and CLI; defined in the
+  glossary instead); changing the `--out` default (documented instead — any default inside the repo or home trips
+  the ancestor check, and a fixed outside path differs per OS).
+- Code: `--tasks` / `--profiles` accept wildcards (PowerShell and cmd do not expand them); the holdout-mixing error
+  names the dedicated `--out`; `gate` docstring no longer says regressions are never used. New tests: glob
+  expansion, the guide §11 dev-gate procedure end to end (same id, new harness → gate pass, 改善 1・悪化 0).
+- Re-reviews: code PASS (a real file named `p[1].yaml` is used literally — fixed before commit and tested; YAML
+  comments do not change hashes); docs PASS with three follow-ups applied (the next-version profile with the
+  incumbent's id lives in its own folder, `prof-next/current.yaml`, because two files with one id cannot be loaded
+  together; dev needs ≥10 tasks and the step says what to do on 不通過 / 判定不能; holdout spend goes to its own
+  ledger) plus README install lines without `&&` (Windows PowerShell 5.1).
+
 ### Handoff (for the next session)
 
 State: v0.5.0 is on GitHub main (efb35a3). Not run against real CLIs
@@ -89,7 +115,8 @@ Still open:
 - What the internal environment permits (OTEL export destination, hook-based collection, central storage).
 
 Next tasks (in order):
-1. On the Mac: `doctor`, `doctor --live`, a capped smoke run with `--out` outside home (/Users/Shared/harness-eval).
+1. User: `claude setup-token`, `export CLAUDE_CODE_OAUTH_TOKEN=…`, add `inherit_env: [CLAUDE_CODE_OAUTH_TOKEN]` and
+   `billing: subscription` to both example profiles (or Bedrock `env:`); then `doctor --live` and a capped smoke run with `--out /Users/Shared/harness-eval`.
 2. First real task set: `harvest` → human review → `split` / `family` by request type (≥20 holdout) → `validate --selftest`.
 3. A/A noise: `run --split holdout --trials 3` with the current harness under two profile ids, then
    `promote --candidate <copy> --incumbent <current> --max-regressions 0` (reject "同じ配布物"; read the estimate,
