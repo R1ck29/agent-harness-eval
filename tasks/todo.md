@@ -1,6 +1,105 @@
 # Harness Eval Work Plan
 
-## Current: docs without redundancy, duplication or stale facts; mechanisms shown as diagrams — 2026-10-29
+## Current: self-improvement loop, evaluation side (v0.5.0) on top of the restructured docs — 2026-10-31
+
+### Inputs (read in full, nothing inferred)
+
+- Shared claude.ai session https://claude.ai/share/e1c96de7-ae94-4a70-b16a-3597830e6af8 (2026-10-18〜29): Harness²
+  study, OSS survey "社内Claude Codeハーネスの自己改善：OSS調査と推奨設計", and a cloud Claude Code session that built
+  v0.5.0 on 059e103 and handed it over as `0001-feat-v0.5.0-…patch` (119,904 bytes) + `agent-harness-eval-0.5.0.zip`.
+  Neither file was on this Mac (not in ~/Downloads, not found by Spotlight).
+- The patch was rebuilt from the share's snapshot API (`/api/chat_snapshots/<id>?render_all_tools=true`, every tool
+  input of the session): the session's Edit/Write inputs were applied as data, its python heredocs were evaluated by
+  an AST interpreter that only allows string replacement on repo files (no transcript code was executed), and its
+  four `sed -i` lines were re-implemented by hand. Every replacement asserted its match. Result on 059e103: 87 tests
+  OK, ruff clean, and a patch of 119,907 bytes — the 3-byte difference is the author line (`Claude <noreply@…>` in
+  the original). Code and tests applied to main (edfd49e did not touch them); docs were merged by hand into the
+  README / guide / reference / design split of 2026-10-29.
+
+### Decision (from the session; user chose "design + evaluation-side foundation", 2026-10-29)
+
+The improver stays outside this tool. This version gives the loop what the research says matters: data the improver
+cannot see, a regression-aware paired test, a promotion decision corrected for how many candidates were already tried
+on the holdout, and the noise floor of the current harness (design.html §10 has the table, sources and the
+rejected alternatives: best-of-N control, built-in `improve`, credential-sealed holdout, rollout without approval).
+
+### Port onto main — changes beyond the session's patch
+
+- docs: README is an entry page now, so v0.5.0's README §4.2 / §9.1 went to guide.html §11 (mechanism, decision
+  table) and reference.html (keys, lint rows, options); design.html §9 became §10 (risks §11, sources §12); the
+  sealed-holdout rejection was merged into the existing "封印した holdout" row instead of a second row; the review
+  note moved from "risks" to §10 (it is history, not a risk); a risk line records that no real-CLI holdout run has
+  been done.
+- cli.py: removed the "古い形式（v0.5.0 開発中）" ledger note (that row format existed only inside the dev session,
+  so the note could never apply to a real ledger); `import json` at module level instead of two local imports;
+  `--split` choices from `SPLITS` + `NO_SPLIT` and `promote --min-tasks` default from `MIN_HOLDOUT_TASKS`
+  (one source for each); dropped the CLI's `max(1, m)` (promote() already clamps). metrics.py imports sorted.
+- `tests/test_loop.py` stays a separate file: test_units.py is already 787 lines and the loop tests are one topic.
+
+### Steps
+
+- [x] Rebuild the session's patch and verify it (87 tests, ruff, byte size)
+- [x] Apply code and tests to main; small cleanups above
+- [x] Merge docs into guide / reference / design / README
+- [x] Verify: 89 tests on Python 3.10 / 3.11 / 3.12 / 3.13, ruff clean, coverage 91%, no broken anchors, no new
+      36-char passage shared by two documents, guide §11 figure rendered
+- [x] Independent review (fresh reviewer, no build context); fixes; re-review PASS (see Review of the port)
+- [ ] Commit and push (user approved 2026-10-31); verify GitHub's Download ZIP runs from an unzipped copy
+- Distribution (user, 2026-10-31): the internal environment gets the code through GitHub's "Download ZIP", so the
+  separate `git archive` zip (dist/agent-harness-eval.zip) and its README command were dropped.
+
+### Review of the port (2026-10-31)
+
+- Attempt 1: PASS (no CRITICAL/HIGH). Reviewer confirmed cache keys of all examples/ tasks and profiles are unchanged
+  against HEAD. Fixed:
+  - MEDIUM: promote silently dropped a task with a value on only one side (e.g. every candidate trial excluded by
+    rate_limit), so a real regression never reached the budget or the sign test. `one_sided_tasks` now forces
+    inconclusive and is listed in promote.json.
+  - MEDIUM: a ledger row that is valid JSON with wrong value types raised TypeError, and an unreadable ledger was
+    not handled. Non-string ids/hashes are skipped; an unreadable ledger is a SpecError (exit 2), never "empty"
+    (that would make m = 1).
+  - LOW: noise floor over-covered for odd trial counts (3 trials compared 1 vs 1). Scale is now √(h/n) per task
+    (1/√2 for even n); supersedes "L1 noise scaled by 1/√2" below.
+  - LOW: `holdout_signature` / ledger field `holdout` were written but never read — removed.
+  - LOW: review history removed from design §10 (substance kept in table row 6); guide §11 no longer restates
+    design's reasons; reference no longer repeats guide §8's hash-exclusion list.
+- Attempt 2: PASS (89 tests, ruff clean; simulated n=3 A/A half-width 0.128, estimate now 0.115–0.135).
+
+### Review of the session's v0.5.0 (2026-10-29, carried over)
+
+- Attempt 1: PASS with MEDIUM fixes — M1 promote also requires improved > regressed (two-sided test); M2/M3 holdout
+  runs never use the cache and promote is inconclusive with cached trials; M4 ledger rows carry {task id: hash} and
+  per-profile {harness hash, install_empty}, m counts overlapping rows; `Profile.harness_hash()` (id excluded) so
+  the same harness under two ids is one candidate; `content_hash()` unchanged, caches stay valid.
+- Attempt 2: PASS.
+
+### Handoff (for the next session)
+
+State: v0.5.0 is in the working tree of main (not committed until the user says so). Not run against real CLIs
+(no `doctor --live`, no real holdout run); Windows still unverified.
+
+Decisions (user, 2026-10-31): collect as many content-free signals as possible, and fictionalized `harvest` tasks
+from users' machines may be collected centrally. What the internal environment permits is unknown, so collection
+must be switchable per signal type and narrowed once the policy is known (design.html §10, layer ①). Prompt text
+is still never sent.
+
+Still open:
+- Whether one human approval before rollout to everyone is acceptable (recommended; not answered yet).
+- What the internal environment permits (OTEL export destination, hook-based collection, central storage).
+
+Next tasks (in order):
+1. On the Mac: `doctor`, `doctor --live`, a capped smoke run with `--out` outside home (/Users/Shared/harness-eval).
+2. First real task set: `harvest` → human review → `split` / `family` by request type (≥20 holdout) → `validate --selftest`.
+3. A/A noise: `run --split holdout --trials 3` with the current harness under two profile ids, then
+   `promote --candidate <copy> --incumbent <current> --max-regressions 0` (reject "同じ配布物"; read the estimate,
+   counts and noise floor). Recorded in the ledger but does not raise m (same harness hash).
+4. Improver (next version, design.html §10 残タスク): isolated `claude -p` reading only train failures and the
+   harness diff; deny read access to the holdout folder (verify on the real CLI); INV/DOM itemized deltas;
+   predicted fixed tasks checked next round.
+5. Pre-checks on candidates; skill candidates as three profiles (no skill / description only / full).
+6. Fleet layer: OTEL aggregation; staged rollout comparison and rollback.
+
+## Previous: docs without redundancy, duplication or stale facts; mechanisms shown as diagrams — 2026-10-29
 
 ### Audit findings
 

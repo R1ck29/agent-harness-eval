@@ -443,6 +443,47 @@ class E2E(unittest.TestCase):
         self.assertIn("組み合わせ 24 × 試行 3 = 72 試行", out)
         self.assertIn("CLI 9.9.9", out)
 
+    def test_holdout_run_ledger_and_promote(self):
+        """holdout は単独で実行し、台帳に id とハッシュだけを残す。promote は台帳から評価済みの候補の数を数える。"""
+        tasks = self.ex / "tasks"
+        for name in ("csv-summary-format", "arithmetic-no-skill"):
+            f = tasks / f"{name}.yaml"
+            f.write_text(f.read_text(encoding="utf-8") + "\nsplit: holdout\n", encoding="utf-8")
+        profiles = [str(self.ex / "profiles" / f"{p}.yaml") for p in ("claude-baseline", "claude-ds-lite")]
+        common = ["--tasks", str(tasks), "--profiles", *profiles, "--out", str(self.out), "--cache-dir", str(self.cache), "--no-llm"]
+        code, out = run_cli("run", *common)
+        self.assertEqual(code, 2, out)  # holdout と他のタスクを混ぜた実行は止める
+        self.assertIn("holdout", out)
+        code, out = run_cli("run", *common, "--split", "holdout", "--trials", "2")
+        self.assertEqual(code, 0, out)
+        run_dir = self.runs()[-1]
+        rows = [json.loads(l) for l in (self.out / "holdout_uses.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(sorted(rows[0]["tasks"]), ["arithmetic-no-skill", "csv-summary-format"])
+        self.assertEqual(set(rows[0]["profiles"]), {"claude-baseline", "claude-ds-lite"})
+        self.assertFalse(self.cache.exists() and any(self.cache.iterdir()))  # holdout の試行はキャッシュに残さない
+        ledger_text = (self.out / "holdout_uses.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("sales.csv", ledger_text)  # プロンプトの中身は書かない
+        meta = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))["meta"]
+        self.assertEqual(meta["tasks"]["csv-summary-format"]["split"], "holdout")
+        self.assertTrue(meta["profiles"]["claude-baseline"]["install_empty"])
+        code, out = run_cli("promote", "--run", str(run_dir), "--candidate", "claude-ds-lite", "--incumbent", "claude-baseline",
+                            "--max-regressions", "0", "--min-tasks", "2")
+        self.assertEqual(code, 3, out)  # 2 タスクでは符号検定が有意にならない → 判定不能
+        r = json.loads((run_dir / "promote.json").read_text(encoding="utf-8"))
+        self.assertEqual((r["comparisons"], r["regressed"]), (1, []))  # 基準（配布物なし）は候補に数えない → ds-lite の 1
+        self.assertIn("雑音幅", out)
+        code, out = run_cli("run", *common, "--split", "holdout", "--trials", "2")  # もう一度見る → キャッシュを使わず実行し直す
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("CACHE", out)
+        self.assertEqual(len((self.out / "holdout_uses.jsonl").read_text(encoding="utf-8").splitlines()), 2)
+        code, out = run_cli("promote", "--run", str(run_dir), "--candidate", "claude-ds-lite", "--incumbent", "claude-baseline",
+                            "--max-regressions", "0", "--min-improvement", "-0.1")
+        self.assertEqual(code, 2, out)  # 負の --min-improvement は条件を緩めるので受け付けない
+        code, out = run_cli("gate", "--current", str(run_dir), "--previous", str(run_dir), "--margin", "0.05",
+                            "--min-tasks", "2", "--max-regressions", "0")
+        self.assertIn("改善 0・悪化 0", out)
+
 
 if __name__ == "__main__":
     unittest.main()

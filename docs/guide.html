@@ -54,7 +54,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <h1>Agent Harness Eval 図解ガイド</h1>
 <p class="lead">Claude Code / Codex の配布物（CLAUDE.md・スキルなど）を同じタスクで隔離して実行・採点し、配布物なしの基準や前回の版と比べます。このページではその仕組みを図で説明します。YAML の書き方・コマンドのオプションは <a href="reference.html">リファレンス</a>、なぜこの作りなのかは <a href="design.html">設計記録</a> にあります。</p>
 <nav>
-<a href="#overview">1. 全体像</a><a href="#workflow">2. 使う順番</a><a href="#run">3. run の流れ</a><a href="#trial">4. 1 試行の流れ</a><a href="#isolation">5. 隔離</a><a href="#grading">6. 採点</a><a href="#metrics">7. 指標とリリース判定</a><a href="#cost">8. 費用とトークン節約</a><a href="#harvest">9. 実際の依頼からタスクを作る</a><a href="#outputs">10. 出力と後始末</a><a href="#modules">11. コードの構成</a>
+<a href="#overview">1. 全体像</a><a href="#workflow">2. 使う順番</a><a href="#run">3. run の流れ</a><a href="#trial">4. 1 試行の流れ</a><a href="#isolation">5. 隔離</a><a href="#grading">6. 採点</a><a href="#metrics">7. 指標とリリース判定</a><a href="#cost">8. 費用とトークン節約</a><a href="#harvest">9. 実際の依頼からタスクを作る</a><a href="#outputs">10. 出力と後始末</a><a href="#loop">11. 自己改善ループでの使い方</a><a href="#modules">12. コードの構成</a>
 </nav>
 
 <h2 id="overview">1. 全体像</h2>
@@ -102,7 +102,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <path d="M750,118 C750,146 614,146 614,118" class="ln-dash" marker-end="url(#m2)"/>
 <text x="682" y="156" text-anchor="middle" class="t-sm">変更が入ればスモークに戻る</text>
 </svg></div>
-<figcaption>harvest（9 章）は自分のセッション履歴からタスクの下書きを作る工程で、履歴がなければ同梱の標準タスクを使います。validate は <code>--selftest</code> を付けると、採点が正解例で通り、何もしなければ落ちることも確かめます。doctor は <code>--live</code> なしなら費用 0（CLI の版と環境変数の確認）、<code>--live</code> では「OK と返すだけ」の最小呼び出しを 1 回ずつ行います。report（レポートの作り直し）と calibrate（LLM 判定と人手ラベルの照合）もエージェントを呼びません。変更のない組み合わせはキャッシュ（8 章）が効くので、スモークを何度回しても実際に呼ばれるのは変えた部分だけです。</figcaption>
+<figcaption>harvest（9 章）は自分のセッション履歴からタスクの下書きを作る工程で、履歴がなければ同梱の標準タスクを使います。validate は <code>--selftest</code> を付けると、採点が正解例で通り、何もしなければ落ちることも確かめます。doctor は <code>--live</code> なしなら費用 0（CLI の版と環境変数の確認）、<code>--live</code> では「OK と返すだけ」の最小呼び出しを 1 回ずつ行います。report（レポートの作り直し）と calibrate（LLM 判定と人手ラベルの照合）もエージェントを呼びません。変更のない組み合わせはキャッシュ（8 章）が効くので、スモークを何度回しても実際に呼ばれるのは変えた部分だけです。配布物の変更案を採用するかを決める <code>promote</code> は、この流れとは別に 11 章の手順で使います。</figcaption>
 </figure>
 
 <h2 id="run">3. run の流れ</h2>
@@ -295,7 +295,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <tr><td>試行の合格</td><td>スコア 1.0 かつ失敗扱いの異常終了なし</td></tr>
 <tr><td>pass@1</td><td>タスクごとに「合格した有効試行 ÷ 有効試行」。全体はタスク平均</td></tr>
 <tr><td>pass^k</td><td>タスクごとに k 回続けて合格する確率。有効試行 n 回中 c 回合格なら C(c,k) ÷ C(n,k)。n ＝ k なら「全部合格で 1、それ以外 0」。n &lt; k のタスクは計算せず、計算できたタスク数をレポートに出す。全体はタスク平均。<b>同じ人が何度も使う配布物では主指標</b></td></tr>
-<tr><td>Δ</td><td>比較プロファイル − 基準プロファイル（両方に値があるタスクだけ）。配布物がないと通らない判定を両側とも除いた値で計算し、95% 区間を付ける（区間が 0 をまたげば差があるとは言えない）。v0.3.0 以前の結果は除けないので全判定の値で計算し、レポートに注意を出す</td></tr>
+<tr><td>Δ</td><td>比較プロファイル − 基準プロファイル（両方に値があるタスクだけ）。配布物がないと通らない判定を両側とも除いた値で計算し、95% 区間を付ける（区間が 0 をまたげば差があるとは言えない）。v0.3.0 以前の結果は除けないので全判定の値で計算し、レポートに注意を出す。あわせて pass@1 が上がった・下がったタスクの数と、正確な両側符号検定の p 値を出す（平均が上がっても一部のタスクが壊れていないかを見る。試行ではなくタスクを単位に数える）</td></tr>
 <tr><td>合格あたりのコスト</td><td>総コスト ÷ 合格試行数。コスト不明の試行があれば出さない（0 で埋めない）</td></tr>
 <tr><td>失敗分類</td><td>不合格の試行に付くタグ。異常終了の種類（<code>timeout</code>・<code>max_turns</code>・<code>budget_exceeded</code>・<code>agent_error</code>・<code>agent_crash</code>）と、落ちたグレーダーの <code>category</code>（既定値は <a href="reference.html#graders">リファレンス「グレーダー」</a>）</td></tr>
 </table>
@@ -326,18 +326,19 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <line x1="280" y1="160" x2="560" y2="160" class="ln" stroke-width="4"/><circle cx="420" cy="160" r="5" class="head"/>
 <text x="580" y="164" class="t-sm">−m をまたぐ（区間が広すぎる）</text>
 </svg></div>
-<figcaption>横線が「今回 − 前回」の差の 95% 区間、点が推定値です。比較できたタスクが <code>--min-tasks</code> 未満なら、区間の位置にかかわらず判定不能です。指標は <code>--metric</code>（既定 pass^k）。前回より下がったタスクの一覧は参考として表示しますが、判定には使いません。</figcaption>
+<figcaption>横線が「今回 − 前回」の差の 95% 区間、点が推定値です。比較できたタスクが <code>--min-tasks</code> 未満なら、区間の位置にかかわらず判定不能です。指標は <code>--metric</code>（既定 pass^k）。前回より下がったタスクの一覧は参考として表示します（判定に使うのは <code>--max-regressions</code> を付けたときの件数だけです）。</figcaption>
 </figure>
 <p>判定は上の行から順に決まります。複数のプロファイルを比べるときは、1 つでも不通過なら不通過、すべて通過したときだけ通過です。</p>
 <table>
 <tr><th>順</th><th>条件</th><th>判定</th><th>終了コード</th></tr>
 <tr><td class="n">1</td><td>定義の誤り、結果のフォルダ（<code>summary.json</code>・<code>trials.jsonl</code>）がない</td><td>判定できない</td><td class="n">2</td></tr>
-<tr><td class="n">2</td><td>安全違反の失敗分類（既定 <code>unsafe_access</code>。<code>--hard-category</code> で追加）が 1 件でもある、または比較できない（LLM 判定の有無・タスク定義が違う、pass^k で k が違う、今回の結果にプロファイル・タスクがない、指標を算出できない）</td><td class="ng">不通過</td><td class="n">1</td></tr>
+<tr><td class="n">2</td><td>安全違反の失敗分類（既定 <code>unsafe_access</code>。<code>--hard-category</code> で追加）が 1 件でもある、<code>--max-regressions N</code> を付けて前回より下がったタスクが N 件を超えた、または比較できない（LLM 判定の有無・タスク定義が違う、pass^k で k が違う、今回の結果にプロファイル・タスクがない、指標を算出できない）</td><td class="ng">不通過</td><td class="n">1</td></tr>
 <tr><td class="n">3</td><td>比較できたタスクが <code>--min-tasks</code>（既定 10）未満（区間がどこにあっても）</td><td>判定不能</td><td class="n">3</td></tr>
 <tr><td class="n">4</td><td>区間の上端 &lt; −m</td><td class="ng">不通過</td><td class="n">1</td></tr>
 <tr><td class="n">5</td><td>区間の下端 ≥ −m</td><td class="ok">通過</td><td class="n">0</td></tr>
 <tr><td class="n">6</td><td>それ以外（区間が −m をまたぐ）</td><td>判定不能</td><td class="n">3</td></tr>
 </table>
+<p><code>--max-regressions</code>（回帰予算）は、平均では通過しても一部のタスクが壊れる変更を止めるためのもので、既定では数えません。マージンと同じく結果を見る前に決めます。出力には各プロファイルの改善・悪化したタスクの数と符号検定の p 値も出ます。</p>
 <p>タスクが少ないと区間は実際より狭く出やすいので、判断には 20 タスク以上・3 試行以上を目安にしてください（理由は <a href="design.html#method">設計記録 4 章</a>）。</p>
 
 <h2 id="cost">8. 費用とトークン節約</h2>
@@ -363,7 +364,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <line x1="520" y1="158" x2="578" y2="158" class="ln" marker-end="url(#m7)"/><text x="549" y="151" text-anchor="middle" class="t-sm">ミス</text>
 <rect x="580" y="130" width="300" height="56" rx="6" class="box"/><text x="730" y="153" text-anchor="middle">エージェントを実行</text><text x="730" y="172" text-anchor="middle" class="t-sm">有効な結果をキャッシュに保存</text>
 </svg></div>
-<figcaption>キャッシュは <code>.harness-eval-cache/&lt;キー&gt;.json</code> に置かれます。<code>--no-cache</code> のときは読みも書きもしません（<code>doctor</code> も書きません）。</figcaption>
+<figcaption>キャッシュは <code>.harness-eval-cache/&lt;キー&gt;.json</code> に置かれます。<code>--no-cache</code> のときと holdout のタスクを含む実行（11 章）は読みも書きもしません（<code>doctor</code> も書きません）。</figcaption>
 </figure>
 <table>
 <tr><th>キーに入るもの（1 つでも変われば再実行）</th><th>キーに入れないもの（書き換えても再実行しない）</th></tr>
@@ -377,7 +378,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 </ul>
 </td><td>
 <ul>
-<li>タスクの説明・タグ・<code>paired_negative</code></li>
+<li>タスクの説明・タグ・<code>paired_negative</code>・<code>split</code>・<code>family</code></li>
 <li>プロファイルの説明・<code>billing</code></li>
 </ul>
 </td></tr>
@@ -485,11 +486,70 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <tr><td><code>trials/…/&lt;n&gt;/home/</code></td><td>一時ホーム（認証ファイルの複製を含みうる）</td><td>試行の終わりに必ず削除（中断時も）</td></tr>
 <tr><td><code>.harness-eval-cache/</code></td><td>キャッシュ（試行の記録と同じ内容）</td><td>残る</td></tr>
 <tr><td><code>results/spend.jsonl</code></td><td>費用台帳（1 行 <code>{at, usd, run_id, agent, billing}</code>）</td><td>残る</td></tr>
+<tr><td><code>results/holdout_uses.jsonl</code></td><td>holdout 利用台帳（holdout のタスクを含む実行ごとに 1 行。id とハッシュだけで、プロンプト・応答は書かない。11 章）</td><td>残る</td></tr>
+<tr><td><code>results/&lt;実行ID&gt;/promote.json</code></td><td><code>promote</code> の判定と根拠（11 章）</td><td>残る</td></tr>
 </table>
 <p><code>--keep none</code> でも、trials.jsonl・キャッシュ・report.html には最終応答とツール呼び出しの入力（書き込んだ内容やコマンド）が残ります。評価には合成データだけを使い、結果フォルダとキャッシュを社外に出さないでください。</p>
 <p><b>中断（Ctrl-C）</b>：未開始の試行は取り消し、実行中のエージェントは子プロセスごと止めます（トークンを使い続けません）。その実行の集計とレポートは作られませんが、<code>trials.jsonl</code> には完了済みの試行が残ります。完了した試行はキャッシュ済みなので、同じコマンドを再実行すると続きから進みます（中断で止めた試行は <code>interrupted</code> としてキャッシュせず、やり直します）。</p>
 
-<h2 id="modules">11. コードの構成</h2>
+<h2 id="loop">11. 自己改善ループでの使い方</h2>
+<p>配布物の変更案（候補）を作るのは外の改善役（<code>claude -p</code> など）で、このツールは<b>採用してよいかを決める関門</b>を受け持ちます。同じタスクで改善案を作って同じタスクで採点すると、そのタスクだけに効く近道が「改善」に見えるため、タスクを 3 つに分けて使います。</p>
+<figure>
+<div class="scroll"><svg viewBox="0 0 900 250" role="img" aria-label="train の失敗を改善役が読み候補を作る。候補は dev で回帰予算つきの gate を通り、holdout で現行と同じ実行の中で promote により比べられる。昇格した候補は人が承認して段階的に配布する。holdout は改善役に見せない">
+<defs><marker id="m11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head"/></marker></defs>
+<rect x="20" y="30" width="170" height="52" rx="6" class="box"/><text x="105" y="52" text-anchor="middle" class="t-b">train</text><text x="105" y="70" text-anchor="middle" class="t-sm">失敗の軌跡を改善役に見せる</text>
+<rect x="20" y="108" width="170" height="52" rx="6" class="box"/><text x="105" y="130" text-anchor="middle" class="t-b">dev</text><text x="105" y="148" text-anchor="middle" class="t-sm">候補の足切り（合否だけ）</text>
+<rect x="20" y="186" width="170" height="52" rx="6" class="acc"/><text x="105" y="208" text-anchor="middle" class="t-acc">holdout</text><text x="105" y="226" text-anchor="middle" class="t-sm">昇格判定だけ（非公開）</text>
+<rect x="250" y="30" width="170" height="52" rx="6" class="dec"/><text x="335" y="52" text-anchor="middle">改善役（外）</text><text x="335" y="70" text-anchor="middle" class="t-sm">候補の配布物を作る</text>
+<line x1="190" y1="56" x2="248" y2="56" class="ln" marker-end="url(#m11)"/>
+<rect x="480" y="30" width="170" height="52" rx="6" class="box"/><text x="565" y="52" text-anchor="middle">gate --max-regressions</text><text x="565" y="70" text-anchor="middle" class="t-sm">dev で悪化タスクの数を制限</text>
+<line x1="420" y1="56" x2="478" y2="56" class="ln" marker-end="url(#m11)"/>
+<line x1="190" y1="134" x2="520" y2="84" class="ln-dash" marker-end="url(#m11)"/>
+<rect x="480" y="186" width="170" height="52" rx="6" class="acc"/><text x="565" y="208" text-anchor="middle" class="t-acc">promote</text><text x="565" y="226" text-anchor="middle" class="t-sm">現行と同じ実行の中で比べる</text>
+<line x1="565" y1="82" x2="565" y2="184" class="ln" marker-end="url(#m11)"/>
+<line x1="190" y1="212" x2="478" y2="212" class="ln-acc" marker-end="url(#m11)"/>
+<text x="335" y="204" text-anchor="middle" class="t-sm">--split holdout・別の --out</text>
+<rect x="710" y="186" width="170" height="52" rx="6" class="box"/><text x="795" y="208" text-anchor="middle">人が承認 → 段階配布</text><text x="795" y="226" text-anchor="middle" class="t-sm">本人 → パイロット → 全員</text>
+<line x1="650" y1="212" x2="708" y2="212" class="ln" marker-end="url(#m11)"/>
+<text x="335" y="230" text-anchor="middle" class="t-sm">holdout_uses.jsonl が見た回数を数える</text>
+</svg></div>
+<figcaption>改善役が読めるのは train の結果だけにします。holdout は単独で別の <code>--out</code> に実行し、見た回数を台帳に残します。改善役そのものはこのツールに含まれていません。</figcaption>
+</figure>
+<h3>タスクを 3 つに分ける（<code>split</code>・<code>family</code>）</h3>
+<table>
+<tr><th><code>split</code></th><th>使い道</th><th>改善役に見せるか</th></tr>
+<tr><td><code>train</code></td><td>失敗の軌跡を読ませて改善案を作る材料</td><td>見せる（結果フォルダごと）</td></tr>
+<tr><td><code>dev</code></td><td>候補の足切り（<code>gate --max-regressions</code> など）</td><td>合否だけ見せてよい</td></tr>
+<tr><td><code>holdout</code></td><td>昇格の判定（<code>promote</code>）だけに使う</td><td><b>見せない</b>（結果フォルダ・採点スクリプト・タスク定義のどれも）</td></tr>
+</table>
+<ul>
+<li><b>分割はグループ（<code>family</code>）単位</b>：同じ依頼から派生した似たタスクには同じ <code>family</code> を書き、同じ分割に入れます。1 つの <code>family</code> が複数の分割にまたがると <code>validate</code> が警告します。<code>harvest</code> の下書きは 1 件ずつ別の family になるので、同じ種類の依頼から作ったものは書き直してください。holdout が 20 件未満のときも警告します（区間と検定がほぼ判定不能になるため）。</li>
+<li><b>holdout は単独で実行</b>：<code>run --split holdout</code> で、holdout だけを別の <code>--out</code> に実行します。holdout と他のタスクを 1 回の実行に混ぜると <code>run</code>・<code>plan</code> は止まります。</li>
+<li><b>holdout はキャッシュを使わない</b>：holdout のタスクを含む実行は、候補も現行も毎回実際に実行し、キャッシュに書きもしません（<code>--no-cache</code> の指定は不要）。</li>
+<li><b>holdout を見た回数を数える</b>：holdout のタスクを含む実行は、開始時に <code>&lt;--out&gt;/holdout_uses.jsonl</code> に「時刻・実行 ID・holdout のタスク id と中身のハッシュ・プロファイル id と配布物のハッシュ（id を除いたもの）・配布物なしかどうか」だけを 1 行追記します（中断しても見たことは残ります）。同じ holdout で候補をたくさん試すほど偶然の勝ちが出やすくなるので、<code>promote</code> はここから評価済みの候補の数 m を数えて補正します。m が大きくなったら（目安 10）、新しい holdout を作り直してください。</li>
+</ul>
+<h3>昇格判定（promote）</h3>
+<pre><code>python -m harness_eval run --tasks my-tasks --split holdout --profiles prof/current.yaml prof/candidate.yaml \
+    --trials 3 --out /Users/Shared/harness-eval-holdout
+python -m harness_eval promote --run /Users/Shared/harness-eval-holdout/&lt;実行ID&gt; \
+    --candidate candidate --incumbent current --max-regressions 0</code></pre>
+<p>リリース判定（<code>gate</code>）が「前回より悪化していないか」（非劣性）を見るのに対し、<code>promote</code> は同じ実行の中の候補と現行を比べて「良くなったと言えるか」（優越性）を見ます。指標は既定で pass@1（<code>--metric</code>）。現行が配布物なしなら、Δ と同じく配布物がないと通らない判定を両側とも除いて比べます。判定は上の行から順に決まります。</p>
+<table>
+<tr><th>順</th><th>条件</th><th>判定</th><th>終了コード</th></tr>
+<tr><td class="n">1</td><td>定義の誤り・オプションの値の誤り、結果のフォルダがない</td><td>判定できない</td><td class="n">2</td></tr>
+<tr><td class="n">2</td><td>プロファイルが結果にない、候補と現行が同じ配布物、holdout 以外のタスクを含む、候補に安全違反の失敗分類がある、悪化したタスクが <code>--max-regressions</code>（必須）を超える、差の推定値が 0 以下</td><td class="ng">見送り（reject）</td><td class="n">1</td></tr>
+<tr><td class="n">3</td><td>比較できたタスクが <code>--min-tasks</code>（既定 20）未満、区間の下端 ≤ <code>--min-improvement</code>（既定 0）、改善したタスクが悪化より多くない、符号検定の p &gt; α ÷ m、片側だけ値のあるタスクがある（試行がすべて除外された・結果にない。そこに悪化が隠れうる）、キャッシュの試行を含む</td><td>判定不能（inconclusive）</td><td class="n">3</td></tr>
+<tr><td class="n">4</td><td>それ以外</td><td class="ok">昇格（promote）</td><td class="n">0</td></tr>
+</table>
+<ul>
+<li>m は台帳のうち、この holdout のタスク（id と中身）と 1 つでも重なる実行で評価された、現行以外の配布物の数です（同じ配布物を別の id で評価しても 1 つ。配布物なしの基準は数えない）。この実行が台帳にないとき（別の <code>--out</code> で実行したとき）は注意を出します。</li>
+<li>符号検定はタスクを単位に数えるので、試行回数を増やしても検定の件数は増えません。悪化 0 のとき、改善したタスクが 6 件で p = 0.031（α = 0.05・m = 1 で有意）、3 件では p = 0.25 です。試行回数は各タスクの値を安定させるために使います（3 試行以上を推奨）。</li>
+<li>参考として、現行の<b>雑音幅</b>（同じ配布物の試行をタスクごとに 2 分割した差を、各側 n 試行の比較に換算した 95% 範囲。近似の目安で、各タスク 2 試行以上が必要）、1 試行あたりの入力側トークン（常時読み込まれる指示が増えると増える）、合格あたりコストの差も出します。判定には使いません。</li>
+<li>結果は <code>&lt;実行ID&gt;/promote.json</code> に残ります。<b>昇格は「配布してよい」ではなく「人が確認する価値がある」という意味</b>です。配布は承認のあと、本人の環境 → パイロット利用者の順に広げてください。</li>
+</ul>
+<p>オプションの一覧は <a href="reference.html#commands">リファレンス 7 章</a>、それぞれの仕組みを入れた理由・残る課題は <a href="design.html#loop">設計記録 10 章</a> にあります。</p>
+
+<h2 id="modules">12. コードの構成</h2>
 <figure>
 <div class="scroll"><svg viewBox="0 0 900 290" role="img" aria-label="cli.py が runner・report・harvest を呼び、runner は spec・isolation・adapters・graders・record・metrics を使う">
 <defs><marker id="mm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head"/></marker></defs>
@@ -505,7 +565,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <rect x="520" y="104" width="360" height="34" rx="6" class="box"/><text x="536" y="126">adapters.py</text><text x="630" y="126" class="t-sm">CLI ごとのコマンドと出力パース</text>
 <rect x="520" y="148" width="360" height="34" rx="6" class="box"/><text x="536" y="170">graders.py</text><text x="630" y="170" class="t-sm">採点（6 章）</text>
 <rect x="520" y="192" width="360" height="34" rx="6" class="box"/><text x="536" y="214">record.py</text><text x="630" y="214" class="t-sm">エージェントによらない試行レコード</text>
-<rect x="520" y="236" width="360" height="34" rx="6" class="box"/><text x="536" y="258">metrics.py</text><text x="630" y="258" class="t-sm">指標・Δ・リリース判定（7 章）</text>
+<rect x="520" y="236" width="360" height="34" rx="6" class="box"/><text x="536" y="258">metrics.py</text><text x="630" y="258" class="t-sm">指標・Δ・リリース判定・昇格判定（7・11 章）</text>
 <line x1="380" y1="56" x2="518" y2="33" class="ln" marker-end="url(#mm)"/>
 <line x1="380" y1="60" x2="518" y2="77" class="ln" marker-end="url(#mm)"/>
 <line x1="380" y1="64" x2="518" y2="121" class="ln" marker-end="url(#mm)"/>

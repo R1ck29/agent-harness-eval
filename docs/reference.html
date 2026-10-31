@@ -49,6 +49,8 @@ limits: {max_turns: 15, timeout_s: 300, max_budget_usd: 0.5}
 allow_tools: [Read, Write, Edit, Bash, Skill]
 deny_tools: []
 paired_negative: arithmetic-no-skill            <span class="c"># 対になる「してはいけない」タスク（任意）</span>
+split: dev                          <span class="c"># 自己改善ループ用の分割 train / dev / holdout（任意）</span>
+family: monthly-report              <span class="c"># 似たタスクのグループ（任意。既定はタスク id）</span>
 graders:
   - type: command
     run: '{python} {task_dir}/../checks/check_monthly_totals.py {task_dir}/../fixtures/sales_synthetic/sales.csv'
@@ -72,6 +74,8 @@ graders:
 <tr><td><code>allow_tools</code>・<code>deny_tools</code></td><td>Claude Code の <code>--allowedTools</code>・<code>--disallowedTools</code>。<code>-p</code> では承認が必要なツール（Write・Edit・Bash など）は許可しないと拒否される</td><td>空</td></tr>
 <tr><td><code>paired_negative</code></td><td>スキル・サブエージェントを「使うべきでない」対のタスク id</td><td>なし</td></tr>
 <tr><td><code>description</code>・<code>tags</code></td><td>説明と絞り込み用のタグ</td><td>空</td></tr>
+<tr><td><code>split</code></td><td>自己改善ループでの使い道（<code>train</code>・<code>dev</code>・<code>holdout</code>。<a href="guide.html#loop">図解ガイド 11 章</a>）。<code>run --split</code> で絞り込む</td><td>なし（分割なし）</td></tr>
+<tr><td><code>family</code></td><td>似たタスクのグループ（英数字・_ . -）。分割はグループ単位にする</td><td>タスク id</td></tr>
 </table>
 
 <h2 id="graders">2. グレーダー</h2>
@@ -122,6 +126,8 @@ graders:
 <tr><td><code>allow_tools</code> を空にしない（Claude Code の <code>-p</code> では承認が必要なツールが拒否される）</td><td>警告</td></tr>
 <tr><td>実行される部品（install の <code>run</code>、hooks・MCP を定義しうる設定ファイル、<code>--mcp-config</code> などの追加引数）を含むプロファイルは、社内でレビュー済みの配布物に限る</td><td>警告</td></tr>
 <tr><td>Codex でのスキル検出・hook_used の制約（上記）</td><td>警告</td></tr>
+<tr><td>1 つの <code>family</code> を複数の <code>split</code> にまたがらせない（似たタスクから答えが漏れる）</td><td>警告</td></tr>
+<tr><td>holdout のタスクを 20 件以上にする（少ないと <code>promote</code> の区間と検定がほぼ判定不能）</td><td>警告</td></tr>
 <tr><td>タスクのデータは合成フィクスチャだけを使う（社内データを評価に流さない）</td><td>機械では確かめられない（運用で守る）</td></tr>
 </table>
 <p><code>--selftest</code> を付けると、正解例（<code>references/</code>）があるタスクで、採点スクリプトを含む判定が「正解例で通り、何もしなければ落ちる」かを実際に実行して確かめます。何もしなくても通る判定（入力ファイルの有無など）は注意として表示します（壊してはいけないものを守る判定なら意図どおりです）。</p>
@@ -201,7 +207,8 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <tr><td><code>doctor</code></td><td><code>--profiles</code>（必須）・<code>--live</code>（最小の試行を 1 回ずつ実際に実行）・<code>--out</code>（既定 <code>results</code>）</td></tr>
 <tr><td><code>plan</code>・<code>run</code></td><td>下の表</td></tr>
 <tr><td><code>report</code></td><td><code>&lt;結果フォルダ&gt;</code>・<code>--baseline</code></td></tr>
-<tr><td><code>gate</code></td><td><code>--current</code>・<code>--previous</code>・<code>--margin</code>（すべて必須）・<code>--metric</code>（<code>pass_hat_k</code> 既定／<code>pass_at_1</code>／<code>mean_score</code>）・<code>--min-tasks</code>（既定 10）・<code>--hard-category</code>（複数可。<code>unsafe_access</code> は常に含む）</td></tr>
+<tr><td><code>gate</code></td><td><code>--current</code>・<code>--previous</code>・<code>--margin</code>（すべて必須）・<code>--metric</code>（<code>pass_hat_k</code> 既定／<code>pass_at_1</code>／<code>mean_score</code>）・<code>--min-tasks</code>（既定 10）・<code>--max-regressions</code>（悪化してよいタスクの数。既定は数えない）・<code>--hard-category</code>（複数可。<code>unsafe_access</code> は常に含む）。判定の決まり方は <a href="guide.html#metrics">図解ガイド 7 章</a></td></tr>
+<tr><td><code>promote</code></td><td><code>--run</code>（候補と現行を同じ holdout で実行した結果フォルダ）・<code>--candidate</code>・<code>--incumbent</code>・<code>--max-regressions</code>（すべて必須）・<code>--metric</code>（<code>pass_at_1</code> 既定）・<code>--alpha</code>（既定 0.05）・<code>--min-improvement</code>（既定 0。0 以上 1 未満）・<code>--min-tasks</code>（既定 20）・<code>--comparisons</code>（評価済みの候補の数 m を上書き）・<code>--holdout-log</code>（既定は結果フォルダの親の <code>holdout_uses.jsonl</code>）・<code>--any-split</code>（holdout 以外のタスクでも判定する。試験用）・<code>--hard-category</code>。判定の決まり方は <a href="guide.html#loop">図解ガイド 11 章</a></td></tr>
 <tr><td><code>harvest</code></td><td><code>--out</code>（必須）・<code>--source</code>（既定は <a href="guide.html#harvest">図解ガイド 9 章</a>「読む履歴」の場所）・<code>--limit</code>（既定 10）・<code>--model</code>（既定 <code>sonnet</code>）・<code>--profile</code>（認証を借りる claude_code プロファイル YAML）・<code>--executable</code>・<code>--ledger</code>（既定 <code>results/spend.jsonl</code>。<code>run</code> と同じ台帳に数えるなら <code>&lt;run の --out&gt;/spend.jsonl</code>）・<code>--dry-run</code>（件数だけ数える。費用 0）</td></tr>
 <tr><td><code>calibrate</code></td><td><code>&lt;結果フォルダ&gt;</code>・<code>--labels</code>（必須。9 章）</td></tr>
 </table>
@@ -211,6 +218,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <tr><td><code>--tasks</code>・<code>--profiles</code></td><td>YAML のファイルかディレクトリ（必須）</td><td>—</td></tr>
 <tr><td><code>--trials</code>・<code>--k</code></td><td>1 組あたりの試行回数・pass^k の k</td><td>1・<code>--trials</code> と同じ</td></tr>
 <tr><td><code>--tag</code>・<code>--task</code></td><td>このタグ・id のタスクだけ（複数可）</td><td>すべて</td></tr>
+<tr><td><code>--split</code></td><td>この分割のタスクだけ（<code>train</code>／<code>dev</code>／<code>holdout</code>／<code>none</code>＝分割なし。複数可）。holdout は他のタスクと混ぜられない</td><td>すべて</td></tr>
 <tr><td><code>--baseline</code></td><td>Δ の基準にするプロファイル id</td><td>なし</td></tr>
 <tr><td><code>--jobs</code></td><td>並列数（レート制限に注意）</td><td>1</td></tr>
 <tr><td><code>--seed</code></td><td>プロファイルの実行順を決める乱数の種</td><td>0</td></tr>
@@ -218,7 +226,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <tr><td><code>--judge-agent</code>・<code>--judge-model</code>・<code>--judge-executable</code>・<code>--judge-profile</code></td><td>LLM 判定のエージェント・モデル・実行ファイル・認証を借りるプロファイル</td><td><code>claude_code</code>・<code>haiku</code>・PATH 上の CLI・5 章</td></tr>
 <tr><td><code>--max-cost-usd</code>・<code>--monthly-budget-usd</code></td><td>実行全体・月の費用上限</td><td>なし</td></tr>
 <tr><td><code>--retry-infra</code>・<code>--retry-wait-s</code></td><td>レート制限・過負荷の再試行回数と待ち秒数（回数に比例して延びる）</td><td>1・20</td></tr>
-<tr><td><code>--no-cache</code>・<code>--cache-dir</code></td><td>キャッシュを使わない・置き場所</td><td>使う・<code>.harness-eval-cache</code></td></tr>
+<tr><td><code>--no-cache</code>・<code>--cache-dir</code></td><td>キャッシュを使わない・置き場所（holdout のタスクを含む実行は指定がなくても使わない）</td><td>使う・<code>.harness-eval-cache</code></td></tr>
 <tr><td><code>--keep</code></td><td>作業ディレクトリを残す範囲（<code>all</code>／<code>failed</code>／<code>none</code>。<code>none</code> は生ログも消す）</td><td><code>failed</code></td></tr>
 <tr><td><code>--allow-ancestor-instructions</code></td><td><code>--out</code> の上に指示ファイルがあっても実行する（結果に記録）</td><td>—</td></tr>
 <tr><td><code>--out</code></td><td>結果の出力先（リポジトリやホームの外に置く）</td><td><code>results</code></td></tr>

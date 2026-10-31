@@ -6,7 +6,8 @@ Claude Code と Codex の「ハーネス」（CLAUDE.md / AGENTS.md・Skills・S
 <img src="docs/img/overview.svg" alt="タスク・プロファイル・配布物・フィクスチャを入力に、harness-eval run が 1 試行ずつ隔離して実行・採点・集計し、report.html・summary.json・trials.jsonl を出力する" width="100%">
 
 - 「タスク × プロファイル × 試行回数」を 1 コマンドで実行し、pass@1・pass^k・費用・失敗分類を出す
-- 比較はタスク単位の 95% 区間つき。リリース判定は事前に決めたマージンで 通過／不通過／判定不能
+- 比較はタスク単位の 95% 区間と、改善・悪化したタスクの数（符号検定）つき。リリース判定は事前に決めたマージンで 通過／不通過／判定不能
+- 自己改善ループの関門: タスクを train / dev / holdout に分け、配布物の変更案を holdout で現行と比べて採否を判定する（`promote`）
 - 各試行は一時ホームで隔離し、普段の `~/.claude` / `~/.codex` には触らない
 - 採点はコード判定が基本（独自スクリプトも可）。LLM 判定は補助
 - 依存は Python 3.10+ と PyYAML だけ。各 CLI（`claude -p` / `codex exec --json`）を直接呼ぶ
@@ -15,7 +16,7 @@ Claude Code と Codex の「ハーネス」（CLAUDE.md / AGENTS.md・Skills・S
 
 | 知りたいこと | 文書 |
 |---|---|
-| 仕組み（図解）: 使う順番・実行の流れ・隔離・採点・指標・費用・harvest・出力 | 図解ガイド — [Web](https://r1ck29.github.io/agent-harness-eval/guide.html) / [`docs/guide.html`](docs/guide.html) |
+| 仕組み（図解）: 使う順番・実行の流れ・隔離・採点・指標・費用・harvest・出力・自己改善ループ（`promote`） | 図解ガイド — [Web](https://r1ck29.github.io/agent-harness-eval/guide.html) / [`docs/guide.html`](docs/guide.html) |
 | タスク・プロファイルの書き方、グレーダー、認証、コマンドのオプション | リファレンス — [Web](https://r1ck29.github.io/agent-harness-eval/reference.html) / [`docs/reference.html`](docs/reference.html) |
 | なぜこの作りか、既存ツールとの比較、確かめた CLI の挙動、残るリスク | 設計記録 — [Web](https://r1ck29.github.io/agent-harness-eval/design.html) / [`docs/design.html`](docs/design.html) |
 
@@ -31,7 +32,7 @@ git clone https://github.com/R1ck29/agent-harness-eval.git
 cd agent-harness-eval && pip install -r requirements.txt && python -m harness_eval --version
 ```
 
-- 社内では zip（下の「開発」で作る）を展開し、PyYAML は Artifactory 経由で入れます。
+- 社内では GitHub のリポジトリページの **Code → Download ZIP** で取得した zip を展開し（フォルダ名は `agent-harness-eval-main`。上の `cd` はこのフォルダへ）、PyYAML は Artifactory 経由で入れます。
 - `pip install .` すると `harness-eval` コマンドとしても使えます（以降の `python -m harness_eval` と同じ）。
 - 評価するエージェントの CLI が PATH にあること（`claude --version` / `codex --version`）。PATH にない場合はプロファイルの `executable:` で指定します。
 
@@ -89,7 +90,6 @@ python -m harness_eval harvest --out my-tasks --limit 10 --ledger "$OUT/spend.js
 ```bash
 python -m unittest discover -s tests        # 偽の claude / codex CLI を使うのでトークンは使わない
 uv run pytest --cov                         # pytest・カバレッジ 80% 以上・ruff は pyproject.toml の dev グループ
-mkdir -p dist && git archive --format=zip --prefix=agent-harness-eval/ -o dist/agent-harness-eval.zip HEAD -- . ':!tasks'   # 社内配布用の zip（作業メモの tasks/ は含めない）
 ```
 
 `tests/fake_agents/` は実機で観測した出力形式を再現する偽 CLI、`tests/data/` は実機の出力（Claude Code の stream-json、

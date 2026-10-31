@@ -32,9 +32,9 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <body>
 <main>
 <h1>Agent Harness Eval 設計記録</h1>
-<p class="lead">なぜこの作りなのか（採用・不採用の理由、評価の方法、確かめた事実、残るリスク）の記録です。仕組みは <a href="guide.html">図解ガイド</a>、書き方とオプションは <a href="reference.html">リファレンス</a> にあります。最終更新 2026-10-29（v0.4.0）。</p>
+<p class="lead">なぜこの作りなのか（採用・不採用の理由、評価の方法、確かめた事実、残るリスク）の記録です。仕組みは <a href="guide.html">図解ガイド</a>、書き方とオプションは <a href="reference.html">リファレンス</a> にあります。最終更新 2026-10-31（v0.5.0）。</p>
 <nav>
-<a href="#decision">1. 結論</a><a href="#lineage">2. 統合の経緯</a><a href="#tools">3. 既存ツールとの比較</a><a href="#method">4. 評価の方法</a><a href="#cost">5. 費用と経路</a><a href="#trust">6. 信頼の境界</a><a href="#rejected">7. 採らなかった案</a><a href="#facts">8. 確かめた CLI の挙動</a><a href="#measured">9. 開発時の実測</a><a href="#risks">10. 残るリスク</a><a href="#sources">11. 根拠</a>
+<a href="#decision">1. 結論</a><a href="#lineage">2. 統合の経緯</a><a href="#tools">3. 既存ツールとの比較</a><a href="#method">4. 評価の方法</a><a href="#cost">5. 費用と経路</a><a href="#trust">6. 信頼の境界</a><a href="#rejected">7. 採らなかった案</a><a href="#facts">8. 確かめた CLI の挙動</a><a href="#measured">9. 開発時の実測</a><a href="#loop">10. 自己改善ループとの関係</a><a href="#risks">11. 残るリスク</a><a href="#sources">12. 根拠</a>
 </nav>
 
 <h2 id="decision">1. 結論</h2>
@@ -87,6 +87,7 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <ul>
 <li>単位はタスク。同じタスクの試行は独立ではないので、試行を標本として数えない。タスクごとの値の差を作り、タスクを復元抽出するブートストラップで 95% 区間を出す（乱数の種は固定なので、同じ結果からは何度計算しても同じ区間になる。<code>--seed</code> は実行順だけに効く）。</li>
 <li>リリース判定（<code>gate</code>）は前回と今回の同じプロファイルを比べる。非劣性マージン m は<b>毎回明示</b>する（結果を見てから決めないため、既定値を持たない）。</li>
+<li>変更案の採否（<code>promote</code>）は、同じ実行の中の候補と現行を比べる優越性の判定で、リリース判定とは分ける（§10）。</li>
 </ul>
 <p>判定（通過・不通過・判定不能）の条件と終了コードは <a href="guide.html#metrics">図解ガイド 7 章</a> にあります。</p>
 <p>少ないタスクではパーセンタイル・ブートストラップの区間は実際より狭く出やすい（レビュー時の模擬で、12 タスク・正規分布の差のとき被覆率は 0.90 程度）。最低タスク数はそのための歯止めで、判断に使うなら 20 タスク以上を目安にする。前回より下がったタスクの一覧は判定には使わず、診断として出す。</p>
@@ -136,7 +137,10 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <tr><td>LLM 判定の <code>--system-prompt</code> 差し替え・<code>--json-schema</code></td><td>実測で入力トークンが減らない／費用が同程度で、今の解析に失敗がない</td></tr>
 <tr><td>試行の <code>--exclude-dynamic-system-prompt-sections</code>・<code>--bare</code></td><td>節約の余地が小さい一方、プロンプトの形や CLAUDE.md・ログインの読み込みが変わり、配布物どおりの評価にならない</td></tr>
 <tr><td>生成された採点スクリプトを静的検査して自動実行</td><td>Python の安全性は静的に確かめきれない（許可した標準モジュールだけでもコマンド実行や通信ができる書き方が見つかった）</td></tr>
-<tr><td>提供元ゲートウェイでの強制停止・封印した holdout・egress の強制と持ち出し攻撃のテスト（旧評価基盤 の未着手項目）</td><td>社内ゲートウェイ・別の認証情報・sandbox が必要で、この配布形態では実現できない。台帳による上限、架空化したタスク、レビュー済みの配布物だけを評価する運用で代える</td></tr>
+<tr><td>提供元ゲートウェイでの強制停止・別の認証情報で封印した holdout・egress の強制と持ち出し攻撃のテスト（旧評価基盤 の未着手項目）</td><td>社内ゲートウェイ・別の認証情報・sandbox が必要で、この配布形態では実現できない。台帳による上限、架空化したタスク、レビュー済みの配布物だけを評価する運用で代える。holdout の封印は、フォルダの分離（単独で別の <code>--out</code> に実行し、他の分割と混ぜると止める）と holdout 利用台帳（見た回数を数える）で代える（v0.5.0）</td></tr>
+<tr><td><code>promote</code> に「同じ回数の best-of-N」の対照を入れる（v0.5.0 で検討）</td><td>配布物の変更は利用時に 1 依頼 1 回の実行なので、利用時の計算量は候補と現行で同じ。best-of-N は 1 依頼に複数回の実行を使う手法（Harness² のタスクごとの適応や、arXiv:2607.12227 が比べた試験時の手法）を比べるための対照。候補を多数試したことによる偶然の勝ちは、改善に使わない holdout と α / m の補正で扱う。配布物そのものが複数回の実行を使う場合（自己一貫性のスキルなど）は、合格あたりコストで比べる</td></tr>
+<tr><td>改善役（変更案を作るエージェント）を組み込む <code>improve</code>（v0.5.0 で検討）</td><td>研究では効果を決めるのは改善案の作り方より採否の関門だった（§10）。先に関門を固め、改善役は外に置く（2026-10-29 に利用者と決定）。次の版の候補</td></tr>
+<tr><td>昇格した候補を人の確認なしに全員へ配る</td><td>正解のない自己評価で採否を決めると held-out で改善が消える・評価を改竄する例がある（arXiv:2607.12227、Darwin Gödel Machine）。Windows は開発機で試験できない。昇格は「人が確認する価値がある」の意味にし、配布は承認のあと段階的に行う</td></tr>
 <tr><td>plugin eval のケース形式との相互変換</td><td>今は必要としている利用者がいない</td></tr>
 </table>
 
@@ -168,7 +172,48 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <tr><td><code>harvest</code></td><td>合成の依頼 3 件、sonnet で書き換え（2 回の試行で計 7 回の呼び出し）</td><td>3 件とも元の名前・識別子が残らず、haiku（配布物なし）で 3/3 解けた。書き換えは 1 回あたり約 $0.06〜0.15。改善 SQL の書き方を 1 通りに決め打ちする採点スクリプトが出たので、人の確認で「正しいが書き方の違う答え」を落とさないかを見る必要がある</td></tr>
 </table>
 
-<h2 id="risks">10. 残るリスク・未確認</h2>
+<h2 id="loop">10. 自己改善ループとの関係（v0.5.0）</h2>
+<div class="box">
+<p><b>このツールは自己改善ループの「採否を決める関門」を受け持ち、変更案を作る改善役は外に置く。</b>配布先の利用者全体から学んで配布ハーネスが良くなる形を目標にし、v0.5.0 ではその中の評価側の土台を作った。</p>
+<ul>
+<li>計算量をそろえた再評価では、自動のハーネス改善は held-out で平均 +0.0、改善は「タスク固有の近道」だった（arXiv:2607.12227。再評価したのは AHE のみ）。</li>
+<li>改善を報告した研究で効いていたのは関門だった。回帰予算を外すと GRASP は 88.8 → 81.8、開発セットの関門を外すと AutoSaddler は GAIA2 で 62.0 → 50.6。</li>
+<li>評価が改善役から見えると、評価そのものを改竄する（Darwin Gödel Machine）。Meta-Harness は改善役に test の結果を見せない。</li>
+</ul>
+</div>
+<p>使い方と判定の決まり方は <a href="guide.html#loop">図解ガイド 11 章</a> にあります。</p>
+
+<h3>v0.5.0 で加えたもの</h3>
+<table>
+<tr><th>#</th><th>加えたもの</th><th>出どころ</th><th>理由</th></tr>
+<tr><td>1</td><td>タスクの <code>split</code>（train / dev / holdout）と <code>family</code>。<code>run --split</code>。1 つの family が複数の分割にまたがると警告</td><td>AutoSaddler・arXiv:2607.12227（グループ単位の分割）、Meta-Harness</td><td>同じ依頼から派生した似たタスクが分割をまたぐと答えが漏れる</td></tr>
+<tr><td>2</td><td>holdout と他のタスクを 1 回の実行に混ぜると止める。holdout の実行はキャッシュを読まず書かない</td><td>Meta-Harness、Darwin Gödel Machine</td><td>改善役に渡す結果フォルダ・共有のキャッシュに holdout のトランスクリプトを入れない。候補と現行を同じ時点で実行する</td></tr>
+<tr><td>3</td><td>holdout 利用台帳（<code>holdout_uses.jsonl</code>。id とハッシュだけ）</td><td>holdout の使い回しによる過学習、社内の「プロンプトをログに書かない」規則</td><td>holdout を見るたびに偶然の勝ちが出やすくなる。回数を多重比較の補正に使う</td></tr>
+<tr><td>4</td><td>タスク単位の改善・悪化の数と正確な両側符号検定（Δ・<code>gate</code>・<code>promote</code>）</td><td>The Regression Tax（arXiv:2607.22520。回帰が改善の 59% を打ち消した。正確 McNemar）</td><td>区間だけでは、平均が上がって一部のタスクが壊れる変更が見えない</td></tr>
+<tr><td>5</td><td><code>gate --max-regressions</code>（回帰予算）</td><td>GRASP（arXiv:2605.29668）の R(c) ≤ R₀</td><td>リリース判定でも、宣言した件数を超える悪化を止められる（既定は数えず v0.4.0 と同じ）</td></tr>
+<tr><td>6</td><td><code>promote</code>（同じ実行の中で候補と現行を比べる優越性の 3 値判定。回帰予算は必須、有意水準は α ÷ 評価済みの候補の数。評価済みの候補はタスクの重なりで数える）</td><td>GRASP、AutoSaddler、Bonferroni 補正</td><td>リリースゲート（非劣性）とは別に、「採用してよいか」を決める。符号検定は両側なので、悪化の多い候補が有意にならないよう改善が悪化より多いことも求める。片側だけ値のあるタスクがあれば昇格にしない（環境起因の除外はプロファイルごとに偏ることがあり、そこに悪化が隠れる）。holdout を 1 件足し引きしても補正が 1 に戻らないよう、評価済みの候補は完全一致ではなく重なりで数える</td></tr>
+<tr><td>7</td><td>現行の雑音幅（同じ配布物の試行を 2 分割した差の 95% 範囲。参考表示）</td><td>A/A テスト</td><td>同じ配布物どうしでどの程度の差が出るかを並べて見る</td></tr>
+</table>
+
+<h3>配布先全体での自己改善（目標の構成）</h3>
+<table>
+<tr><th>層</th><th>何をするか</th><th>状態</th></tr>
+<tr><td>① 利用者の端末（収集）</td><td>配布ハーネスの hooks と OTEL で、内容を含まない信号を集める（スキル・ツールの失敗、再試行、やり直し、費用、中断など）。プロンプト本文は送らない。実際の依頼の「型」は、各端末で <code>harvest</code> を実行し、架空化したタスクだけを送る案がある</td><td>未実装。方針（利用者、2026-10-31）: 内容を含まない信号と架空化したタスクは、許される範囲でできる限り集める。社内で何が許可されているかは未確認なので、収集は信号の種類ごとに有効・無効を切り替えられる形にし、許可が分かった時点で絞る</td></tr>
+<tr><td>② 中央（配布担当の環境）</td><td>信号から弱い所を特定 → 改善役（<code>claude -p</code>）が train の失敗を読んで候補を作る → このツールで dev（<code>gate --max-regressions</code>）→ holdout（<code>promote</code>）</td><td>関門（split・台帳・符号検定・回帰予算・<code>promote</code>）は v0.5.0 で実装。改善役は未実装</td></tr>
+<tr><td>③ 配布</td><td>昇格した候補を人が確認・承認 → プラグインの新しい版を本人 → エンジニアのパイロット → Windows のコンサルタント → 全員の順に展開。OTEL の指標を前の版と比べ、悪化したら前の版に戻す</td><td>未実装（配布の仕組みは既存のプラグイン配布を使う）</td></tr>
+</table>
+<p>自動にする範囲: 信号の集計、候補の作成、評価、昇格判定、段階配布、悪化時の前の版への切り戻し。人が入るのは全員への配布の前の承認 1 回（推奨。利用者の判断待ち）。</p>
+
+<h3>残タスク（次の版の候補）</h3>
+<ul>
+<li>改善役の実行（<code>improve</code> 相当）: 一時ホームで隔離した <code>claude -p</code> に、train の失敗した試行の軌跡と配布物の差分だけを読ませる。holdout・採点スクリプトのある場所は読ませない（Claude Code は絶対パスで外も読めるため、改善役の作業フォルダを絞り、権限設定の <code>deny</code> で holdout のフォルダの読み取りを拒否する。効くことを実機で確かめてから使う）。候補は作業手順（INV）と業務知識（DOM）に分け（Harness²）、差分の項目として出させる（ACE）。直る見込みのタスクを予測として書かせ、次の回で当たったかを照合する。</li>
+<li>候補の事前検査: train のタスク固有の文字列を含む・採点に関わるファイルを変える・常時読み込まれる指示を増やす候補を、評価の前に落とす。</li>
+<li>スキルは「説明文だけ」でも振る舞いを変える（The Regression Tax）。スキルの候補は「スキルなし／説明文だけ／説明文＋本文」の 3 つのプロファイルで比べる手順を用意する。</li>
+<li>OTEL の信号を中央で集計し、弱い所（失敗の多いスキル・ツール）を改善の対象として出す部分。</li>
+<li>段階配布中の自動比較と切り戻し（OTEL の指標で前の版と比べる）。</li>
+</ul>
+
+<h2 id="risks">11. 残るリスク・未確認</h2>
 <ul>
 <li><b>Windows は未検証</b>（テストは Linux と macOS、Python 3.10〜3.13）。パスは pathlib、タイムアウト時の停止は <code>taskkill /T</code> を使う実装。CLI が npm の <code>claude.cmd</code> だと <code>--settings</code> の JSON などが cmd.exe を経由するので、問題が出たら <code>executable:</code> で実体（<code>.exe</code> や <code>node</code> + スクリプト）を指定する。社内の Windows 端末で <code>doctor --live</code> とスモーク評価を一度通してから展開する。</li>
 <li><b>Codex での実際のエージェント実行は未確認</b>（開発環境から OpenAI API に接続できない）。パーサは実出力（失敗時）とソースのイベント定義から作ったテストデータで検証している。社内では最初に <code>doctor --live</code> を通す。</li>
@@ -177,9 +222,13 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <li><code>harvest</code> の架空化は日本語の固有名詞を機械で判定できない。下書きは人が確認してから使う。</li>
 <li><code>doctor</code> は LLM 判定の経路を見ない（判定の有無は実行時の指定で決まるため）。判定が親の環境で動くときの経路の警告は <code>run</code> が出す。</li>
 <li>MCP のモックサーバーは同梱していない（<code>install</code> で設定ファイルを置き、<code>extra_args</code> で <code>--mcp-config</code> を渡す）。</li>
+<li>holdout の分離はフォルダの分離で、アクセスの禁止ではない。改善役にファイルの読み取りを許すと、絶対パスで holdout の結果フォルダ・タスク定義も読める。改善役を動かすときは holdout の場所を権限の <code>deny</code> で拒否し、別の端末・別のユーザーに置けるならそうする（§10 の残タスク）。</li>
+<li><code>promote</code> の多重比較の補正は、同じ台帳（既定は結果フォルダの親の <code>holdout_uses.jsonl</code>）に記録された分しか数えない。別の <code>--out</code> で同じ holdout を試した分は数えないので、holdout は 1 つの <code>--out</code> で使う。</li>
+<li>v0.4.0 以前の結果を <code>promote --any-split</code> で比べると、現行が配布物なしかどうかが記録にないため、配布物がないと通らない判定を除かずに比べる（候補に有利に出る）。試験用の使い方で、昇格の根拠にはしない。</li>
+<li>実際の CLI での holdout 実行・<code>promote</code> は未実施（偽 CLI の e2e テストだけ）。最初の候補で <code>doctor --live</code> → holdout の実行 → <code>promote</code> を一度通してから使う。</li>
 </ul>
 
-<h2 id="sources">11. 根拠</h2>
+<h2 id="sources">12. 根拠</h2>
 <ul>
 <li>Anthropic: <a href="https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents">Demystifying evals for AI agents</a>（タスク・試行・採点、pass@k と pass^k、判定の較正、試行ごとのクリーンな環境）</li>
 <li>Anthropic: <a href="https://www.anthropic.com/research/statistical-approach-to-model-evals">A statistical approach to model evaluations</a>（タスク単位のクラスタ、paired の差）</li>
@@ -189,6 +238,7 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <li>OpenAI: <a href="https://openai.com/index/why-we-no-longer-evaluate-swe-bench-verified/">Why we no longer evaluate SWE-bench Verified</a>（汚染）、<a href="https://developers.openai.com/blog/eval-skills">Testing Agent Skills Systematically with Evals</a></li>
 <li>OSS: <a href="https://www.promptfoo.dev/docs/guides/test-agent-skills/">Promptfoo</a>、<a href="https://meridianlabs-ai.github.io/inspect_swe/">inspect_swe</a>、<a href="https://docs.harborframework.com/llms.txt">Harbor</a>、<a href="https://github.com/benchflow-ai/benchflow">BenchFlow</a>、<a href="https://github.com/mgechev/skillgrade">skillgrade</a>、<a href="https://pypi.org/project/mdarena/">mdarena</a></li>
 <li>論文: <a href="https://arxiv.org/abs/2602.12670">SkillsBench</a>、<a href="https://arxiv.org/abs/2603.15401">SWE-Skills-Bench</a>、<a href="https://arxiv.org/abs/2605.27922">Harness-Bench</a>、<a href="https://arxiv.org/abs/2406.12045">τ-bench（pass^k）</a></li>
+<li>自己改善ループ（§10）: <a href="https://arxiv.org/html/2607.12227v4">Rethinking the Evaluation of Harness Evolution for Agents（arXiv:2607.12227）</a>、<a href="https://arxiv.org/abs/2605.29668">GRASP（arXiv:2605.29668）</a>、<a href="https://arxiv.org/pdf/2608.23041">AutoSaddler（arXiv:2608.23041）</a>、<a href="https://arxiv.org/pdf/2607.22520">The Regression Tax（arXiv:2607.22520）</a>、<a href="https://arxiv.org/abs/2603.28052">Meta-Harness（arXiv:2603.28052）</a>、<a href="https://arxiv.org/abs/2505.22954">Darwin Gödel Machine（arXiv:2505.22954）</a>、<a href="https://arxiv.org/abs/2610.14224">Harness²（arXiv:2610.14224）</a>、<a href="https://arxiv.org/abs/2510.04618">ACE（arXiv:2510.04618）</a></li>
 <li>実機・ソースで確かめた CLI の挙動は §8 に記録している</li>
 </ul>
 </main>

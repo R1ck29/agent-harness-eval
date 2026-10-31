@@ -56,7 +56,13 @@ DEFAULT_CATEGORY = {
 }
 
 TASK_KEYS = {"id", "description", "targets", "tags", "fixture", "prompt", "limits",
-             "allow_tools", "deny_tools", "graders", "paired_negative"}
+             "allow_tools", "deny_tools", "graders", "paired_negative", "split", "family"}
+# 自己改善ループ用のタスクの分割。train: 改善案を作る材料／dev: 候補の足切り／holdout: 昇格判定だけに使う（改善役に見せない）
+SPLITS = ("train", "dev", "holdout")
+NO_SPLIT = "none"  # run --split none: 分割を付けていないタスク
+# 結果に影響しないので、タスクのハッシュ（キャッシュ・前回との比較）に含めないキー
+TASK_HASH_EXCLUDED = ("description", "tags", "paired_negative", "split", "family")
+MIN_HOLDOUT_TASKS = 20  # これ未満の holdout では promote の区間・検定がほぼ判定不能になる
 LIMIT_KEYS = {"max_turns", "timeout_s", "max_budget_usd"}
 PROFILE_KEYS = {"id", "description", "agent", "model", "executable", "isolate_home",
                 "install", "env", "env_unset", "extra_args", "permission_mode",
@@ -135,6 +141,8 @@ class Task:
     deny_tools: list[str] = field(default_factory=list)
     graders: list[Grader] = field(default_factory=list)
     paired_negative: str | None = None
+    split: str | None = None  # train / dev / holdout（None は分割なし）
+    family: str = ""  # 似たタスクのグループ。分割はグループ単位で行う（既定はタスク id）
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -143,10 +151,11 @@ class Task:
 
     def content_hash(self) -> str:
         """タスク定義 + フィクスチャ + 採点スクリプトの中身から計算するハッシュ（キャッシュ判定用。1 実行内では 1 回だけ計算）。
-        結果に影響しない説明・タグ・paired_negative は含めない（書き換えても再実行しない）。"""
+        結果に影響しない説明・タグ・paired_negative・split・family は含めない（書き換えても再実行しない。
+        分割を付け替えても前回の結果と比べられる）。"""
         if "_hash" in self.__dict__:
             return self.__dict__["_hash"]
-        raw = {k: v for k, v in self.raw.items() if k not in ("description", "tags", "paired_negative")}
+        raw = {k: v for k, v in self.raw.items() if k not in TASK_HASH_EXCLUDED}
         h = hashlib.sha256(json.dumps(raw, sort_keys=True, ensure_ascii=False).encode())
         if self.fixture:
             _hash_tree(h, self.fixture)
@@ -189,11 +198,19 @@ class Profile:
         return self.path.parent
 
     def content_hash(self) -> str:
-        """プロファイル定義 + コピー元ファイル + hash_paths の中身から計算するハッシュ（1 実行内では 1 回だけ計算）。"""
-        if "_hash" in self.__dict__:
-            return self.__dict__["_hash"]
-        # billing（課金の数え方）と説明は結果に影響しないので含めない
-        raw = {k: v for k, v in self.raw.items() if k not in ("billing", "description")}
+        """プロファイル定義 + コピー元ファイル + hash_paths の中身から計算するハッシュ（1 実行内では 1 回だけ計算）。
+        billing（課金の数え方）と説明は結果に影響しないので含めない。id は含める（キャッシュをプロファイルごとに分ける）。"""
+        return self._hash_of("_hash", ("billing", "description"))
+
+    def harness_hash(self) -> str:
+        """配布物としての同一性（content_hash から id も除く）。同じ配布物を別の id で評価しても同じ値になり、
+        holdout 利用台帳で「評価済みの候補」を数えるときと、promote が候補と現行の同一を見分けるときに使う。"""
+        return self._hash_of("_harness_hash", ("billing", "description", "id"))
+
+    def _hash_of(self, slot: str, excluded: tuple[str, ...]) -> str:
+        if slot in self.__dict__:
+            return self.__dict__[slot]
+        raw = {k: v for k, v in self.raw.items() if k not in excluded}
         h = hashlib.sha256(json.dumps(raw, sort_keys=True, ensure_ascii=False).encode())
         srcs = [step["copy"] for step in self.install if "copy" in step] + list(self.hash_paths)
         for s in srcs:
@@ -204,8 +221,8 @@ class Profile:
                 _hash_tree(h, p)
             else:
                 h.update(f"missing:{s}".encode())
-        self.__dict__["_hash"] = h.hexdigest()[:16]
-        return self.__dict__["_hash"]
+        self.__dict__[slot] = h.hexdigest()[:16]
+        return self.__dict__[slot]
 
 
 def _hash_tree(h: Any, p: Path) -> None:
@@ -293,6 +310,12 @@ def load_task(path: Path) -> Task:
         fixture = (path.parent / d["fixture"]).resolve()
         if not fixture.exists():
             raise SpecError(f"{path}: fixture が見つかりません: {fixture}")
+    split = d.get("split")
+    if split is not None and split not in SPLITS:
+        raise SpecError(f"{path}: split は {' / '.join(SPLITS)} のどれか（書かなければ分割なし）")
+    family = str(d.get("family") or d["id"])
+    if not ID_RE.match(family):
+        raise SpecError(f"{path}: family '{family}' は英数字・_ . - のみ")
     graders = d.get("graders") or []
     if not isinstance(graders, list) or not graders:
         raise SpecError(f"{path}: graders は 1 つ以上必要です")
@@ -305,7 +328,7 @@ def load_task(path: Path) -> Task:
         allow_tools=_str_list(path, "allow_tools", d.get("allow_tools")),
         deny_tools=_str_list(path, "deny_tools", d.get("deny_tools")),
         graders=[parse_grader(path, i, g) for i, g in enumerate(graders)],
-        paired_negative=d.get("paired_negative"), raw=d,
+        paired_negative=d.get("paired_negative"), split=split, family=family, raw=d,
     )
 
 
@@ -416,6 +439,7 @@ def lint(tasks: list[Task], profiles: list[Profile]) -> list[str]:
             warns.append(f"{t.id}: Codex は hooks の実行を記録しないため、Codex の試行では hook_used を判定しません（not_run）")
         if "claude_code" in t.targets and "claude_code" in agents and not t.allow_tools:
             warns.append(f"{t.id}: allow_tools が空です。-p モードでは承認が必要なツール（Write/Edit/Bash 等）は拒否されます")
+    warns += _split_warnings(tasks)
     if not any(not p.install for p in profiles):
         warns.append("ハーネスなし（install が空）のベースラインプロファイルがありません。Δ の比較対象になります")
     for p in profiles:
@@ -424,6 +448,34 @@ def lint(tasks: list[Task], profiles: list[Profile]) -> list[str]:
             warns.append(f"{p.id}: 実行される部品 {parts} を含みます。利用者の権限で動き、sandbox はないため、"
                          "社内でレビュー済みの配布物だけを評価してください")
     return warns
+
+
+def _split_warnings(tasks: list[Task]) -> list[str]:
+    warns: list[str] = []
+    by_family: dict[str, set[str]] = {}
+    for t in tasks:
+        if t.split:
+            by_family.setdefault(t.family, set()).add(t.split)
+    for fam, splits in sorted(by_family.items()):
+        if len(splits) > 1:
+            warns.append(f"family '{fam}' が複数の分割 {sorted(splits)} にまたがります。似たタスクから答えが漏れるため、"
+                         "分割はグループ単位にしてください")
+    n_hold = sum(t.split == "holdout" for t in tasks)
+    if 0 < n_hold < MIN_HOLDOUT_TASKS:
+        warns.append(f"holdout のタスクが {n_hold} 件です（{MIN_HOLDOUT_TASKS} 件未満では promote の区間と検定がほぼ判定不能になります）")
+    return warns
+
+
+def split_mixing(tasks: list[Task]) -> str | None:
+    """holdout のタスクと他のタスク（train・dev・分割なし）を 1 回の実行に混ぜていないか。混ぜていれば理由を返す。
+    改善役に渡す結果フォルダに holdout のトランスクリプトが入らないよう、holdout は単独で実行する。"""
+    hold = sorted(t.id for t in tasks if t.split == "holdout")
+    other = sorted(t.id for t in tasks if t.split != "holdout")
+    if hold and other:
+        return (f"holdout のタスク {hold[:5]}{'…' if len(hold) > 5 else ''} と、それ以外のタスク {other[:5]}{'…' if len(other) > 5 else ''} を"
+                "同じ実行に混ぜられません。holdout は --split holdout で単独に、別の --out に実行してください"
+                "（改善役に渡す結果に holdout のトランスクリプトを入れないため）")
+    return None
 
 
 _EXEC_CONFIG = {"settings.json", "settings.local.json", ".mcp.json", "mcp.json", "hooks.json", "config.toml"}

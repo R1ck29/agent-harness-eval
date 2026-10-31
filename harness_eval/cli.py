@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -12,15 +13,15 @@ import yaml
 
 from . import __version__
 from .isolation import ancestor_instructions, missing_inherited, route_variables
-from .metrics import HARD_CATEGORIES, gate
+from .metrics import HARD_CATEGORIES, gate, holdout_comparisons, promote
 from .report import render
-from .runner import RunOptions, Runner, load_run
-from .spec import Grader, SpecError, Task, lint, load_profiles, load_tasks
+from .runner import HOLDOUT_LEDGER, RunOptions, Runner, load_run
+from .spec import MIN_HOLDOUT_TASKS, NO_SPLIT, SPLITS, Grader, SpecError, Task, lint, load_profiles, load_tasks
 
 
 def _opts(a: argparse.Namespace) -> RunOptions:
     return RunOptions(
-        trials=a.trials, k=a.k, tags=a.tag or [], task_ids=a.task or [], jobs=a.jobs, llm=not a.no_llm,
+        trials=a.trials, k=a.k, tags=a.tag or [], task_ids=a.task or [], splits=a.split or [], jobs=a.jobs, llm=not a.no_llm,
         judge_agent=a.judge_agent, judge_model=a.judge_model or None, judge_executable=a.judge_executable,
         max_cost_usd=a.max_cost_usd, monthly_budget_usd=a.monthly_budget_usd,
         retry_infra=a.retry_infra, retry_wait_s=a.retry_wait_s, judge_profile=a.judge_profile, use_cache=not a.no_cache, cache_dir=Path(a.cache_dir), keep=a.keep,
@@ -170,13 +171,16 @@ def cmd_gate(a) -> int:
         raise SpecError("--min-tasks は 2 以上（区間を出すには比較できるタスクが 2 件以上必要）")
     _, cur = load_run(Path(a.current))
     _, prev = load_run(Path(a.previous))
-    r = gate(cur, prev, a.metric, a.margin, a.min_tasks, a.hard_category or ())
+    if a.max_regressions is not None and a.max_regressions < 0:
+        raise SpecError("--max-regressions は 0 以上")
+    r = gate(cur, prev, a.metric, a.margin, a.min_tasks, a.hard_category or (), a.max_regressions)
     label = {"pass": "通過", "fail": "不通過", "inconclusive": "判定不能（データ不足）"}[r["decision"]]
     print(f"ゲート{label}: {a.metric} の前回との差（95% 区間）を非劣性マージン {a.margin:g} で判定")
     for pid, v in r["profiles"].items():
         ci = "—" if v["ci"] is None else f"[{v['ci'][0]:+.3f}, {v['ci'][1]:+.3f}]"
         est = "—" if v["estimate"] is None else f"{v['estimate']:+.3f}"
-        print(f"  {pid}: 差 {est} {ci}（タスク {v['n_tasks']} 件、最低 {a.min_tasks} 件）→ {v['decision']}")
+        print(f"  {pid}: 差 {est} {ci}（タスク {v['n_tasks']} 件、最低 {a.min_tasks} 件。改善 {v['improved']}・悪化 {v['regressed']}、"
+              f"符号検定 p={v['sign_p']:.3f}）→ {v['decision']}")
     for p in r["problems"]:
         print(f"  - 止める理由: {p}")
     if r["regressions"]:
@@ -184,6 +188,86 @@ def cmd_gate(a) -> int:
         for p in r["regressions"]:
             print(f"    - {p}")
     return GATE_EXIT[r["decision"]]
+
+
+PROMOTE_EXIT = {"promote": 0, "reject": 1, "inconclusive": 3}
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    """JSONL の dict の行だけを返す（ないファイルは空）。読めないファイルは止める（空とみなすと数え漏れるため）。"""
+    rows = []
+    if path.is_file():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            raise SpecError(f"{path} を読めません: {e}") from e
+        for line in text.splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    return rows
+
+
+def cmd_promote(a) -> int:
+    """候補（--candidate）を現行（--incumbent）と同じ実行の中で比べ、昇格してよいかを promote（0）/ reject（1）/ inconclusive（3）で返す。"""
+    if not 0 < a.alpha < 1:
+        raise SpecError("--alpha は 0 より大きく 1 未満（例: 0.05）")
+    if a.max_regressions < 0:
+        raise SpecError("--max-regressions は 0 以上")
+    if a.min_tasks < 2:
+        raise SpecError("--min-tasks は 2 以上")
+    if a.comparisons is not None and a.comparisons < 1:
+        raise SpecError("--comparisons は 1 以上")
+    if not 0 <= a.min_improvement < 1:
+        raise SpecError("--min-improvement は 0 以上 1 未満（区間の下端がこれを超えたら改善とみなす）")
+    run_dir = Path(a.run)
+    recs, summary = load_run(run_dir)
+    meta = summary.get("meta", {})
+    notes = []
+    m = a.comparisons
+    if m is None:
+        ledger = Path(a.holdout_log) if a.holdout_log else run_dir.parent / HOLDOUT_LEDGER
+        rows = _read_jsonl(ledger)
+        hold = {t: str(v.get("hash")) for t, v in meta.get("tasks", {}).items() if v.get("split") == "holdout"}
+        inc_meta = meta.get("profiles", {}).get(a.incumbent) or {}
+        m = holdout_comparisons(rows, hold, inc_meta.get("harness_hash") or inc_meta.get("hash"))
+        if not ledger.is_file():
+            notes.append(f"holdout 利用台帳 {ledger} がないため、評価済みの候補の数を 1 とします（--comparisons で指定できます）")
+        elif hold and not any(r.get("run_id") == meta.get("run_id") for r in rows):
+            notes.append(f"この実行（{meta.get('run_id')}）が holdout 利用台帳 {ledger} にありません。別の --out で実行した分は数えていないため、"
+                         "評価済みの候補の数が少なく出ている可能性があります（--holdout-log か --comparisons で指定してください）")
+    r = promote(summary, recs, a.candidate, a.incumbent, a.metric, a.alpha, a.min_improvement, a.max_regressions, a.min_tasks,
+                m, None if a.any_split else "holdout", a.hard_category or ())
+    r["notes"] = notes
+    (run_dir / "promote.json").write_text(json.dumps(r, ensure_ascii=False, indent=2), encoding="utf-8")
+    label = {"promote": "昇格", "reject": "見送り", "inconclusive": "判定不能（データ不足・有意でない）"}[r["decision"]]
+    ci = "—" if r["ci"] is None else f"[{r['ci'][0]:+.3f}, {r['ci'][1]:+.3f}]"
+    est = "—" if r["estimate"] is None else f"{r['estimate']:+.3f}"
+    print(f"昇格判定 {label}: {a.candidate} − {a.incumbent} の {a.metric}{'（配布物がないと通らない判定を除いた値）' if r['comparable_metric'] else ''}")
+    print(f"  差 {est} {ci}（タスク {r['n_tasks']} 件、最低 {a.min_tasks} 件。区間の下端が {a.min_improvement:g} を超えること）")
+    print(f"  改善 {len(r['improved'])}・悪化 {len(r['regressed'])}・同じ {r['tied']}、符号検定 p={r['sign_p']:.4f}"
+          f"（α {a.alpha:g} ÷ 評価済みの候補 {r['comparisons']} = {r['alpha_adjusted']:.4f} 以下で有意）")
+    if r["one_sided_tasks"]:
+        print(f"  片側だけ値のあるタスク: {r['one_sided_tasks'][:5]}（試行がすべて除外された・結果にない。悪化が隠れうるので昇格にはしません）")
+    if any(r["cached_trials"].values()):
+        print(f"  キャッシュの試行: {r['cached_trials']}（別の時点の結果が混ざるため昇格にはしません。holdout は --no-cache 相当で実行し直してください）")
+    nz = r["noise"]
+    if nz["n_tasks"]:
+        print(f"  現行の雑音幅: 同じ配布物の試行を 2 分割した差から換算した 95% 範囲 [{nz['low']:+.3f}, {nz['high']:+.3f}]（{nz['n_tasks']} タスク。目安）")
+    else:
+        print("  現行の雑音幅: 算出できません（各タスク 2 試行以上が必要。--trials 3 以上を推奨）")
+    tk = r["input_tokens_per_trial"]
+    if tk["candidate"] is not None and tk["incumbent"] is not None:
+        print(f"  1 試行あたりの入力側トークン: 候補 {tk['candidate']:.0f} ／ 現行 {tk['incumbent']:.0f}（常時読み込まれる指示が増えるとここが増える）")
+    for p in r["problems"]:
+        print(f"  - 見送る理由: {p}")
+    for n in notes:
+        print(f"  注意: {n}")
+    print(f"記録: {run_dir / 'promote.json'}")
+    return PROMOTE_EXIT[r["decision"]]
 
 
 def cmd_doctor(a) -> int:
@@ -308,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--k", type=int, help="pass^k の k（既定: --trials と同じ）")
         sp.add_argument("--tag", action="append", help="このタグを持つタスクだけ（複数可）")
         sp.add_argument("--task", action="append", help="このタスク id だけ（複数可）")
+        sp.add_argument("--split", action="append", choices=[*SPLITS, NO_SPLIT],
+                        help="この分割のタスクだけ（複数可。none は分割なし）。holdout は他と混ぜられない")
         sp.add_argument("--jobs", type=int, default=1, help="並列数（既定 1。レート制限に注意）")
         sp.add_argument("--no-llm", action="store_true", help="LLM 判定を実行しない（スモーク用）")
         sp.add_argument("--judge-agent", default="claude_code", choices=["claude_code", "codex"])
@@ -354,9 +440,30 @@ def main(argv: list[str] | None = None) -> int:
                     help="非劣性マージン: 許容する悪化の大きさ（例 0.05）。結果を見る前に、業務への影響から決めておく")
     sp.add_argument("--min-tasks", type=int, default=10,
                     help="判定に必要な比較できたタスク数（既定 10。少ないと区間が狭く出すぎるため判定不能にする）")
+    sp.add_argument("--max-regressions", type=int,
+                    help="悪化してよいタスクの数（回帰予算）。超えたら不通過。結果を見る前に決める（既定: 数えない）")
     sp.add_argument("--hard-category", action="append",
                     help=f"1 件でもあれば不通過にする失敗分類を追加（複数可。{list(HARD_CATEGORIES)} は常に含む）")
     sp.set_defaults(fn=cmd_gate)
+
+    sp = sub.add_parser("promote", help="候補の配布物を現行と比べた昇格判定（終了コード 0 昇格 / 1 見送り / 3 判定不能）")
+    sp.add_argument("--run", required=True, help="候補と現行を同じ holdout で実行した結果のフォルダ")
+    sp.add_argument("--candidate", required=True, help="候補のプロファイル id")
+    sp.add_argument("--incumbent", required=True, help="現行のプロファイル id")
+    sp.add_argument("--metric", default="pass_at_1", choices=["pass_at_1", "pass_hat_k", "mean_score"])
+    sp.add_argument("--max-regressions", type=int, required=True,
+                    help="悪化してよいタスクの数（回帰予算）。結果を見る前に決める（例 0）")
+    sp.add_argument("--alpha", type=float, default=0.05, help="有意水準（評価済みの候補の数で割って使う。既定 0.05）")
+    sp.add_argument("--min-improvement", type=float, default=0.0, help="区間の下端がこれを超えたら改善とみなす（既定 0）")
+    sp.add_argument("--min-tasks", type=int, default=MIN_HOLDOUT_TASKS,
+                    help=f"判定に必要な比較できたタスク数（既定 {MIN_HOLDOUT_TASKS}）")
+    sp.add_argument("--comparisons", type=int,
+                    help="この holdout で評価済みの候補の数（既定: holdout 利用台帳から数える）")
+    sp.add_argument("--holdout-log", help=f"holdout 利用台帳（既定: 結果フォルダの親の {HOLDOUT_LEDGER}）")
+    sp.add_argument("--any-split", action="store_true", help="holdout 以外のタスクでも判定する（試験用。昇格の根拠にはしない）")
+    sp.add_argument("--hard-category", action="append",
+                    help=f"1 件でもあれば見送る失敗分類を追加（複数可。{list(HARD_CATEGORIES)} は常に含む）")
+    sp.set_defaults(fn=cmd_promote)
     sp = sub.add_parser("doctor", help="環境検証（CLI・認証・配布物の読み込み）")
     sp.add_argument("--profiles", nargs="+", required=True)
     sp.add_argument("--live", action="store_true", help="最小の試行を実際に 1 回ずつ実行する")
