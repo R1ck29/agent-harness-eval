@@ -29,6 +29,117 @@ if log:
                             "marker": os.environ.get("FAKE_MARKER")}) + "\n")
 prompt = sys.stdin.read()  # 本物と同じく -p のプロンプトは標準入力から読む
 fmt = args[args.index("--output-format") + 1]
+
+
+def api_client():
+    """偽の Messages API（harness_eval.mockapi）と通信し、出されたツール呼び出しを実行して結果を返す。
+    本物と同じく --settings の permissions.deny（Read(//絶対パス)）を守る。FAKE_IGNORE_DENY なら守らない（漏れの検出の試験）。"""
+    import fnmatch
+    import urllib.request
+    settings = json.loads(args[args.index("--settings") + 1])
+    denied = []
+    for r in settings.get("permissions", {}).get("deny", []):
+        if r.startswith("Read(//") and r.endswith(")"):
+            p = r[len("Read(/"):-1].replace("\\[", "[").replace("\\]", "]")
+            denied.append(os.path.realpath(p[:-3] if p.endswith("/**") else p))
+
+    def blocked(path):
+        rp = os.path.realpath(path)
+        return not os.environ.get("FAKE_IGNORE_DENY") and any(rp == d or rp.startswith(d + os.sep) for d in denied)
+
+    def files(base):
+        for dp, _, fs in os.walk(base):  # 本物（ripgrep）と同じくリンクはたどらない
+            for f in fs:
+                p = os.path.join(dp, f)
+                if not blocked(p):
+                    yield p
+
+    def tool(name, inp):
+        path = inp.get("file_path") or inp.get("path") or "."
+        if blocked(path):
+            return True, "File is in a directory that is denied by your permission settings."
+        if name == "Read":
+            try:
+                return False, Path(path).read_text(encoding="utf-8")
+            except OSError as e:
+                return True, str(e)
+        if name == "Grep":
+            hits = [f"{p}:{line}" for p in files(path) for line in Path(p).read_text(encoding="utf-8").splitlines() if inp["pattern"] in line]
+            return False, "\n".join(hits) or "No matches found"
+        if name == "Glob":
+            pat = inp["pattern"]
+            hit = [p for p in files(path) if fnmatch.fnmatch(os.path.relpath(p, path), pat)
+                   or (pat.startswith("**/") and fnmatch.fnmatch(os.path.relpath(p, path), pat[3:]))]
+            return False, "\n".join(hit) or "No files found"
+        return True, f"unknown tool {name}"
+
+    tools = args[args.index("--tools") + 1].split(",")
+    if "--json-schema" in args:
+        tools.append("StructuredOutput")
+    mode = args[args.index("--permission-mode") + 1] if "--permission-mode" in args else "auto"
+    out_line = lambda o: print(json.dumps(o, ensure_ascii=False), flush=True)  # noqa: E731
+    out_line({"type": "system", "subtype": "init", "tools": tools, "permissionMode": mode, "claude_code_version": "9.9.9"})
+    messages, structured = [{"role": "user", "content": prompt}], None
+    for _ in range(40):
+        req = urllib.request.Request(os.environ["ANTHROPIC_BASE_URL"] + "/v1/messages",
+                                     data=json.dumps({"stream": False, "tools": [{"name": t} for t in tools], "messages": messages}).encode(),
+                                     headers={"content-type": "application/json"})
+        blocks = json.loads(urllib.request.urlopen(req, timeout=30).read())["content"]
+        messages.append({"role": "assistant", "content": blocks})
+        uses = [b for b in blocks if b["type"] == "tool_use"]
+        if not uses:
+            break
+        results = []
+        for u in uses:
+            if u["name"] == "StructuredOutput":
+                structured = u["input"]
+                err, text = False, "ok"
+            else:
+                err, text = tool(u["name"], u["input"])
+            results.append({"type": "tool_result", "tool_use_id": u["id"], "content": text, "is_error": err})
+        messages.append({"role": "user", "content": results})
+    out_line({"type": "result", "subtype": "success", "is_error": False, "result": "done", "num_turns": len(messages) // 2,
+              "total_cost_usd": 0, "permission_denials": [], "structured_output": structured})
+    sys.exit(0)
+
+
+if os.environ.get("ANTHROPIC_API_KEY") == "sk-ant-harness-eval-mock":
+    api_client()
+
+
+def improver():
+    """improve の改善役。作業フォルダの材料を見て変更項目を返す。FAKE_IMPROVE: overfit（train のタスク id を書く）／
+    bash（管理設定で Bash が有効になった起動を真似る）／ error（失敗）。FAKE_IMPROVE_MANIFEST に見えたファイルと deny を書く。"""
+    mode = os.environ.get("FAKE_IMPROVE", "")
+    tools = args[args.index("--tools") + 1].split(",") + ["StructuredOutput"] + (["Bash"] if mode == "bash" else [])
+    perm = args[args.index("--permission-mode") + 1] if "--permission-mode" in args else "auto"
+    out({"type": "system", "subtype": "init", "tools": tools, "permissionMode": perm, "claude_code_version": "9.9.9"})
+    cwd = Path.cwd()
+    if os.environ.get("FAKE_IMPROVE_MANIFEST"):
+        deny = json.loads(args[args.index("--settings") + 1]).get("permissions", {}).get("deny", [])
+        Path(os.environ["FAKE_IMPROVE_MANIFEST"]).write_text(json.dumps(
+            {"files": sorted(p.relative_to(cwd).as_posix() for p in cwd.rglob("*") if p.is_file()), "deny": deny,
+             "home": os.environ.get("HOME"), "cfg": os.environ.get("CLAUDE_CONFIG_DIR")}, ensure_ascii=False), encoding="utf-8")
+    if mode == "error":
+        out({"type": "result", "subtype": "success", "is_error": True, "result": "Not logged in · Please run /login"})
+        sys.exit(1)
+    failures = sorted(p.name for p in (cwd / "failures").iterdir()) if (cwd / "failures").is_dir() else []
+    claude = (cwd / "harness" / "CLAUDE.md").read_text(encoding="utf-8") if (cwd / "harness" / "CLAUDE.md").exists() else ""
+    line = next((x for x in claude.splitlines() if x.startswith("- ")), None)
+    deltas = []
+    if line:
+        deltas.append({"id": "d1", "kind": "INV", "file": "CLAUDE.md", "op": "replace", "old": line,
+                       "new": line[:max(4, len(line) // 2)], "reason": "短くする", "fixes": failures[:1]})
+    deltas.append({"id": "d2", "kind": "DOM", "file": "skills/table-format/SKILL.md", "op": "add", "old": "",
+                   "new": "---\nname: table-format\ndescription: 集計表を作るときに使う\n---\n\n列見出しは依頼の言葉に合わせる。\n",
+                   "reason": "形式", "fixes": failures + ["no-such-task"]})
+    if mode == "overfit":
+        deltas.append({"id": "d3", "kind": "DOM", "file": "skills/table-format/SKILL.md", "op": "add", "old": "",
+                       "new": f"- {failures[0]} では必ず表にする。", "reason": "", "fixes": failures[:1]})
+    out({"type": "result", "subtype": "success", "is_error": False, "result": "", "num_turns": 5, "total_cost_usd": 0.05,
+         "permission_denials": [], "structured_output": {"deltas": deltas, "notes": "fake"}})
+    sys.exit(0)
+
 cfg = Path(os.environ["CLAUDE_CONFIG_DIR"])
 skills = sorted(p.name for p in (cfg / "skills").iterdir()) if (cfg / "skills").is_dir() else []
 claude_md = (cfg / "CLAUDE.md").read_text(encoding="utf-8") if (cfg / "CLAUDE.md").exists() else ""
@@ -47,6 +158,8 @@ def result(text, cost=0.01, turns=3, **kw):
     out(r)
 
 
+if fmt == "stream-json" and "--json-schema" in args:  # improve の改善役
+    improver()
 if fmt == "json" and "--json-schema" in args:  # harvest の書き換え（構造化出力）
     if os.environ.get("FAKE_JUDGE_FAIL"):  # 未ログイン
         print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "result": "Not logged in · Please run /login"}))
