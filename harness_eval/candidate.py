@@ -66,8 +66,10 @@ def target_problem(rel: str) -> str:
     return ""
 
 
-def _read(f: Path) -> str:
-    with open(f, encoding="utf-8", errors="replace", newline="") as fh:  # 改行（CRLF）をそのまま扱う。UTF-8 以外でも止まらない
+def _read(f: Path, strict: bool = False) -> str:
+    """改行（CRLF）をそのまま読む。検査では UTF-8 以外も読み飛ばさず置き換えて読み、書き換える対象は strict で読む
+    （置き換えた文字のまま書き戻すと元の内容が壊れるので、UTF-8 以外のファイルへの項目は「適用できない」にする）。"""
+    with open(f, encoding="utf-8", errors="strict" if strict else "replace", newline="") as fh:
         return fh.read()
 
 
@@ -84,7 +86,7 @@ def _apply_one(harness: Path, d: dict[str, Any]) -> str:
     f = harness / rel
     if not f.resolve().is_relative_to(harness.resolve()):  # 配布物の中のリンクから外へ書かない
         return f"配布物（harness/）の外を指しています: {rel}"
-    text = _read(f) if f.is_file() else ""
+    text = _read(f, strict=True) if f.is_file() else ""
     if "\r\n" in text:  # 改行が CRLF のファイルは、項目の改行もそろえる
         old, new = (t.replace("\r\n", "\n").replace("\n", "\r\n") for t in (old, new))
     nl = "\r\n" if "\r\n" in text else "\n"

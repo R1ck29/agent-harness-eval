@@ -215,6 +215,12 @@ class ApplyDeltaEdgeTests(unittest.TestCase):
         self.assertFalse(r["applied"])
         self.assertIn("書き込めません", r["why"])
 
+    def test_non_utf8_file_not_rewritten(self):
+        (self.h / "old.md").write_bytes("- 古い規則\n".encode("cp932"))
+        r = self.one(file="old.md", new="- 追加")
+        self.assertFalse(r["applied"])
+        self.assertEqual((self.h / "old.md").read_bytes(), "- 古い規則\n".encode("cp932"))
+
     def test_crlf_file_kept_crlf(self):
         (self.h / "w.md").write_bytes(b"# A\r\n- one\r\n")
         self.assertTrue(self.one(file="w.md", op="replace", old="- one\n", new="- two\n")["applied"])
@@ -517,6 +523,20 @@ class ImproveE2E(unittest.TestCase):
         self.assertEqual(sorted(r2["previous"]["predicted"]), sorted(r["predictions"]))
         self.assertTrue(r2["previous"]["same_harness"])
         self.assertIn("前回の予想", out)
+        # 生成されたプロファイルで既存の関門を通せる: gate（現行と同じ id の dev 用）・holdout での promote（別の id）
+        code, out = run_cli("gate", "--current", str(run2), "--previous", str(run), "--margin", "0.05", "--min-tasks", "2",
+                            "--max-regressions", "0")
+        self.assertIn(code, (0, 3), out)
+        self.assertNotIn("止める理由", out)
+        code, out = run_cli("run", "--tasks", str(self.ex / "tasks"), "--split", "holdout", "--profiles", str(self.thin),
+                            r["profiles"]["holdout"], "--out", str(self.hold), "--no-llm", "--trials", "2")
+        self.assertEqual(code, 0, out)
+        hrun = [d for d in self.hold.iterdir() if d.is_dir()][0]
+        code, out = run_cli("promote", "--run", str(hrun), "--candidate", "candidate", "--incumbent", "claude-thin",
+                            "--max-regressions", "0", "--min-tasks", "2")
+        self.assertIn(code, (0, 1, 3), out)
+        problems = json.loads((hrun / "promote.json").read_text(encoding="utf-8"))["problems"]
+        self.assertFalse(any("同じ配布物" in x or "結果にない" in x for x in problems), problems)  # 候補は現行と別の配布物として比べられる
         # 3 つのスキル比較のプロファイルは同じ実行で動く
         code, out = run_cli("run", "--tasks", str(self.ex / "tasks"), "--split", "train", "--profiles",
                             *[r["skills"]["table-format"][v] for v in ("none", "description", "full")],
