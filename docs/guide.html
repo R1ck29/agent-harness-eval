@@ -592,7 +592,7 @@ python -m harness_eval promote --run "$HOLDOUT/&lt;実行ID&gt;" --candidate can
 <figcaption>作業フォルダは OS の一時フォルダに作り、終わったら消します（依頼文と記録を含むため）。</figcaption>
 </figure>
 <ul>
-<li><b>読めるのは作業フォルダの写しだけ</b>：改善役はツールが Read・Glob・Grep だけで、権限モードを default に固定して起動します（<code>-p</code> の default は作業フォルダの外の読み取りと、すべての書き込みを拒否する）。さらに holdout の <code>--out</code>（<code>--holdout-out</code>）、タスク定義のフォルダとその親、フィクスチャ、train の実行フォルダとその親を権限設定の <code>deny</code> で読めなくします。起動したときの状態（権限モード・使えるツール）が違えば、結果は捨てます。</li>
+<li><b>読めるのは作業フォルダの写しだけ</b>：改善役はツールが Read・Glob・Grep だけで、権限モードを default に固定して起動します（<code>-p</code> の default は作業フォルダの外の読み取りと、すべての書き込みを拒否する）。さらに holdout の <code>--out</code>（<code>--holdout-out</code>）、タスク定義のフォルダとその親、フィクスチャ、train の実行フォルダとその親を権限設定の <code>deny</code> で読めなくします（作業フォルダを含む場所は外す。作業フォルダの外はもともと読めない）。train の試行の記録に holdout の場所・タスク定義のフォルダ・train 以外のタスク id が出ていたら（評価のエージェントが試行中に読んだ可能性がある）、その記録は渡しません。実行のあとでタスクの分割や中身が変わっていたら止めます。起動したときの状態（権限モード・使えるツール）が違えば、結果は捨てます。</li>
 <li><b>起動の前に自己確認</b>：同じ CLI・同じ起動の仕方・同じ書き方の <code>deny</code> で、手元に立てた偽の API（127.0.0.1）にモデルの代わりをさせ、読めてはいけない目印のファイルを絶対パス・リンク・<code>..</code>・Grep・Glob で読ませます。中身や名前が CLI の送信内容に出たら、または確かめられなければ（CLI が偽の API とつながらない・読めるはずの対照まで失敗するなど）、改善役を起動せずに止めます（終了コード 2）。費用はかかりません。</li>
 <li><b>変更項目</b>：作業手順（INV）か業務知識（DOM）かの区別、対象のファイル（配布物の中の Markdown だけ）、操作（末尾に追記・置き換え・削除）、理由、直ると予想するタスクを 1 項目ずつ返させます。置き換え・削除は元の文がちょうど 1 回出るときだけ当て、当てられなかった項目は理由とともに記録します。</li>
 </ul>
@@ -606,9 +606,9 @@ python -m harness_eval promote --run "$HOLDOUT/&lt;実行ID&gt;" --candidate can
 </table>
 <p>見送りの理由には件数と項目 id だけを出し、依頼文の一部は表示しません。通った候補でも、言い換えた近道までは見つけられないので、採否は holdout の <code>promote</code> で決めます。</p>
 <h3>スキルの候補（3 つのプロファイル）</h3>
-<p>スキルは説明文だけでも、呼ばれ方が変わって振る舞いが変わります。そこで足した・変えたスキルごとに、<b>スキルなし／説明文だけ（本文と付属ファイルを外す）／説明文＋本文</b>の 3 つのプロファイル（<code>&lt;候補&gt;/skills/&lt;名前&gt;/</code>）を書き出します。それ以外の配布物は 3 つとも同じです。同じ実行で並べると、「説明文だけ − なし」が説明文の効果、「説明文＋本文 − 説明文だけ」が本文の効果になります。人が書いたスキルも <code>skill-variants</code> で同じ 3 つにできます。</p>
+<p>スキルは説明文だけでも、呼ばれ方が変わって振る舞いが変わります。そこで足した・変えたスキルごとに、<b>スキルなし／説明文だけ（本文と付属ファイルを外す）／説明文＋本文</b>の 3 つのプロファイル（<code>&lt;候補&gt;/skills/&lt;名前&gt;/</code>。<code>run --profiles</code> にこのフォルダを渡す）を書き出します。それ以外の配布物は 3 つとも同じです。同じ実行で並べると、「説明文だけ − なし」が説明文の効果、「説明文＋本文 − 説明文だけ」が本文の効果になります。人が書いたスキルも <code>skill-variants</code> で同じ 3 つにできます。</p>
 <pre><code>python -m harness_eval skill-variants --profile prof/current.yaml --skill monthly-summary --out sv-01
-python -m harness_eval run --tasks my-tasks/tasks --split dev --profiles sv-01/skills --out "$OUT"</code></pre>
+python -m harness_eval run --tasks my-tasks/tasks --split dev --profiles sv-01/skills/monthly-summary --out "$OUT"</code></pre>
 <h3>昇格判定（promote）の決まり方</h3>
 <p>リリース判定（<code>gate</code>）が「前回より悪化していないか」を見るのに対し、<code>promote</code> は同じ実行の中の候補と現行を比べて「良くなったと言えるか」を見ます。指標は既定で pass@1（<code>--metric</code>）。現行が配布物なしなら、Δ と同じく配布物がないと通らない判定を両側とも除いて比べます。判定は上の行から順に決まります。</p>
 <table>

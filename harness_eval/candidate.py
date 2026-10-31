@@ -15,7 +15,7 @@ import yaml
 
 from .harvest import NGRAM, _norm, leaked
 from .isolation import snapshot
-from .spec import Profile, SpecError
+from .spec import ID_RE, Profile, SpecError
 
 KINDS = ("INV", "DOM")  # 作業手順（invariant）／業務知識（domain）。Harness² の分け方
 OPS = ("add", "replace", "remove")
@@ -261,14 +261,19 @@ def frontmatter(text: str) -> str:
 
 def write_skill_variants(harness: Path, skill: str, base: Profile, prefix: str, out: Path) -> dict[str, Path]:
     """スキル 1 つについて「なし／説明文だけ／説明文＋本文」の 3 つの配布物とプロファイルを書き出す（それ以外は harness と同じ）。
-    説明文だけでも、呼ばれ方が変わって振る舞いが変わる（The Regression Tax）ので、本文の効果と分けて測る。"""
+    説明文だけでも、呼ばれ方が変わって振る舞いが変わる（The Regression Tax）ので、本文の効果と分けて測る。
+    プロファイルは out/skills/<スキル>/、配布物は out/skill-trees/<スキル>/ に分ける（配布物の中の YAML がプロファイルとして
+    読み込まれないよう、run --profiles out/skills で 3 つをまとめて渡せるようにする）。"""
+    bad = [i for i in (f"{prefix}-{skill}-{v}" for v in SKILL_VARIANTS) if not ID_RE.match(i)]
+    if bad:
+        raise SpecError(f"プロファイル id に使えない文字を含みます: {bad[0]}（英数字・_・.・- だけ）")
     src = harness / "skills" / skill
     fm = frontmatter((src / "SKILL.md").read_text(encoding="utf-8")) if (src / "SKILL.md").is_file() else ""
     if not fm:
         raise SpecError(f"{src / 'SKILL.md'}: 先頭に --- で囲んだ name・description がありません")
     paths = {}
     for v in SKILL_VARIANTS:
-        tree = out / skill / v
+        tree = out / "skill-trees" / skill / v
         if tree.exists():
             shutil.rmtree(tree)
         shutil.copytree(harness, tree)
@@ -278,6 +283,6 @@ def write_skill_variants(harness: Path, skill: str, base: Profile, prefix: str, 
             (tree / "skills" / skill).mkdir(parents=True)
             (tree / "skills" / skill / "SKILL.md").write_text(fm, encoding="utf-8")
         label = {"none": "なし", "description": "説明文だけ", "full": "説明文＋本文"}[v]
-        paths[v] = write_profile(out / skill / f"{v}.yaml",
-                                 profile_raw(base, f"{prefix}-{skill}-{v}", v, f"スキル {skill} の比較: {label}"))
+        paths[v] = write_profile(out / "skills" / skill / f"{v}.yaml",
+                                 profile_raw(base, f"{prefix}-{skill}-{v}", f"../../skill-trees/{skill}/{v}", f"スキル {skill} の比較: {label}"))
     return paths

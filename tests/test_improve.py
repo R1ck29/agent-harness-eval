@@ -13,9 +13,11 @@ sys.path.insert(0, str(ROOT))
 
 from harness_eval.candidate import (apply_deltas, changed_skills, materialize, prechecks, target_problem,  # noqa: E402
                                     write_skill_variants)
-from harness_eval.mockapi import (_rule_path, deny_rules, probe_verdict, read_isolation_check, special_chars,  # noqa: E402
-                                  unusable_path)
-from harness_eval.spec import SpecError, load_profile  # noqa: E402
+from harness_eval.mockapi import (_rule_path, deny_rules, mock_env, probe_verdict, read_isolation_check,  # noqa: E402
+                                  special_chars, unusable_path)
+from harness_eval.improve import check_predictions, deny_targets  # noqa: E402
+from harness_eval.record import TrialRecord  # noqa: E402
+from harness_eval.spec import SpecError, load_profile, load_profiles, load_task  # noqa: E402
 
 FAKE = ROOT / "tests" / "fake_agents"
 FAKE_CLAUDE = [sys.executable, str(FAKE / "fake_claude.py")]
@@ -329,7 +331,7 @@ class SkillVariantTests(unittest.TestCase):
         prof = make_profile(tmp, extra="inherit_env: [CLAUDE_CODE_OAUTH_TOKEN]\n")
         h = tmp / "cand" / "harness"
         materialize(prof, h)
-        paths = write_skill_variants(h, "monthly", prof, "cand", tmp / "cand" / "skills")
+        paths = write_skill_variants(h, "monthly", prof, "cand", tmp / "cand")
         self.assertEqual(sorted(paths), ["description", "full", "none"])
         loaded = {k: load_profile(v) for k, v in paths.items()}
         self.assertEqual({k: p.id for k, p in loaded.items()},
@@ -354,10 +356,30 @@ class SkillVariantTests(unittest.TestCase):
         prof = make_profile(tmp, extra="env: {HOOKS: '{profile_dir}/bin'}\nexecutable: ['{profile_dir}/bin/wrap.sh']\nhash_paths: [h]\n")
         h = tmp / "cand" / "harness"
         materialize(prof, h)
-        raw = yaml.safe_load(write_skill_variants(h, "monthly", prof, "c", tmp / "cand" / "skills")["full"].read_text(encoding="utf-8"))
+        raw = yaml.safe_load(write_skill_variants(h, "monthly", prof, "c", tmp / "cand")["full"].read_text(encoding="utf-8"))
         base = str(tmp.resolve())
         self.assertEqual((raw["env"]["HOOKS"], raw["executable"]), (base + "/bin", [base + "/bin/wrap.sh"]))
         self.assertNotIn("hash_paths", raw)
+
+    def test_yaml_assets_do_not_become_profiles(self):
+        """スキルに YAML の付属ファイルがあっても、run --profiles <out>/skills で 3 つだけが読み込まれる。"""
+        tmp = Path(tempfile.mkdtemp())
+        prof = make_profile(tmp)
+        write(tmp / "h" / "skills" / "monthly" / "assets" / "cfg.yaml", "k: 1\n")
+        h = tmp / "cand" / "harness"
+        materialize(prof, h)
+        write_skill_variants(h, "monthly", prof, "cand", tmp / "cand")
+        self.assertEqual(sorted(p.id for p in load_profiles([str(tmp / "cand" / "skills")])),
+                         ["cand-monthly-description", "cand-monthly-full", "cand-monthly-none"])
+
+    def test_skill_name_must_make_valid_ids(self):
+        tmp = Path(tempfile.mkdtemp())
+        prof = make_profile(tmp)
+        write(tmp / "h" / "skills" / "月次 集計" / "SKILL.md", SKILL)
+        h = tmp / "cand" / "harness"
+        materialize(prof, h)
+        with self.assertRaisesRegex(SpecError, "id"):
+            write_skill_variants(h, "月次 集計", prof, "cand", tmp / "cand")
 
     def test_changed_skills(self):
         a, b = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
@@ -367,6 +389,43 @@ class SkillVariantTests(unittest.TestCase):
         write(b / "skills" / "edit" / "SKILL.md", SKILL + "2. 確認する\n")
         write(b / "skills" / "new" / "SKILL.md", SKILL)
         self.assertEqual(changed_skills(a, b), ["edit", "new"])
+
+
+class ImproveUnitTests(unittest.TestCase):
+    def test_deny_targets(self):
+        tmp = Path(tempfile.mkdtemp()).resolve()
+        task = load_task(write(tmp / "set" / "tasks" / "a.yaml", "id: a\nprompt: x\ngraders: [{type: regex, pattern: x}]\n"))
+        run = tmp / "res" / "r1"
+        work = tmp / "set" / "tmp" / "work"  # タスクの親（set/）の中にある作業フォルダ
+        out = deny_targets(run, [tmp / "hold"], [task], work)
+        self.assertIn(tmp / "hold", out)
+        self.assertIn(tmp / "set" / "tasks", out)
+        self.assertNotIn(tmp / "set", out)  # 作業フォルダを含む場所は外す（外はもともと読めない）
+        with self.assertRaisesRegex(SpecError, "holdout"):
+            deny_targets(run, [tmp / "set"], [task], work)
+
+    def test_check_predictions(self):
+        def r(t, ok, valid=True):
+            return TrialRecord(run_id="r", task_id=t, profile_id="p", agent="claude_code", trial=0, cache_key="k",
+                               task_hash="h", profile_hash="h", cli_version=None, passed=ok, valid=valid)
+        prev = {"predictions": {"a": ["d1"], "b": ["d2"], "c": ["d1"], "z": ["d3"]}, "candidate": {"harness_hash": "H"}}
+        res = check_predictions(prev, [r("a", True), r("b", False), r("c", True), r("c", False), r("x", True)],
+                                {"profiles": {"p": {"harness_hash": "H"}}}, "p")
+        self.assertEqual((res["fixed"], res["not_fixed"], res["not_run"]), (["a"], ["b", "c"], ["z"]))
+        self.assertAlmostEqual(res["hit_rate"], 1 / 3)
+        self.assertTrue(res["same_harness"])
+        none = check_predictions({"predictions": {}}, [], {"profiles": {"p": {}}}, "p")
+        self.assertFalse(none["same_harness"])  # 前回の候補がない（見送り）ときは同じとみなさない
+        self.assertIsNone(none["hit_rate"])
+
+    def test_mock_env_bypasses_proxies(self):
+        env = mock_env({"HTTPS_PROXY": "http://proxy:8080", "http_proxy": "http://proxy:8080", "CLAUDE_CODE_USE_BEDROCK": "1",
+                        "PATH": "/bin"}, Path("/h"), "http://127.0.0.1:1")
+        self.assertNotIn("HTTPS_PROXY", env)
+        self.assertNotIn("http_proxy", env)
+        self.assertNotIn("CLAUDE_CODE_USE_BEDROCK", env)
+        self.assertIn("127.0.0.1", env["NO_PROXY"])
+        self.assertEqual(env["PATH"], "/bin")
 
 
 def run_cli(*args: str) -> tuple[int, str]:
@@ -493,6 +552,27 @@ class ImproveE2E(unittest.TestCase):
         self.assertIn("train 以外", out)
         code, out = self.improve(run, self.tmp / "c-id", None, "--candidate-id", "claude-thin")
         self.assertEqual(code, 2, out)
+        bad = write(self.tmp / "prev.json", "[1, 2]")
+        self.assertEqual(self.improve(run, self.tmp / "c-prev", None, "--previous", str(bad))[0], 2)
+        self.assertEqual(self.improve(run, self.tmp / "c-prev2", None, "--previous", str(self.tmp / "none.json"))[0], 2)
+        f = self.ex / "tasks" / "csv-summary-format.yaml"  # 実行のあとで分割を変えたタスクは渡さない
+        f.write_text(f.read_text(encoding="utf-8").replace("split: train", "split: holdout"), encoding="utf-8")
+        code, out = self.improve(run, self.tmp / "c-moved")
+        self.assertEqual(code, 2, out)
+        self.assertIn("変わっています", out)
+
+    def test_transcript_mentioning_holdout_is_not_given(self):
+        run = self.train_run(self.thin)
+        logs = sorted(run.glob("trials/csv-summary-format/claude-thin/*/stdout.jsonl"))
+        self.assertTrue(logs)
+        with logs[0].open("a", encoding="utf-8") as f:  # train の試行中に holdout を読んだ記録
+            f.write(json.dumps({"type": "user", "note": f"cat {self.hold}/r1/x"}) + "\n")
+        code, out = self.improve(run, self.tmp / "c-mark")
+        self.assertEqual(code, 0, out)
+        r = json.loads((self.tmp / "c-mark" / "improve.json").read_text(encoding="utf-8"))
+        self.assertEqual(r["skipped_material"], 1)
+        files = json.loads(self.manifest.read_text(encoding="utf-8"))["files"]
+        self.assertFalse(any(f.startswith(f"failures/csv-summary-format/{logs[0].parent.name}/transcript") for f in files))
 
     def test_run_installer_and_nothing_to_improve(self):
         runner = write(self.ex / "profiles" / "claude-run.yaml", self.thin.read_text(encoding="utf-8").replace("id: claude-thin", "id: claude-run")
