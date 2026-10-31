@@ -592,7 +592,7 @@ python -m harness_eval promote --run "$HOLDOUT/&lt;実行ID&gt;" --candidate can
 <figcaption>作業フォルダは OS の一時フォルダに作り、終わったら消します（依頼文と記録を含むため）。</figcaption>
 </figure>
 <ul>
-<li><b>読めるのは作業フォルダの写しだけ</b>：改善役はツールが Read・Glob・Grep だけで、権限モードを default に固定して起動します（<code>-p</code> の default は作業フォルダの外の読み取りと、すべての書き込みを拒否する）。さらに holdout の <code>--out</code>（<code>--holdout-out</code>）、タスク定義のフォルダとその親、フィクスチャ、train の実行フォルダとその親を権限設定の <code>deny</code> で読めなくします（作業フォルダを含む場所は外す。作業フォルダの外はもともと読めない）。train の試行の記録に holdout の場所・タスク定義のフォルダ・train 以外のタスク id が出ていたら（評価のエージェントが試行中に読んだ可能性がある）、その記録は渡しません。実行のあとでタスクの分割や中身が変わっていたら止めます。起動したときの状態（権限モード・使えるツール）が違えば、結果は捨てます。</li>
+<li><b>読めるのは作業フォルダの写しだけ</b>：改善役はツールが Read・Glob・Grep だけで、権限モードを default に固定して起動します（<code>-p</code> の default で読める・書ける範囲は <a href="design.html#facts">設計記録 8 章</a>）。さらに holdout の <code>--out</code>（<code>--holdout-out</code>）、タスク定義のフォルダとその親、フィクスチャ、train の実行フォルダとその親を権限設定の <code>deny</code> で読めなくします（作業フォルダを含む場所は外す。作業フォルダの外はもともと読めない）。train の試行の記録に holdout の場所・タスク定義のフォルダ・train 以外のタスク id が出ていたら（評価のエージェントが試行中に読んだ可能性がある）、その記録は渡しません。実行のあとでタスクの分割や中身が変わっていたら止めます。起動したときの状態（権限モード・使えるツール）が違えば、結果は捨てます。</li>
 <li><b>起動の前に自己確認</b>：同じ CLI・同じ起動の仕方・同じ書き方の <code>deny</code> で、手元に立てた偽の API（127.0.0.1）にモデルの代わりをさせ、読めてはいけない目印のファイルを絶対パス・リンク・<code>..</code>・Grep・Glob で読ませます。中身や名前が CLI の送信内容に出たら、または確かめられなければ（CLI が偽の API とつながらない・読めるはずの対照まで失敗するなど）、改善役を起動せずに止めます（終了コード 2）。費用はかかりません。</li>
 <li><b>変更項目</b>：作業手順（INV）か業務知識（DOM）かの区別、対象のファイル（配布物の中の Markdown だけ）、操作（末尾に追記・置き換え・削除）、理由、直ると予想するタスクを 1 項目ずつ返させます。置き換え・削除は元の文がちょうど 1 回出るときだけ当て、当てられなかった項目は理由とともに記録します。</li>
 </ul>
@@ -600,7 +600,7 @@ python -m harness_eval promote --run "$HOLDOUT/&lt;実行ID&gt;" --candidate can
 <table>
 <tr><th>見送る候補</th><th>見方</th></tr>
 <tr><td>train のタスク固有の文字列を足す</td><td>候補の全文と現行の全文の差に、train の依頼文にある識別子・ファイル名・大文字の名前・4 桁以上の数値、25 文字以上同じ文、タスク id が新しく出る（項目をまたいで組み立てても見つける）</td></tr>
-<tr><td>採点に関わる</td><td>Markdown 以外・配布物の外を変える、採点スクリプトと同じ名前のファイルを変える、採点スクリプトの名前（拡張子なしでも）を書く</td></tr>
+<tr><td>採点に関わる</td><td>Markdown 以外・配布物の外を変える、採点スクリプトと同じ名前のファイルを変える、採点スクリプトの名前（拡張子を除いた名前も、6 文字以上なら）を書く</td></tr>
 <tr><td>常時読み込まれる指示を増やす</td><td>CLAUDE.md・AGENTS.md・rules/、そこから <code>@</code> で読み込むファイル、agents/ の説明の文字数が <code>--max-growth-chars</code>（既定 0）より増える。配布物の外を <code>@</code> で読み込む指示を足す。スキルの説明文はここでは数えず、下の 3 つのプロファイルで比べる</td></tr>
 <tr><td>当てられた項目がない</td><td>—</td></tr>
 </table>
@@ -674,7 +674,7 @@ python -m harness_eval run --tasks my-tasks/tasks --split dev --profiles sv-01/s
 <line x1="380" y1="236" x2="518" y2="126" class="ln-dash" marker-end="url(#mm)"/>
 <line x1="380" y1="240" x2="518" y2="170" class="ln-dash" marker-end="url(#mm)"/>
 </svg></div>
-<figcaption>すべて <code>harness_eval/</code> の中です。点線は report・harvest が使う主な部品です。cli は各コマンドのために spec・isolation・adapters・metrics も直接使い、improve は runner（結果の読み込み）・isolation・harvest（文字列の照合）も使います。</figcaption>
+<figcaption>すべて <code>harness_eval/</code> の中です。点線は report・harvest が使う主な部品です。cli は各コマンドのために spec・isolation・adapters・metrics も直接使い、improve は runner（結果の読み込み）・isolation も使い、candidate は harvest の文字列の照合を使います。</figcaption>
 </figure>
 </main>
 </body>
