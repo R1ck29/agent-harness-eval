@@ -32,7 +32,7 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <body>
 <main>
 <h1>Agent Harness Eval 設計記録</h1>
-<p class="lead">なぜこの作りなのか（採用・不採用の理由、評価の方法、確かめた事実、残るリスク）の記録です。仕組みは <a href="guide.html">図解ガイド</a>、書き方とオプションは <a href="reference.html">リファレンス</a> にあります。最終更新 2026-10-31（v0.5.0）。</p>
+<p class="lead">なぜこの作りなのか（採用・不採用の理由、評価の方法、確かめた事実、残るリスク）の記録です。仕組みは <a href="guide.html">図解ガイド</a>、書き方とオプションは <a href="reference.html">リファレンス</a> にあります。最終更新 2026-10-31（v0.6.0）。</p>
 <nav>
 <a href="#decision">1. 結論</a><a href="#lineage">2. 統合の経緯</a><a href="#tools">3. 既存ツールとの比較</a><a href="#method">4. 評価の方法</a><a href="#cost">5. 費用と経路</a><a href="#trust">6. 信頼の境界</a><a href="#rejected">7. 採らなかった案</a><a href="#facts">8. 確かめた CLI の挙動</a><a href="#measured">9. 開発時の実測</a><a href="#loop">10. 自己改善ループとの関係</a><a href="#risks">11. 残るリスク</a><a href="#sources">12. 根拠</a>
 </nav>
@@ -152,7 +152,11 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <tr><td>生成された採点スクリプトを静的検査して自動実行</td><td>Python の安全性は静的に確かめきれない（許可した標準モジュールだけでもコマンド実行や通信ができる書き方が見つかった）</td></tr>
 <tr><td>提供元ゲートウェイでの強制停止・別の認証情報で封印した holdout・egress の強制と持ち出し攻撃のテスト（旧評価基盤 の未着手項目）</td><td>社内ゲートウェイ・別の認証情報・sandbox が必要で、この配布形態では実現できない。台帳による上限、架空化したタスク、レビュー済みの配布物だけを評価する運用で代える。holdout の封印は、フォルダの分離（holdout 専用の <code>--out</code> に単独で実行し、他の分割と混ぜると止める）と holdout 利用台帳（見た回数を数える）で代える（v0.5.0）</td></tr>
 <tr><td><code>promote</code> に「同じ回数の best-of-N」の対照を入れる（v0.5.0 で検討）</td><td>配布物の変更は利用時に 1 依頼 1 回の実行なので、利用時の計算量は候補と現行で同じ。best-of-N は 1 依頼に複数回の実行を使う手法（Harness² のタスクごとの適応や、arXiv:2607.12227 が比べた試験時の手法）を比べるための対照。候補を多数試したことによる偶然の勝ちは、改善に使わない holdout と α / m の補正で扱う。配布物そのものが複数回の実行を使う場合（自己一貫性のスキルなど）は、合格あたりコストで比べる</td></tr>
-<tr><td>改善役（変更案を作るエージェント）を組み込む <code>improve</code>（v0.5.0 で検討）</td><td>研究では効果を決めるのは改善案の作り方より採否の関門だった（§10）。先に関門を固め、改善役は外に置く（2026-10-29 に利用者と決定）。次の版の候補</td></tr>
+<tr><td>改善役にファイルを直接書かせる（Write・Edit を許す）（v0.6.0 で検討）</td><td>書き込みを許すと、作業フォルダの外や採点に関わるファイルへの書き込みを権限設定だけで防ぐことになる。読み取りだけにして変更項目を構造化出力で返させれば、当てる・検査するのはツール側で、項目ごとに記録も残る</td></tr>
+<tr><td>改善役に Bash を許す</td><td>権限設定の Read の deny は Read・Grep・Glob にしか効かず、<code>cat</code> で迂回できる</td></tr>
+<tr><td>作業フォルダの外を読めない既定の動作だけに頼る</td><td>権限モードを指定しないと 2.1.295 の <code>-p</code> は auto で始まり（§8）、組織の管理設定で読める場所が足されることもある。作業フォルダの制限と deny の 2 段にし、起動ごとに deny が効くかを確かめる</td></tr>
+<tr><td>自己確認に通らないときも、指定すれば改善役を起動できるようにする</td><td>確かめられないまま holdout を読める状態で起動すると、v0.5.0 の分離が意味を失う（利用者の指示: 確かめられなければ止める）</td></tr>
+<tr><td>各利用者の設定（<code>~/.claude/CLAUDE.md</code> など）を利用者ごとに自動で最適化する（2026-10-31 に利用者と決定）</td><td>1 人分のタスクでは holdout を作れず検証できない、端末ごとに評価の費用がかかる、配布物が人ごとに分かれて比べられなくなる。改善は全員に配る配布物に中央でかけ、個人の設定は将来「提案して本人が確認」の形にする（自動では書き換えない）</td></tr>
 <tr><td>昇格した候補を人の確認なしに全員へ配る</td><td>正解のない自己評価で採否を決めると held-out で改善が消える・評価を改竄する例がある（arXiv:2607.12227、Darwin Gödel Machine）。Windows は開発機で試験できない。昇格は「人が確認する価値がある」の意味にし、配布は承認のあと段階的に行う</td></tr>
 <tr><td>plugin eval のケース形式との相互変換</td><td>今は必要としている利用者がいない</td></tr>
 </table>
@@ -173,6 +177,9 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <tr><td>Codex 0.163.0</td><td>OS の一時ディレクトリ配下の <code>CODEX_HOME</code> では補助バイナリの作成を拒否する警告が出る</td><td>試行ディレクトリは <code>--out</code> の下に作る</td></tr>
 <tr><td>Codex 0.163.0</td><td><code>--max-turns</code> に当たるフラグがない</td><td>Codex の試行は <code>timeout_s</code> だけで止まる</td></tr>
 <tr><td>Codex 0.163.0</td><td>一時ホームの hooks は信頼確認がないと実行されず、<code>--json</code> に hook の記録も出ない。<code>--dangerously-bypass-hook-trust</code> を付けると実行され、その旨の通知が <code>error</code> アイテムとして 2 回出る</td><td>常にこのフラグを付け、通知は警告として記録するだけ。Codex の <code>hook_used</code> は not_run</td></tr>
+<tr><td>Claude Code 2.1.295</td><td>実物の CLI を手元の偽の Messages API（127.0.0.1・ダミーのキー）に向け、モデルの代わりに決まったツール呼び出しを出させて、CLI が送り返す結果を見た（費用 0。ログインがなくても権限の判定は CLI の中で行われるので確かめられる）。<code>--settings</code> の <code>permissions.deny</code> に <code>Read(//&lt;絶対パス&gt;/**)</code> を書くと、絶対パスの Read・Grep・Glob、作業フォルダ内のリンク経由、<code>/tmp</code> と <code>/private/tmp</code> の別名、<code>..</code> を含むパス、大文字小文字を変えたパスがすべて止まり、親フォルダからの Grep・Glob は deny した場所を飛ばす。<code>bypassPermissions</code> でも止まる。deny がなければ <code>--add-dir</code> で読める場所は読める。フォルダ名の <code>[ ]</code> はパターン記号として扱われ、<code>\[ \]</code> と打ち消さないと止まらない。<code>( ) { } * ? ! # $ &amp; ' + ; = @ ~</code>・空白・日本語はそのままで止まる。POSIX でフォルダ名の <code>\</code> は打ち消しても止まらない</td><td>改善役の <code>deny</code> の書き方。<code>[ ]</code> は打ち消し、<code>\</code> を含むパスでは改善役を起動しない。起動ごとに同じ方法で自己確認する</td></tr>
+<tr><td>Claude Code 2.1.295</td><td><code>-p</code> で <code>--permission-mode</code> を指定しないと init の <code>permissionMode</code> は <code>auto</code>。<code>default</code> では作業フォルダの外の読み取りと、作業フォルダの中を含むすべての書き込みが拒否される（<code>acceptEdits</code> は作業フォルダの中だけ書ける）</td><td>改善役は <code>default</code> を指定し、init の値も確かめる</td></tr>
+<tr><td>Claude Code 2.1.295</td><td><code>--json-schema</code> を付けると <code>StructuredOutput</code> ツールが加わり、<code>stream-json</code> の result に <code>structured_output</code> と <code>permission_denials</code> が入る</td><td>改善役の出力を読む形（init と result を 1 回の出力から読む）</td></tr>
 <tr><td>Codex 0.163.0（ソース）</td><td><code>history.jsonl</code> は既定で保存、rollout は <code>event_msg</code> の <code>user_message</code>（この環境から API に接続できず履歴が書かれないため、<code>message-history</code>・<code>protocol</code> のソースで確認）</td><td><code>harvest</code> の読み取り</td></tr>
 </table>
 
@@ -186,9 +193,9 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <tr><td><code>harvest</code></td><td>合成の依頼 3 件、sonnet で書き換え（2 回の試行で計 7 回の呼び出し）</td><td>3 件とも元の名前・識別子が残らず、haiku（配布物なし）で 3/3 解けた。書き換えは 1 回あたり約 $0.06〜0.15。改善 SQL の書き方を 1 通りに決め打ちする採点スクリプトが出たので、人の確認で「正しいが書き方の違う答え」を落とさないかを見る必要がある</td></tr>
 </table>
 
-<h2 id="loop">10. 自己改善ループとの関係（v0.5.0）</h2>
+<h2 id="loop">10. 自己改善ループとの関係（v0.5.0・v0.6.0）</h2>
 <div class="box">
-<p><b>このツールは自己改善ループの「採否を決める関門」を受け持ち、変更案を作る改善役は外に置く。</b>配布先の利用者全体から学んで配布ハーネスが良くなる形を目標にし、v0.5.0 ではその中の評価側の土台を作った。</p>
+<p><b>このツールは自己改善ループの「採否を決める関門」を受け持ち、v0.6.0 からは変更案を作る改善役（<code>improve</code>）も持つ。</b>配布先の利用者全体から学んで配布ハーネスが良くなる形を目標にし、v0.5.0 で評価側の土台を、v0.6.0 で改善役を作った。</p>
 <ul>
 <li>計算量をそろえた再評価では、自動のハーネス改善は held-out で平均 +0.0、改善は「タスク固有の近道」だった（arXiv:2607.12227。再評価したのは AHE のみ）。</li>
 <li>改善を報告した研究で効いていたのは関門だった。回帰予算を外すと GRASP は 88.8 → 81.8、開発セットの関門を外すと AutoSaddler は GAIA2 で 62.0 → 50.6。</li>
@@ -209,23 +216,44 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <tr><td>7</td><td>現行の雑音幅（同じ配布物の試行を 2 分割した差の 95% 範囲。参考表示）</td><td>A/A テスト</td><td>同じ配布物どうしでどの程度の差が出るかを並べて見る</td></tr>
 </table>
 
+<h3>v0.6.0 で加えたもの（改善役）</h3>
+<p>v0.5.0 では、研究で効いていたのが改善案の作り方より関門だったことから、先に関門を固めて改善役は外に置いた（2026-10-29）。関門ができたので、利用者の依頼（2026-10-31）で改善役を入れた。改善役で一番危ないのは holdout を見てしまうこと（見れば holdout は改善に使ったデータになり、昇格判定が意味を失う）なので、読み取りの制限を中心に作った。</p>
+<table>
+<tr><th>#</th><th>加えたもの</th><th>出どころ</th><th>理由</th></tr>
+<tr><td>1</td><td>読み取りだけの改善役。材料（train の失敗した試行と現行の配布物）は一時フォルダに写して渡し、元の実行フォルダ・タスク定義・holdout の <code>--out</code> は権限設定の deny で読ませない</td><td>Meta-Harness（改善役に test を見せない）、Darwin Gödel Machine（評価が見えると改竄する）</td><td>写しにすれば元の場所をまるごと deny でき、何を見せたかもはっきりする</td></tr>
+<tr><td>2</td><td>起動ごとの自己確認（偽の API で deny が効くかを確かめ、確かめられなければ止める）</td><td>§8 の実機確認、利用者の指示</td><td>deny の効き方は CLI の版・OS・パスの書き方で変わりうる（<code>[ ]</code> と <code>\</code> は実際に違った）。社内の Windows や将来の版でも、動かすその場で確かめる</td></tr>
+<tr><td>3</td><td>変更項目を作業手順（INV）と業務知識（DOM）に分け、項目ごとに追記・置き換え・削除で返させる</td><td>Harness²（INV / DOM）、ACE（項目ごとの差分）</td><td>まとめて書き直させると、どの変更が効いたか・壊したかが分からず、良い部分まで失われやすい</td></tr>
+<tr><td>4</td><td>直ると予想するタスクを書かせ、次の回で当たったかを照合して改善役にも見せる</td><td>Harness²</td><td>当たらない予想が続くなら、改善役が失敗の原因を読み違えている</td></tr>
+<tr><td>5</td><td>評価の前の事前検査（train 固有の文字列・採点に関わる変更・常時読み込まれる指示の増加）</td><td>arXiv:2607.12227（改善は「タスク固有の近道」だった）、The Regression Tax（指示を足すほど他が壊れる）</td><td>明らかな近道と肥大化は、費用のかかる評価の前に落とす。言い換えた近道は見つけられないので、採否は holdout で決める</td></tr>
+<tr><td>6</td><td>スキルの候補を「なし／説明文だけ／説明文＋本文」の 3 つのプロファイルで比べる（<code>skill-variants</code> でも作れる）</td><td>The Regression Tax（説明文だけでも振る舞いが変わる）</td><td>説明文の効果（呼ばれ方の変化）と本文の効果を分けて見る</td></tr>
+</table>
+<p>改善の対象は 2 層に分けて考える（利用者と決定、2026-10-31）。<b>共有の層</b>は全員に配る配布物で、改善役が複数の利用者から集めた材料をもとに中央で改善し、複数の利用者の架空化したタスクで作った holdout の <code>promote</code> を通ったときだけ配る（1 人にしか効かない変更は配らない）。<b>個人の層</b>は各利用者の <code>~/.claude/CLAUDE.md</code> などで、v0.6.0 では扱わない（将来は提案して本人が確認する形にし、自動では書き換えない。理由は §7）。</p>
+
 <h3>配布先全体での自己改善（目標の構成）</h3>
 <table>
 <tr><th>層</th><th>何をするか</th><th>状態</th></tr>
 <tr><td>① 利用者の端末（収集）</td><td>配布ハーネスの hooks と OTEL で、内容を含まない信号を集める（スキル・ツールの失敗、再試行、やり直し、費用、中断など）。プロンプト本文は送らない。実際の依頼の「型」は、各端末で <code>harvest</code> を実行し、架空化したタスクだけを送る案がある</td><td>未実装。方針（利用者、2026-10-31）: 内容を含まない信号と架空化したタスクは、許される範囲でできる限り集める。社内で何が許可されているかは未確認なので、収集は信号の種類ごとに有効・無効を切り替えられる形にし、許可が分かった時点で絞る</td></tr>
-<tr><td>② 中央（配布担当の環境）</td><td>信号から弱い所を特定 → 改善役（<code>claude -p</code>）が train の失敗を読んで候補を作る → このツールで dev（<code>gate --max-regressions</code>）→ holdout（<code>promote</code>）</td><td>関門（split・台帳・符号検定・回帰予算・<code>promote</code>）は v0.5.0 で実装。改善役は未実装</td></tr>
+<tr><td>② 中央（配布担当の環境）</td><td>信号から弱い所を特定 → 改善役（<code>claude -p</code>）が train の失敗を読んで候補を作る → このツールで dev（<code>gate --max-regressions</code>）→ holdout（<code>promote</code>）</td><td>関門（split・台帳・符号検定・回帰予算・<code>promote</code>）は v0.5.0、改善役（<code>improve</code>）は v0.6.0 で実装。弱い所の特定（信号の集計）は未実装</td></tr>
 <tr><td>③ 配布</td><td>昇格した候補を人が確認・承認 → プラグインの新しい版を本人 → エンジニアのパイロット → Windows のコンサルタント → 全員の順に展開。OTEL の指標を前の版と比べ、悪化したら前の版に戻す</td><td>未実装（配布の仕組みは既存のプラグイン配布を使う）</td></tr>
 </table>
 <p>自動にする範囲: 信号の集計、候補の作成、評価、昇格判定、段階配布、悪化時の前の版への切り戻し。人が入るのは全員への配布の前の承認 1 回（推奨。利用者の判断待ち）。</p>
 
 <h3>残タスク（次の版の候補）</h3>
 <ul>
-<li>改善役の実行（<code>improve</code> 相当）: 一時ホームで隔離した <code>claude -p</code> に、train の失敗した試行の軌跡と配布物の差分だけを読ませる。holdout・採点スクリプトのある場所は読ませない（Claude Code は絶対パスで外も読めるため、改善役の作業フォルダを絞り、権限設定の <code>deny</code> で holdout のフォルダの読み取りを拒否する。効くことを実機で確かめてから使う）。候補は作業手順（INV）と業務知識（DOM）に分け（Harness²）、差分の項目として出させる（ACE）。直る見込みのタスクを予測として書かせ、次の回で当たったかを照合する。</li>
-<li>候補の事前検査: train のタスク固有の文字列を含む・採点に関わるファイルを変える・常時読み込まれる指示を増やす候補を、評価の前に落とす。</li>
-<li>スキルは「説明文だけ」でも振る舞いを変える（The Regression Tax）。スキルの候補は「スキルなし／説明文だけ／説明文＋本文」の 3 つのプロファイルで比べる手順を用意する。</li>
-<li>OTEL の信号を中央で集計し、弱い所（失敗の多いスキル・ツール）を改善の対象として出す部分。</li>
+<li>OTEL の信号を中央で集計し、弱い所（失敗の多いスキル・ツール）を改善の対象として出す部分。利用者から信号を戻す経路は下の調べの段階で、v0.6.0 では作らない。</li>
 <li>段階配布中の自動比較と切り戻し（OTEL の指標で前の版と比べる）。</li>
+<li>個人の層の「提案して本人が確認」の仕組み（上の 2 層）。</li>
 </ul>
+
+<h3>利用者から信号を戻す経路（調べ、2026-10-31。未実装）</h3>
+<p>方針: 内容を含まない報告を利用者が自分で確かめてから送る（黙って送らない）。社内に OTLP の受け口が許されたら、Claude Code 組み込みの OpenTelemetry に切り替える（プロンプト本文は既定で伏せられる。受け口が要る。<code>OTEL_LOG_TOOL_DETAILS=1</code> は Bash のコマンドやファイルのパスも送るので付けない）。社内の Mac からはメールを送れる。Windows の利用者は Outlook（従来版か新しい版かは未確認）で、追加のツールなしに使える手段は次のとおり（Microsoft の文書で確認）。</p>
+<table>
+<tr><th>手段</th><th>使える Outlook</th><th>扱い</th></tr>
+<tr><td>PowerShell の <code>Start-Process</code> で <code>mailto:</code> を開く（宛先・件名・本文の下書き）</td><td>従来版・新しい版</td><td>添付はできない</td></tr>
+<tr><td><code>outlook.exe /c ipm.note /m "宛先?subject=…&amp;body=…"</code>、添付は <code>/a "&lt;ファイル&gt;"</code></td><td>従来版だけ（新しい版のコマンドラインは <code>--reset</code> などだけ）</td><td>添付 1 つの下書き。<code>/m</code> と <code>/a</code> を 1 回で併用できるかは実機で未確認</td></tr>
+<tr><td>PowerShell から COM で自動送信</td><td>従来版だけ（新しい版は COM・VBA なし）</td><td>ウイルス対策の状態が最新と報告されないと「送信」の警告（5 秒待ち）が出うる。黙って送らない方針にも合わない</td></tr>
+<tr><td><code>Send-MailMessage</code></td><td>—</td><td>Microsoft が廃止扱いにしているので使わない</td></tr>
+</table>
 
 <h2 id="risks">11. 残るリスク・未確認</h2>
 <ul>
@@ -236,7 +264,12 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <li><code>harvest</code> の架空化は日本語の固有名詞を機械で判定できない。下書きは人が確認してから使う。</li>
 <li><code>doctor</code> は LLM 判定の経路を見ない（判定の有無は実行時の指定で決まるため）。判定が親の環境で動くときの経路の警告は <code>run</code> が出す。</li>
 <li>MCP のモックサーバーは同梱していない（<code>install</code> で設定ファイルを置き、<code>extra_args</code> で <code>--mcp-config</code> を渡す）。</li>
-<li>holdout の分離はフォルダの分離で、アクセスの禁止ではない。改善役にファイルの読み取りを許すと、絶対パスで holdout の結果フォルダ・タスク定義も読める。改善役を動かすときは holdout の場所を権限の <code>deny</code> で拒否し、別の端末・別のユーザーに置けるならそうする（§10 の残タスク）。</li>
+<li>holdout を読ませない仕組みは改善役（<code>improve</code>）だけのもの。<code>run</code>・<code>promote</code> を操作する人や、自分で用意した別の改善役からは holdout が見える。holdout は別の端末・別のユーザーに置けるならそうする。</li>
+<li>改善役の読み取りの制限は、本物のモデルでの実行をまだ確かめていない（開発機の CLI にログインがなく、手元の偽の API で CLI の権限の判定を確かめた。§8）。社内で最初の <code>improve</code> を動かしたら、improve.json の <code>permission_denials</code> と <code>isolation_check</code> を確かめる。</li>
+<li>Windows での deny の書き方（<code>//C:/…</code> と <code>//c/…</code> の両方を書く）は未確認。効かなければ自己確認が漏れを見つけて <code>improve</code> が止まる（安全側だが、そのままでは改善役を使えない）。組織の管理設定が接続先や権限モードを固定していると、自己確認が偽の API につながらず同じく止まる（プロキシの設定は自己確認のときだけ 127.0.0.1 には使わないようにしている）。</li>
+<li>改善役の作業フォルダ・一時ホーム（認証の複製を含みうる）は、強制終了（SIGKILL など）されると OS の一時フォルダに残る。普段の終了と Ctrl-C では消す。</li>
+<li>POSIX で、読ませない場所のパスに <code>\</code> を含むと deny で止められない（§8）ので、<code>improve</code> は起動しない。フォルダ名を変える。</li>
+<li>事前検査は文字列の照合なので、言い換えた近道や句読点を挟んだ写しは通る。一方で、train の依頼文にある一般的な語（4 桁以上の数値・大文字の名前など）を新しく書いた項目は、近道でなくても見送られることがある。見送りは理由（項目 id）を見てもう一度実行する。採否は holdout で決める。</li>
 <li><code>promote</code> の多重比較の補正は、同じ台帳（既定は結果フォルダの親の <code>holdout_uses.jsonl</code>）に記録された分しか数えない。別の <code>--out</code> で同じ holdout を試した分は数えないので、holdout は 1 つの <code>--out</code> で使う。</li>
 <li>v0.4.0 以前の結果を <code>promote --any-split</code> で比べると、現行が配布物なしかどうかが記録にないため、配布物がないと通らない判定を除かずに比べる（候補に有利に出る）。試験用の使い方で、昇格の根拠にはしない。</li>
 <li>実際の CLI での holdout 実行・<code>promote</code> は未実施（偽 CLI の e2e テストだけ）。最初の候補で <code>doctor --live</code> → holdout の実行 → <code>promote</code> を一度通してから使う。</li>
@@ -253,6 +286,7 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <li>OSS: <a href="https://www.promptfoo.dev/docs/guides/test-agent-skills/">Promptfoo</a>、<a href="https://meridianlabs-ai.github.io/inspect_swe/">inspect_swe</a>、<a href="https://docs.harborframework.com/llms.txt">Harbor</a>、<a href="https://github.com/benchflow-ai/benchflow">BenchFlow</a>、<a href="https://github.com/mgechev/skillgrade">skillgrade</a>、<a href="https://pypi.org/project/mdarena/">mdarena</a></li>
 <li>論文: <a href="https://arxiv.org/abs/2602.12670">SkillsBench</a>、<a href="https://arxiv.org/abs/2603.15401">SWE-Skills-Bench</a>、<a href="https://arxiv.org/abs/2605.27922">Harness-Bench</a>、<a href="https://arxiv.org/abs/2406.12045">τ-bench（pass^k）</a></li>
 <li>自己改善ループ（§10）: <a href="https://arxiv.org/html/2607.12227v4">Rethinking the Evaluation of Harness Evolution for Agents（arXiv:2607.12227）</a>、<a href="https://arxiv.org/abs/2605.29668">GRASP（arXiv:2605.29668）</a>、<a href="https://arxiv.org/pdf/2608.23041">AutoSaddler（arXiv:2608.23041）</a>、<a href="https://arxiv.org/pdf/2607.22520">The Regression Tax（arXiv:2607.22520）</a>、<a href="https://arxiv.org/abs/2603.28052">Meta-Harness（arXiv:2603.28052）</a>、<a href="https://arxiv.org/abs/2505.22954">Darwin Gödel Machine（arXiv:2505.22954）</a>、<a href="https://arxiv.org/abs/2610.14224">Harness²（arXiv:2610.14224）</a>、<a href="https://arxiv.org/abs/2510.04618">ACE（arXiv:2510.04618）</a></li>
+<li>信号を戻す経路（§10）: <a href="https://support.microsoft.com/en-us/office/command-line-switches-for-microsoft-office-products-079164cd-4ef5-4178-b235-441737deb3a6">Command-line switches for Microsoft Office products</a>、<a href="https://learn.microsoft.com/en-us/office/vba/outlook/how-to/security/outlook-object-model-security-warnings">Outlook object model security warnings</a>、<a href="https://support.microsoft.com/en-us/outlook/getstarted/feature-comparison-between-new-outlook-and-classic-outlook">Feature comparison between new Outlook and classic Outlook</a>、<a href="https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/send-mailmessage">Send-MailMessage</a>、<a href="https://code.claude.com/docs/en/monitoring-usage">Claude Code: Monitoring usage（OpenTelemetry）</a></li>
 <li>実機・ソースで確かめた CLI の挙動は §8 に記録している</li>
 </ul>
 </main>

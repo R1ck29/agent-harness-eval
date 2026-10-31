@@ -378,6 +378,71 @@ def cmd_harvest(a) -> int:
     return 0
 
 
+IMPROVE_LABEL = {0: "候補を作りました", 1: "事前検査で見送り", 2: "中止", 3: "改善の材料がありません"}
+
+
+def cmd_improve(a) -> int:
+    """train の失敗から、改善役（読み取りだけの claude -p）に配布物の変更項目を作らせる。0 候補あり / 1 見送り / 2 中止 / 3 材料なし。"""
+    from .adapters import ClaudeAdapter
+    from .improve import ImproveOptions, improve
+    from .runner import append_spend
+    from .spec import ID_RE
+    profile = load_profiles([a.profile])[0]
+    auth = load_profiles([a.auth_profile])[0] if a.auth_profile else profile
+    if auth.agent != "claude_code":
+        raise SpecError("改善役は Claude Code で動かします。--auth-profile に認証を借りる claude_code のプロファイルを指定してください")
+    if not ID_RE.match(a.candidate_id) or a.candidate_id == profile.id:
+        raise SpecError(f"--candidate-id は英数字・_・.・- の id で、現行（{profile.id}）とは別の名前にします")
+    if a.max_growth_chars < 0:
+        raise SpecError("--max-growth-chars は 0 以上")
+    run_dir = Path(a.run)
+    o = ImproveOptions(run_dir=run_dir, profile=profile, tasks=load_tasks(a.tasks), holdout_outs=[Path(h) for h in a.holdout_out],
+                       out=Path(a.out), exe=ClaudeAdapter(auth, a.executable).exe, auth=auth, model=a.model or None,
+                       candidate_id=a.candidate_id, max_growth=a.max_growth_chars,
+                       previous=Path(a.previous) if a.previous else None, max_turns=a.max_turns, timeout_s=a.timeout_s)
+    ledger = Path(a.ledger) if a.ledger else run_dir.parent / "spend.jsonl"
+    run_id = "improve-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    code, r = improve(o, print, lambda usd: append_spend(ledger, usd, run_id, "claude_code", auth.billing))
+    prev = r.get("previous")
+    if prev:
+        rate = "—" if prev["hit_rate"] is None else f"{prev['hit_rate']:.0%}"
+        print(f"前回の予想: 直ったタスク {len(prev['fixed'])}・直らなかった {len(prev['not_fixed'])}（的中率 {rate}）"
+              + ("" if prev["same_harness"] else "。注意: この実行は前回の候補とは別の配布物の結果です"))
+    for d in r.get("deltas", []):
+        state = "適用" if d["applied"] else f"適用できず（{d['why']}）"
+        print(f"  {d['id']} [{d['kind']}] {d['op']} {d['file']}: {state}。直る予想 {d['fixes'] or 'なし'}")
+    for p in r.get("precheck", {}).get("problems", []):
+        print(f"  - 見送る理由: {p}")
+    print(f"改善役: {IMPROVE_LABEL[code]}（費用 {r.get('cost_usd')}、権限で止められた読み取り {r.get('permission_denials', 0)} 回）")
+    if code == 0:
+        print(f"候補: {Path(a.out) / 'harness'}（中身を確かめてから評価してください）")
+        print(f"  dev の足切り（現行と同じ id）: {r['profiles']['dev']}")
+        print(f"  holdout の昇格判定（id: {a.candidate_id}）: {r['profiles']['holdout']}")
+        for s, v in r.get("skills", {}).items():
+            print(f"  スキル {s} の比較（なし／説明文だけ／説明文＋本文）: {', '.join(v.values())}")
+    if Path(a.out, "improve.json").is_file():
+        print(f"記録: {Path(a.out) / 'improve.json'}")
+    return code
+
+
+def cmd_skill_variants(a) -> int:
+    """スキルを「なし／説明文だけ／説明文＋本文」の 3 つのプロファイルにする（同じ実行で比べるため）。"""
+    from .candidate import materialize, write_skill_variants
+    profile = load_profiles([a.profile])[0]
+    out = Path(a.out)
+    if out.exists() and any(out.iterdir()):
+        raise SpecError(f"{out} は空ではありません")
+    harness = out / "harness"
+    materialize(profile, harness)
+    for s in a.skill:
+        if not (harness / "skills" / s / "SKILL.md").is_file():
+            raise SpecError(f"{profile.path} の配布物にスキル {s}（skills/{s}/SKILL.md）がありません")
+        paths = write_skill_variants(harness, s, profile, a.id_prefix or profile.id, out)
+        print(f"スキル {s}: " + "、".join(f"{k} → {v}" for k, v in paths.items()))
+    print(f"次: python -m harness_eval run --tasks <タスク> --profiles {out / 'skills' / a.skill[0]} --out <結果>（3 つを同じ実行で比べる）")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="harness-eval", description="Claude Code / Codex ハーネスの評価")
     ap.add_argument("--version", action="version", version=__version__)
@@ -479,6 +544,29 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--ledger", default="results/spend.jsonl", help="費用台帳（run の --out と同じ場所を推奨）")
     sp.add_argument("--dry-run", action="store_true", help="件数だけ数える（書き換えない・費用 0）")
     sp.set_defaults(fn=cmd_harvest)
+    sp = sub.add_parser("improve", help="train の失敗から改善役に配布物の候補を作らせる（終了コード 0 候補あり / 1 見送り / 2 中止 / 3 材料なし）")
+    sp.add_argument("--run", required=True, help="現行の配布物で train だけを実行した結果のフォルダ（<--out>/<実行ID>）")
+    sp.add_argument("--profile", required=True, help="改善する配布物（現行）のプロファイル YAML。install は {config_dir} への copy だけ")
+    sp.add_argument("--tasks", nargs="+", required=True, help="タスク YAML（依頼文・採点スクリプト名・読ませない場所を知るため。改善役には見せない）")
+    sp.add_argument("--holdout-out", nargs="+", required=True, help="holdout 専用の --out（改善役に読ませない）")
+    sp.add_argument("--out", required=True, help="候補の書き出し先（空のフォルダ）")
+    sp.add_argument("--auth-profile", help="改善役の認証・環境変数を借りる claude_code のプロファイル（既定: --profile）")
+    sp.add_argument("--executable", nargs="+", help="改善役に使う claude の実行ファイル")
+    sp.add_argument("--model", default="sonnet", help="改善役のモデル（既定 sonnet。空文字で CLI 既定）")
+    sp.add_argument("--candidate-id", default="candidate", help="holdout 用プロファイルの id（既定 candidate）")
+    sp.add_argument("--max-growth-chars", type=int, default=0,
+                    help="常時読み込まれる指示を増やしてよい文字数（既定 0。超える候補は評価の前に見送る）")
+    sp.add_argument("--previous", help="前回の improve.json。予想した「直るタスク」がこの実行で直ったかを確かめる")
+    sp.add_argument("--max-turns", type=int, default=40)
+    sp.add_argument("--timeout-s", type=int, default=1800)
+    sp.add_argument("--ledger", help="費用台帳（既定: --run の親の spend.jsonl）")
+    sp.set_defaults(fn=cmd_improve)
+    sp = sub.add_parser("skill-variants", help="スキルを「なし／説明文だけ／説明文＋本文」の 3 つのプロファイルにする")
+    sp.add_argument("--profile", required=True, help="スキルを含む配布物のプロファイル YAML")
+    sp.add_argument("--skill", action="append", required=True, help="比べるスキルの名前（skills/<名前>。複数可）")
+    sp.add_argument("--out", required=True, help="書き出し先（空のフォルダ）")
+    sp.add_argument("--id-prefix", help="プロファイル id の頭（既定: 元のプロファイルの id）")
+    sp.set_defaults(fn=cmd_skill_variants)
     sp = sub.add_parser("calibrate", help="LLM 判定と人手ラベルの一致率")
     sp.add_argument("run")
     sp.add_argument("--labels", required=True)

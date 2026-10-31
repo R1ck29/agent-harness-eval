@@ -81,6 +81,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <tr><td>除外</td><td>レート制限・認証切れなど、環境のせいで終わった試行。失敗に数えない（6 章）</td><td><code>rate_limit</code></td></tr>
 <tr><td>配布物がないと通らない判定</td><td>スキル・サブエージェント・hook を 1 回以上使うことを求める判定。ベースラインは必ず落ちるので、Δ では両側とも外す</td><td><code>skill_used</code>（min 1）</td></tr>
 <tr><td>split</td><td>自己改善ループでのタスクの使い道（train・dev・holdout。11 章）</td><td><code>split: holdout</code></td></tr>
+<tr><td>改善役</td><td>train の失敗を読んで配布物の変更案（候補）を作る、読み取りだけの <code>claude -p</code>（<code>improve</code>。11 章）</td><td>「CLAUDE.md の 1 行を短く置き換える」</td></tr>
 </table>
 
 <h2 id="workflow">2. 使う順番</h2>
@@ -111,7 +112,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <path d="M750,118 C750,146 614,146 614,118" class="ln-dash" marker-end="url(#m2)"/>
 <text x="682" y="156" text-anchor="middle" class="t-sm">変更が入ればスモークに戻る</text>
 </svg></div>
-<figcaption>harvest（9 章）は自分のセッション履歴からタスクの下書きを作る工程で、履歴がなければ同梱の標準タスクを使います。report（レポートの作り直し）と calibrate（LLM 判定と人手ラベルの照合）もエージェントを呼びません。変更のない組み合わせはキャッシュ（8 章）が効くので、スモークを何度回しても実際に呼ばれるのは変えた部分だけです。配布物の変更案を採用するかを決める <code>promote</code> は、11 章の手順で使います。</figcaption>
+<figcaption>harvest（9 章）は自分のセッション履歴からタスクの下書きを作る工程で、履歴がなければ同梱の標準タスクを使います。report（レポートの作り直し）と calibrate（LLM 判定と人手ラベルの照合）もエージェントを呼びません。変更のない組み合わせはキャッシュ（8 章）が効くので、スモークを何度回しても実際に呼ばれるのは変えた部分だけです。配布物の変更案を作る <code>improve</code> と、採用するかを決める <code>promote</code> は、11 章の手順で使います。</figcaption>
 </figure>
 
 <h2 id="run">3. run の流れ</h2>
@@ -249,7 +250,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <ul>
 <li><b>上のフォルダの指示</b>：CLI は作業ディレクトリより上のフォルダにある指示・スキル・ルール・サブエージェント・コマンドも読み込みます（一時ホームでは防げません）。配布物なしの基準にも混ざって比較が壊れるため、<code>--out</code> とその上に <code>CLAUDE.md</code>・<code>CLAUDE.local.md</code>・<code>AGENTS.md</code>・<code>AGENTS.override.md</code>・<code>.mcp.json</code> や <code>.claude/</code>・<code>.codex/</code>・<code>.agents/</code> フォルダがあると、<code>run</code> は止まり、<code>doctor</code> は NG にします。<code>--out</code> はリポジトリやホームの外（例: macOS <code>/Users/Shared/harness-eval</code>、Windows <code>C:\harness-eval</code>）に置いてください。承知の上で実行するなら <code>--allow-ancestor-instructions</code> を付けます（結果とレポートに記録されます）。OS の一時フォルダは Codex が拒否するので使えません。</li>
 <li><b>同梱スキル・組織の管理設定</b>：Claude Code に同梱のスキルや組織の managed settings は読み込まれます。各試行で実際に読み込まれたスキル・プラグイン・MCP を記録し、レポートの「実行環境の記録」と <code>doctor --live</code> で確認できます。</li>
-<li><b>ファイルアクセス</b>：これは「どの設定を読み込むか」の隔離で、ファイルの読み書きを禁止するものではありません（Read や Bash を許可すれば絶対パスで外も読めます）。評価には合成データだけを使います。</li>
+<li><b>ファイルアクセス</b>：これは「どの設定を読み込むか」の隔離で、試行のファイルの読み書きを禁止するものではありません（Read や Bash を許可すれば絶対パスで外も読めます）。評価には合成データだけを使います。読み取りを制限するのは改善役だけです（<a href="#improve">11 章</a>）。</li>
 <li><b>配布物の実行物</b>：hooks・MCP サーバー・install の <code>run</code> は利用者の権限で動き、sandbox はありません。社内でレビュー済みの配布物だけを評価してください（<code>validate</code> が警告します）。</li>
 </ul>
 
@@ -507,14 +508,14 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <p><b>中断（Ctrl-C）</b>：未開始の試行は取り消し、実行中のエージェントは子プロセスごと止めます（トークンを使い続けません）。その実行の集計とレポートは作られませんが、<code>trials.jsonl</code> には完了済みの試行が残ります。完了した試行はキャッシュ済みなので、同じコマンドを再実行すると続きから進みます（中断で止めた試行は <code>interrupted</code> としてキャッシュせず、やり直します）。</p>
 
 <h2 id="loop">11. 自己改善ループでの使い方</h2>
-<p>配布物の変更案（候補）は外の改善役（自分で用意する <code>claude -p</code> のスクリプトなど。このツールには含まれません）が作り、このツールは<b>採用してよいかを決める関門</b>を受け持ちます。同じタスクで改善案を作って同じタスクで採点すると、そのタスクだけに効く近道も「改善」に見えるので、タスクを 3 つに分けて使います。</p>
+<p>配布物の変更案（候補）は改善役（<code>improve</code>）が train の失敗から作り、<code>gate</code>・<code>promote</code> が<b>採用してよいかを決める関門</b>を受け持ちます。同じタスクで改善案を作って同じタスクで採点すると、そのタスクだけに効く近道も「改善」に見えるので、タスクを 3 つに分けて使います。改善するのは全員に配る配布物で、各利用者の <code>~/.claude/CLAUDE.md</code> などは対象にしません。</p>
 <figure>
-<div class="scroll"><svg viewBox="0 0 900 250" role="img" aria-label="train の失敗を改善役が読み候補を作る。候補は dev で回帰予算つきの gate を通り、holdout で現行と同じ実行の中で promote により比べられる。昇格した候補は人が確認してから配布する。holdout は改善役に見せない">
+<div class="scroll"><svg viewBox="0 0 900 250" role="img" aria-label="train の失敗を改善役（improve）が読み候補を作る。候補は dev で回帰予算つきの gate を通り、holdout で現行と同じ実行の中で promote により比べられる。昇格した候補は人が確認してから配布する。holdout は改善役に見せない">
 <defs><marker id="m11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head"/></marker></defs>
 <rect x="20" y="30" width="170" height="52" rx="6" class="box"/><text x="105" y="52" text-anchor="middle" class="t-b">train</text><text x="105" y="70" text-anchor="middle" class="t-sm">失敗の軌跡を改善役に見せる</text>
 <rect x="20" y="108" width="170" height="52" rx="6" class="box"/><text x="105" y="130" text-anchor="middle" class="t-b">dev</text><text x="105" y="148" text-anchor="middle" class="t-sm">候補の足切り（合否だけ）</text>
 <rect x="20" y="186" width="170" height="52" rx="6" class="acc"/><text x="105" y="208" text-anchor="middle" class="t-acc">holdout</text><text x="105" y="226" text-anchor="middle" class="t-sm">昇格判定だけ（非公開）</text>
-<rect x="250" y="30" width="170" height="52" rx="6" class="dec"/><text x="335" y="52" text-anchor="middle">改善役</text><text x="335" y="70" text-anchor="middle" class="t-sm">候補の配布物を作る</text>
+<rect x="250" y="30" width="170" height="52" rx="6" class="box"/><text x="335" y="52" text-anchor="middle">improve（改善役）</text><text x="335" y="70" text-anchor="middle" class="t-sm">候補の配布物を作る</text>
 <line x1="190" y1="56" x2="248" y2="56" class="ln" marker-end="url(#m11)"/>
 <rect x="480" y="30" width="170" height="52" rx="6" class="box"/><text x="565" y="52" text-anchor="middle">gate --max-regressions</text><text x="565" y="70" text-anchor="middle" class="t-sm">dev で悪化タスクの数を制限</text>
 <line x1="420" y1="56" x2="478" y2="56" class="ln" marker-end="url(#m11)"/>
@@ -545,21 +546,69 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <h3>手順</h3>
 <ol>
 <li>タスクに <code>split</code>・<code>family</code> を書き、<code>validate --selftest</code> を通す。</li>
-<li>現行の配布物で train を実行し、その実行のフォルダ（<code>$OUT/&lt;実行ID&gt;</code>）だけを改善役に渡す（<code>run --tasks my-tasks/tasks --split train --profiles prof/current.yaml --out "$OUT"</code>）。</li>
-<li>改善役が候補の配布物を作る（このツールの外）。</li>
-<li><b>dev で足切り</b>：<code>gate</code> は前回と今回の<b>同じプロファイル id</b> を比べるので、候補の配布物を <code>install</code> に書いたプロファイルを現行と同じ id（<code>id: current</code>）で別のフォルダに作り（下の例では <code>prof-next/current.yaml</code>。同じフォルダに置くと id が重複して読み込めない）、現行と候補で dev を 1 回ずつ実行して比べる。dev は 10 タスク以上（<code>--min-tasks</code> の既定）にする。不通過なら 3 に戻り、判定不能なら dev のタスクを増やす。</li>
-<li><b>holdout で昇格判定</b>：今度は候補を別の id のプロファイル（<code>prof/candidate.yaml</code>、<code>id: candidate</code>）にし、現行と 1 回の実行で holdout を実行して <code>promote</code>。<code>--candidate</code>・<code>--incumbent</code> にはプロファイルの id を書きます。</li>
-<li>昇格したら、人が変更の中身を確かめてから配布する。見送り・判定不能なら 3 に戻る。m が 10 前後になったら holdout を作り直す（偶然の勝ちが出やすくなるため）。</li>
+<li>現行の配布物で train を実行する（<code>run --tasks my-tasks/tasks --split train --profiles prof/current.yaml --out "$OUT"</code>）。</li>
+<li><b>改善役で候補を作る</b>：その実行のフォルダ（<code>$OUT/&lt;実行ID&gt;</code>）を <code>improve</code> に渡す（下の「改善役の仕組み」）。終了コード 0 なら <code>&lt;候補&gt;/harness/</code> の中身を人が確かめる。1（事前検査で見送り）なら理由を読んでもう一度、3 なら train に失敗がない。</li>
+<li><b>dev で足切り</b>：<code>gate</code> は前回と今回の<b>同じプロファイル id</b> を比べるので、候補は現行と同じ id のプロファイル（<code>improve</code> が書き出す <code>&lt;候補&gt;/dev/current.yaml</code>。同じフォルダに置くと id が重複して読み込めないので別のフォルダにある）で dev を実行し、現行の dev の実行と比べる。dev は 10 タスク以上（<code>--min-tasks</code> の既定）にする。不通過なら 3 に戻り、判定不能なら dev のタスクを増やす。</li>
+<li><b>holdout で昇格判定</b>：今度は候補を別の id のプロファイル（<code>&lt;候補&gt;/holdout/candidate.yaml</code>、<code>id: candidate</code>）にし、現行と 1 回の実行で holdout を実行して <code>promote</code>。新しいスキルを足した候補は、スキルなし・説明文だけ・説明文＋本文の 3 つも同じ実行で比べる（下の「スキルの候補」）。<code>--candidate</code>・<code>--incumbent</code> にはプロファイルの id を書きます。</li>
+<li>昇格したら、人が変更の中身を確かめてから配布する。見送り・判定不能なら 3 に戻る。次の回の <code>improve</code> に <code>--previous &lt;候補&gt;/improve.json</code> を付けると、前回「直る」と予想したタスクが直ったかを確かめ、改善役にも見せる。m が 10 前後になったら holdout を作り直す（偶然の勝ちが出やすくなるため）。</li>
 </ol>
 <pre><code>OUT=/Users/Shared/harness-eval; HOLDOUT=/Users/Shared/harness-eval-holdout   <span class="c"># holdout 専用の --out は分ける（PowerShell は README の注記どおりに読み替え）</span>
+<span class="c"># 2〜3. train を実行し、改善役で候補を作る（候補の書き出し先は空のフォルダ）</span>
+python -m harness_eval run --tasks my-tasks/tasks --split train --profiles prof/current.yaml --out "$OUT"
+python -m harness_eval improve --run "$OUT/&lt;train の実行ID&gt;" --profile prof/current.yaml --tasks my-tasks/tasks \
+    --holdout-out "$HOLDOUT" --out cand-01
 <span class="c"># 4. dev で足切り（候補は現行と同じ id）</span>
 python -m harness_eval run --tasks my-tasks/tasks --split dev --profiles prof/current.yaml --out "$OUT"
-python -m harness_eval run --tasks my-tasks/tasks --split dev --profiles prof-next/current.yaml --out "$OUT"
+python -m harness_eval run --tasks my-tasks/tasks --split dev --profiles cand-01/dev/current.yaml --out "$OUT"
 python -m harness_eval gate --current "$OUT/&lt;候補の実行ID&gt;" --previous "$OUT/&lt;現行の実行ID&gt;" --margin 0.05 --max-regressions 0
 <span class="c"># 5. holdout で昇格判定（候補は別の id。--out は holdout 専用）</span>
-python -m harness_eval run --tasks my-tasks/tasks --split holdout --profiles prof/current.yaml prof/candidate.yaml \
+python -m harness_eval run --tasks my-tasks/tasks --split holdout --profiles prof/current.yaml cand-01/holdout/candidate.yaml \
     --trials 3 --out "$HOLDOUT"
 python -m harness_eval promote --run "$HOLDOUT/&lt;実行ID&gt;" --candidate candidate --incumbent current --max-regressions 0</code></pre>
+<h3 id="improve">改善役の仕組み（improve）</h3>
+<p>改善役は、<b>train の失敗した試行と現行の配布物だけ</b>を読んで変更項目を返す <code>claude -p</code> です。書き込みはさせず、返った変更項目をこのツールが現行の写しに当て、評価の前に検査します。</p>
+<figure>
+<div class="scroll"><svg viewBox="0 0 900 330" role="img" aria-label="improve は train の実行フォルダと現行の配布物から写しを一時の作業フォルダに置く。改善役 claude -p は作業フォルダだけを読み、holdout の --out・タスク定義・実行フォルダは deny で読めない。起動の前に偽の API で deny が効くかを確かめる。返った変更項目を適用し、事前検査を通れば harness・dev・holdout・skills と improve.json を書き出す">
+<defs><marker id="mi" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head"/></marker></defs>
+<rect x="20" y="20" width="200" height="50" rx="6" class="box"/><text x="120" y="41" text-anchor="middle">train の実行フォルダ</text><text x="120" y="58" text-anchor="middle" class="t-sm">失敗した試行の記録</text>
+<rect x="20" y="86" width="200" height="50" rx="6" class="box"/><text x="120" y="107" text-anchor="middle">現行の配布物</text><text x="120" y="124" text-anchor="middle" class="t-sm">プロファイルの install（copy）</text>
+<rect x="20" y="190" width="200" height="50" rx="6" class="box"/><text x="120" y="211" text-anchor="middle">holdout の --out</text><text x="120" y="228" text-anchor="middle" class="t-sm">結果・利用台帳</text>
+<rect x="20" y="256" width="200" height="50" rx="6" class="box"/><text x="120" y="277" text-anchor="middle">タスク定義</text><text x="120" y="294" text-anchor="middle" class="t-sm">依頼・採点スクリプト・正解例</text>
+<rect x="290" y="20" width="230" height="116" rx="8" class="acc"/><text x="405" y="42" text-anchor="middle" class="t-acc">一時の作業フォルダ（写し）</text>
+<text x="306" y="66" class="t-sm">harness/ 現行の配布物</text><text x="306" y="86" class="t-sm">failures/&lt;タスク&gt;/task.md 依頼</text><text x="306" y="106" class="t-sm">failures/&lt;タスク&gt;/&lt;n&gt;/result.json</text><text x="306" y="126" class="t-sm">　…/transcript.jsonl（残っていれば）</text>
+<line x1="220" y1="45" x2="288" y2="60" class="ln" marker-end="url(#mi)"/><line x1="220" y1="111" x2="288" y2="100" class="ln" marker-end="url(#mi)"/>
+<rect x="320" y="200" width="170" height="60" rx="8" class="box"/><text x="405" y="222" text-anchor="middle" class="t-b">改善役 claude -p</text><text x="405" y="240" text-anchor="middle" class="t-sm">Read・Glob・Grep だけ</text><text x="405" y="254" text-anchor="middle" class="t-sm">権限モード default</text>
+<line x1="405" y1="198" x2="405" y2="138" class="ln" marker-end="url(#mi)"/><text x="412" y="172" class="t-sm">読む</text>
+<line x1="318" y1="225" x2="222" y2="215" class="ln-dash"/><line x1="318" y1="240" x2="222" y2="281" class="ln-dash"/>
+<line x1="262" y1="214" x2="278" y2="230" class="x"/><line x1="278" y1="214" x2="262" y2="230" class="x"/><line x1="262" y1="252" x2="278" y2="268" class="x"/><line x1="278" y1="252" x2="262" y2="268" class="x"/>
+<text x="270" y="306" text-anchor="middle" class="t-sm">deny（読めない）</text>
+<rect x="545" y="200" width="150" height="60" rx="8" class="dec"/><text x="620" y="222" text-anchor="middle">変更項目を適用</text><text x="620" y="240" text-anchor="middle" class="t-sm">→ 事前検査</text><text x="620" y="254" text-anchor="middle" class="t-sm">（通らなければ見送り）</text>
+<line x1="490" y1="230" x2="543" y2="230" class="ln" marker-end="url(#mi)"/><text x="517" y="222" text-anchor="middle" class="t-sm">INV・DOM</text>
+<rect x="715" y="160" width="175" height="140" rx="8" class="acc"/><text x="802" y="182" text-anchor="middle" class="t-acc">&lt;--out&gt;/</text>
+<text x="727" y="206" class="t-sm">harness/ 候補</text><text x="727" y="226" class="t-sm">dev/&lt;現行の id&gt;.yaml</text><text x="727" y="246" class="t-sm">holdout/candidate.yaml</text><text x="727" y="266" class="t-sm">skills/&lt;名前&gt;/ 3 つ</text><text x="727" y="286" class="t-sm">improve.json</text>
+<line x1="695" y1="230" x2="713" y2="230" class="ln" marker-end="url(#mi)"/>
+<rect x="560" y="20" width="325" height="70" rx="8" class="dec"/><text x="722" y="42" text-anchor="middle">起動の前に毎回: deny が効くかの自己確認</text><text x="722" y="62" text-anchor="middle" class="t-sm">同じ CLI・同じ起動で、偽の API に読み取りを出させる</text><text x="722" y="80" text-anchor="middle" class="t-sm">漏れた・確かめられない → 改善役を起動しない（費用 0）</text>
+</svg></div>
+<figcaption>作業フォルダは OS の一時フォルダに作り、終わったら消します（依頼文と記録を含むため）。</figcaption>
+</figure>
+<ul>
+<li><b>読めるのは作業フォルダの写しだけ</b>：改善役はツールが Read・Glob・Grep だけで、権限モードを default に固定して起動します（<code>-p</code> の default で読める・書ける範囲は <a href="design.html#facts">設計記録 8 章</a>）。さらに holdout の <code>--out</code>（<code>--holdout-out</code>）、タスク定義のフォルダとその親、フィクスチャ、train の実行フォルダとその親を権限設定の <code>deny</code> で読めなくします（作業フォルダを含む場所は外す。作業フォルダの外はもともと読めない）。train の試行の記録に holdout の場所・タスク定義のフォルダ・train 以外のタスク id が出ていたら（評価のエージェントが試行中に読んだ可能性がある）、その記録は渡しません。実行のあとでタスクの分割や中身が変わっていたら止めます。起動したときの状態（権限モード・使えるツール）が違えば、結果は捨てます。</li>
+<li><b>起動の前に自己確認</b>：同じ CLI・同じ起動の仕方・同じ書き方の <code>deny</code> で、手元に立てた偽の API（127.0.0.1）にモデルの代わりをさせ、読めてはいけない目印のファイルを絶対パス・リンク・<code>..</code>・Grep・Glob で読ませます。中身や名前が CLI の送信内容に出たら、または確かめられなければ（CLI が偽の API とつながらない・読めるはずの対照まで失敗するなど）、改善役を起動せずに止めます（終了コード 2）。費用はかかりません。</li>
+<li><b>変更項目</b>：作業手順（INV）か業務知識（DOM）かの区別、対象のファイル（配布物の中の Markdown だけ）、操作（末尾に追記・置き換え・削除）、理由、直ると予想するタスクを 1 項目ずつ返させます。置き換え・削除は元の文がちょうど 1 回出るときだけ当て、当てられなかった項目は理由とともに記録します。</li>
+</ul>
+<h3>事前検査（評価の前に候補を見送る条件）</h3>
+<table>
+<tr><th>見送る候補</th><th>見方</th></tr>
+<tr><td>train のタスク固有の文字列を足す</td><td>候補の全文と現行の全文の差に、train の依頼文にある識別子・ファイル名・大文字の名前・4 桁以上の数値、25 文字以上同じ文、タスク id が新しく出る（項目をまたいで組み立てても見つける）</td></tr>
+<tr><td>採点に関わる</td><td>Markdown 以外・配布物の外を変える、採点スクリプトと同じ名前のファイルを変える、採点スクリプトの名前（拡張子を除いた名前も、6 文字以上なら）を書く</td></tr>
+<tr><td>常時読み込まれる指示を増やす</td><td>CLAUDE.md・AGENTS.md・rules/、そこから <code>@</code> で読み込むファイル、agents/ の説明の文字数が <code>--max-growth-chars</code>（既定 0）より増える。配布物の外を <code>@</code> で読み込む指示を足す。スキルの説明文はここでは数えず、下の 3 つのプロファイルで比べる</td></tr>
+<tr><td>当てられた項目がない</td><td>—</td></tr>
+</table>
+<p>見送りの理由には件数と項目 id だけを出し、依頼文の一部は表示しません。通った候補でも、言い換えた近道までは見つけられないので、採否は holdout の <code>promote</code> で決めます。</p>
+<h3>スキルの候補（3 つのプロファイル）</h3>
+<p>スキルは説明文だけでも、呼ばれ方が変わって振る舞いが変わります。そこで足した・変えたスキルごとに、<b>スキルなし／説明文だけ（本文と付属ファイルを外す）／説明文＋本文</b>の 3 つのプロファイル（<code>&lt;候補&gt;/skills/&lt;名前&gt;/</code>。<code>run --profiles</code> にこのフォルダを渡す）を書き出します。それ以外の配布物は 3 つとも同じです。同じ実行で並べると、「説明文だけ − なし」が説明文の効果、「説明文＋本文 − 説明文だけ」が本文の効果になります。人が書いたスキルも <code>skill-variants</code> で同じ 3 つにできます。</p>
+<pre><code>python -m harness_eval skill-variants --profile prof/current.yaml --skill monthly-summary --out sv-01
+python -m harness_eval run --tasks my-tasks/tasks --split dev --profiles sv-01/skills/monthly-summary --out "$OUT"</code></pre>
 <h3>昇格判定（promote）の決まり方</h3>
 <p>リリース判定（<code>gate</code>）が「前回より悪化していないか」を見るのに対し、<code>promote</code> は同じ実行の中の候補と現行を比べて「良くなったと言えるか」を見ます。指標は既定で pass@1（<code>--metric</code>）。現行が配布物なしなら、Δ と同じく配布物がないと通らない判定を両側とも除いて比べます。判定は上の行から順に決まります。</p>
 <table>
@@ -589,11 +638,11 @@ python -m harness_eval promote --run "$HOLDOUT/&lt;実行ID&gt;" --candidate can
 <li>参考として、現行の<b>雑音幅</b>（同じ配布物の試行を 2 分割した差から換算した 95% 範囲。各タスク 2 試行以上が必要）、1 試行あたりの入力側トークン（常時読み込まれる指示が増えると増える）、合格あたりコストの差も出します。判定には使いません。</li>
 <li>結果は <code>&lt;実行ID&gt;/promote.json</code> に残ります。<b>昇格は「配布してよい」ではなく「人が確認する価値がある」という意味</b>です。</li>
 </ul>
-<p>オプションの一覧は <a href="reference.html#commands">リファレンス 7 章</a>、それぞれの仕組みを入れた理由・残る課題は <a href="design.html#loop">設計記録 10 章</a> にあります。</p>
+<p>オプションと improve.json の項目は <a href="reference.html#commands">リファレンス 7 章</a>、それぞれの仕組みを入れた理由・残る課題は <a href="design.html#loop">設計記録 10 章</a> にあります。</p>
 
 <h2 id="modules">12. コードの構成</h2>
 <figure>
-<div class="scroll"><svg viewBox="0 0 900 290" role="img" aria-label="cli.py が runner・report・harvest を呼び、runner は spec・isolation・adapters・graders・record・metrics を使う">
+<div class="scroll"><svg viewBox="0 0 900 390" role="img" aria-label="cli.py が runner・report・harvest・improve を呼び、runner は spec・isolation・adapters・graders・record・metrics を使う。improve は candidate と mockapi を使う">
 <defs><marker id="mm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head"/></marker></defs>
 <rect x="20" y="128" width="120" height="44" rx="6" class="acc"/><text x="80" y="148" text-anchor="middle" class="t-acc">cli.py</text><text x="80" y="164" text-anchor="middle" class="t-sm">コマンド</text>
 <rect x="220" y="40" width="160" height="44" rx="6" class="box"/><text x="300" y="60" text-anchor="middle">runner.py</text><text x="300" y="76" text-anchor="middle" class="t-sm">司令塔（3 章）</text>
@@ -608,6 +657,12 @@ python -m harness_eval promote --run "$HOLDOUT/&lt;実行ID&gt;" --candidate can
 <rect x="520" y="148" width="360" height="34" rx="6" class="box"/><text x="536" y="170">graders.py</text><text x="630" y="170" class="t-sm">採点（6 章）</text>
 <rect x="520" y="192" width="360" height="34" rx="6" class="box"/><text x="536" y="214">record.py</text><text x="630" y="214" class="t-sm">エージェントによらない試行レコード</text>
 <rect x="520" y="236" width="360" height="34" rx="6" class="box"/><text x="536" y="258">metrics.py</text><text x="630" y="258" class="t-sm">指標・Δ・リリース判定・昇格判定（7・11 章）</text>
+<rect x="220" y="304" width="160" height="44" rx="6" class="box"/><text x="300" y="324" text-anchor="middle">improve.py</text><text x="300" y="340" text-anchor="middle" class="t-sm">改善役（11 章）</text>
+<rect x="520" y="296" width="360" height="34" rx="6" class="box"/><text x="536" y="318">candidate.py</text><text x="640" y="318" class="t-sm">変更項目の適用・事前検査・スキルの 3 つ</text>
+<rect x="520" y="340" width="360" height="34" rx="6" class="box"/><text x="536" y="362">mockapi.py</text><text x="640" y="362" class="t-sm">偽の API で deny が効くかの自己確認</text>
+<line x1="140" y1="166" x2="218" y2="318" class="ln" marker-end="url(#mm)"/>
+<line x1="380" y1="320" x2="518" y2="313" class="ln" marker-end="url(#mm)"/>
+<line x1="380" y1="332" x2="518" y2="357" class="ln" marker-end="url(#mm)"/>
 <line x1="380" y1="56" x2="518" y2="33" class="ln" marker-end="url(#mm)"/>
 <line x1="380" y1="60" x2="518" y2="77" class="ln" marker-end="url(#mm)"/>
 <line x1="380" y1="64" x2="518" y2="121" class="ln" marker-end="url(#mm)"/>
@@ -619,7 +674,7 @@ python -m harness_eval promote --run "$HOLDOUT/&lt;実行ID&gt;" --candidate can
 <line x1="380" y1="236" x2="518" y2="126" class="ln-dash" marker-end="url(#mm)"/>
 <line x1="380" y1="240" x2="518" y2="170" class="ln-dash" marker-end="url(#mm)"/>
 </svg></div>
-<figcaption>すべて <code>harness_eval/</code> の中です。点線は report・harvest が使う主な部品です。cli は各コマンドのために spec・isolation・adapters・metrics も直接使います。</figcaption>
+<figcaption>すべて <code>harness_eval/</code> の中です。点線は report・harvest が使う主な部品です。cli は各コマンドのために spec・isolation・adapters・metrics も直接使い、improve は runner（結果の読み込み）・isolation も使い、candidate は harvest の文字列の照合を使います。</figcaption>
 </figure>
 </main>
 </body>
