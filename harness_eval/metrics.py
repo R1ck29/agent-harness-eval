@@ -17,6 +17,18 @@
                     （k・LLM 判定の有無・タスク定義が違う、今回の結果にプロファイル・タスクがない、指標を算出できない）
     pass          … 区間の下端 ≥ −m（悪化していても m 以内と言える）
     inconclusive  … それ以外、または比較できたタスクが min_tasks 未満（少ないタスクでは区間が狭く出すぎる）
+    max_regressions を指定したときは、悪化したタスクがその件数を超えれば fail（回帰予算。GRASP の R(c) ≤ R₀ に当たる）
+
+タスク単位の改善・悪化（paired_outcomes）: 2 つのプロファイルで値があるタスクを、良くなった／悪くなった／同じ に分け、
+    良くなった数と悪くなった数の正確な両側符号検定（= 不一致のタスクに対する正確 McNemar 検定）の p 値を付ける。
+    試行ではなくタスクを単位にするので、同じタスクの試行の相関を数えすぎない。
+
+昇格判定（promote）: 同じ実行の中で、候補（candidate）が現行（incumbent）より良いと言えるかを 3 値で返す。
+    reject        … 比較できない・安全違反・候補と現行が同じ配布物・holdout 以外のタスクを含む（require_split 指定時）・
+                    悪化したタスクが max_regressions を超える・改善の推定値が 0 以下
+    promote       … 比較できたタスクが min_tasks 以上、区間の下端 > min_improvement、符号検定 p ≤ α / m
+                    （m = この holdout で評価済みの候補の数。holdout を何度も見るほど偶然の勝ちが出やすいため）
+    inconclusive  … それ以外（片側だけ値のあるタスク・キャッシュの試行を含むときも）
 """
 from __future__ import annotations
 
@@ -66,6 +78,83 @@ def decide(ci: PairedCI, margin: float, min_tasks: int) -> str:
     if ci.low >= -margin:
         return "pass"
     return "inconclusive"
+
+
+def sign_test(improved: int, regressed: int) -> float:
+    """正確な両側符号検定の p 値（同点は除く）。不一致のペアに対する正確 McNemar 検定と同じ。"""
+    n = improved + regressed
+    if n == 0:
+        return 1.0
+    tail = sum(comb(n, i) for i in range(min(improved, regressed) + 1)) / 2 ** n
+    return min(1.0, 2 * tail)
+
+
+def paired_outcomes(cur: dict[str, dict[str, Any]], base: dict[str, dict[str, Any]], m: str) -> dict[str, Any]:
+    """タスクごとに cur と base の値 m を比べ、良くなった・悪くなったタスクと符号検定の p 値を返す（両方で値があるタスクだけ）。"""
+    improved, regressed, tied = [], [], 0
+    for t in sorted(cur):
+        if t not in base or cur[t].get(m) is None or base[t].get(m) is None:
+            continue
+        d = cur[t][m] - base[t][m]
+        if d > 1e-9:
+            improved.append(t)
+        elif d < -1e-9:
+            regressed.append(t)
+        else:
+            tied += 1
+    return {"improved": improved, "regressed": regressed, "tied": tied, "n": len(improved) + len(regressed) + tied,
+            "sign_p": sign_test(len(improved), len(regressed))}
+
+
+def split_half_noise(records: list[TrialRecord], profile_id: str, confidence: float = 0.95, resamples: int = 2000,
+                     seed: int = 0, comparable: bool = False) -> dict[str, Any]:
+    """同じプロファイルの試行をタスクごとに無作為に 2 分割し、「半分 − もう半分」の pass@1 の差（タスク平均）の範囲を出す。
+    同じ配布物どうしでも、この程度の差は偶然で出る（A/A の雑音幅）。有効試行が 2 回未満のタスクは使わない。
+    各側 h 試行の半分どうしの差は、各側 n 試行の比較より √(n/h) 倍ばらつくので、タスクごとに √(h/n) を掛けて
+    「各側 n 試行の比較」に換算する（n が偶数なら 1/√2。奇数でも広く出しすぎない。合否の分散が同じとみなす近似）。
+    comparable: 配布物がないと通らない判定を除いた合否（cmp_passed）で数える（promote が比較用の値を使うとき）。"""
+    by_task: dict[str, list[bool]] = defaultdict(list)
+    for r in records:
+        if r.profile_id == profile_id and r.valid:
+            ok = r.cmp_passed if comparable else r.passed
+            if ok is not None:
+                by_task[r.task_id].append(bool(ok))
+    usable = [v for _, v in sorted(by_task.items()) if len(v) >= 2]
+    if not usable:
+        return {"n_tasks": 0, "low": None, "high": None}
+    rng = random.Random(seed)
+    diffs = []
+    for _ in range(resamples):
+        total = 0.0
+        for v in usable:
+            w = v[:]
+            rng.shuffle(w)
+            h = len(w) // 2
+            total += (sum(w[:h]) / h - sum(w[h:2 * h]) / h) * (h / len(w)) ** 0.5
+        diffs.append(total / len(usable))
+    diffs.sort()
+    alpha = (1 - confidence) / 2
+    return {"n_tasks": len(usable), "low": diffs[int(alpha * resamples)],
+            "high": diffs[min(int((1 - alpha) * resamples), resamples - 1)]}
+
+
+def holdout_comparisons(rows: list[dict[str, Any]], tasks: dict[str, str], incumbent_hash: str | None) -> int:
+    """この holdout のタスク（id → 中身のハッシュ）と 1 つでも重なる実行で評価された、現行以外の配布物の数。
+    - プロファイル id を変えても同じ配布物（harness_hash）は 1 つと数える
+    - 配布物なし（install が空）の基準は候補ではないので数えない
+    - タスクを 1 つ足した・外した実行も「同じ holdout を見た」と数える（重なりで判定。完全一致にすると数え漏れる）
+    - 形の違う行・値（文字列でない id やハッシュ）は読み飛ばす"""
+    mine = set(tasks.items())
+    seen: set[str] = set()
+    for r in rows:
+        rt, rp = (r.get("tasks"), r.get("profiles")) if isinstance(r, dict) else (None, None)
+        if not isinstance(rt, dict) or not mine & {(t, h) for t, h in rt.items() if isinstance(h, str)}:
+            continue
+        for v in (rp.values() if isinstance(rp, dict) else ()):
+            h = v.get("harness") if isinstance(v, dict) else None
+            if isinstance(h, str) and h != incumbent_hash and not v.get("install_empty"):
+                seen.add(h)
+    return len(seen)
 
 
 def pass_hat_k(n: int, c: int, k: int) -> float | None:
@@ -167,6 +256,8 @@ def deltas(summary: dict[str, Any], baseline: str) -> dict[str, dict[str, Any]]:
         row["cost_per_pass_usd"] = (pa["cost_per_pass_usd"] - pb["cost_per_pass_usd"]
                                     if pa["cost_per_pass_usd"] is not None and pb["cost_per_pass_usd"] is not None else None)
         row["per_task"] = {t: {m: _diff(tv[t], base[t], m + sfx) for m in ("pass_at_1", "pass_hat_k")} for t in common}
+        o = paired_outcomes(tv, base, "pass_at_1" + sfx)
+        row["outcomes"] = {"improved": len(o["improved"]), "regressed": len(o["regressed"]), "tied": o["tied"], "sign_p": o["sign_p"]}
         out[pid] = row
     return out
 
@@ -185,7 +276,7 @@ def _comparability(current: dict[str, Any], previous: dict[str, Any], metric: st
 
 
 def gate(current: dict[str, Any], previous: dict[str, Any], metric: str, margin: float, min_tasks: int,
-         extra_hard: Iterable[str] = ()) -> dict[str, Any]:
+         extra_hard: Iterable[str] = (), max_regressions: int | None = None) -> dict[str, Any]:
     """前回（previous）と今回（current）の同じプロファイルを比べ、リリースしてよいかを 3 値で返す。
 
     戻り値: decision（pass / fail / inconclusive）、problems（比較できない・安全違反。1 つでもあれば fail）、
@@ -205,6 +296,7 @@ def gate(current: dict[str, Any], previous: dict[str, Any], metric: str, margin:
             problems.append(f"{pid}: 今回の結果にプロファイルがありません")
             continue
         diffs = []
+        improved = regressed = 0
         for tid, pv in prev_tasks.items():
             cv = cur_tasks.get(tid)
             if cv is None:
@@ -220,13 +312,96 @@ def gate(current: dict[str, Any], previous: dict[str, Any], metric: str, margin:
                 continue
             diffs.append(cv[metric] - pv[metric])
             if cv[metric] < pv[metric] - 1e-9:
+                regressed += 1
                 regressions.append(f"{pid}/{tid}: {metric} {pv[metric]:.2f} → {cv[metric]:.2f}")
+            elif cv[metric] > pv[metric] + 1e-9:
+                improved += 1
         ci = paired_bootstrap(diffs)
+        dec = decide(ci, margin, min_tasks)
+        if max_regressions is not None and regressed > max_regressions:
+            problems.append(f"{pid}: 悪化したタスクが {regressed} 件で、回帰予算 {max_regressions} 件を超えています")
+            dec = "fail"
         per_profile[pid] = {"n_tasks": ci.n_tasks, "estimate": ci.estimate,
                             "ci": [ci.low, ci.high] if ci.low is not None else None,
-                            "decision": decide(ci, margin, min_tasks)}
+                            "improved": improved, "regressed": regressed, "sign_p": sign_test(improved, regressed),
+                            "decision": dec}
     decisions = {v["decision"] for v in per_profile.values()}
     decision = ("fail" if problems or "fail" in decisions else
                 "inconclusive" if "inconclusive" in decisions or not decisions else "pass")
-    return {"decision": decision, "metric": metric, "margin": margin, "min_tasks": min_tasks,
+    return {"decision": decision, "metric": metric, "margin": margin, "min_tasks": min_tasks, "max_regressions": max_regressions,
             "problems": problems, "regressions": regressions, "profiles": per_profile}
+
+
+def _per_trial_tokens(p: dict[str, Any]) -> float | None:
+    """有効試行 1 回あたりの入力側トークン（input + キャッシュ読み書き）。常時読み込まれる指示が増えるとここが増える。"""
+    t = p.get("tokens") or {}
+    if not p.get("valid"):
+        return None
+    total = sum((t.get(k) or 0) for k in ("input", "cache_read", "cache_write"))
+    return total / p["valid"] if total else None
+
+
+def promote(summary: dict[str, Any], records: list[TrialRecord], candidate: str, incumbent: str, metric: str, alpha: float,
+            min_improvement: float, max_regressions: int, min_tasks: int, comparisons: int,
+            require_split: str | None = "holdout", extra_hard: Iterable[str] = ()) -> dict[str, Any]:
+    """候補を現行と同じ実行の中で比べ、昇格してよいかを 3 値で返す（モジュール冒頭の規則）。
+
+    comparisons: この holdout で評価済みの候補の数 m（holdout_comparisons。最低 1）。有意水準は α / m に補正する。"""
+    problems: list[str] = []
+    meta = summary.get("meta", {})
+    tasks_all = summary.get("tasks", {})
+    for pid in (candidate, incumbent):
+        if pid not in tasks_all:
+            problems.append(f"{pid}: この実行の結果にプロファイルがありません")
+    mp = meta.get("profiles", {})
+    hkey = lambda pid: (mp.get(pid) or {}).get("harness_hash") or (mp.get(pid) or {}).get("hash")  # v0.4.0 の結果は hash だけ
+    if candidate in mp and incumbent in mp and hkey(candidate) == hkey(incumbent):
+        problems.append("候補と現行が同じ配布物（配布物のハッシュが同じ）です")
+    mt = meta.get("tasks", {})
+    if require_split:
+        wrong = sorted(t for t in set(tasks_all.get(candidate, {})) | set(tasks_all.get(incumbent, {}))
+                       if (mt.get(t) or {}).get("split") != require_split)
+        if wrong:
+            problems.append(f"{require_split} 以外のタスク {wrong[:5]}{'…' if len(wrong) > 5 else ''} を含みます。"
+                            f"昇格判定は改善に使っていない {require_split} のタスクだけで行ってください")
+    hard = dict.fromkeys([*HARD_CATEGORIES, *extra_hard])
+    cand_tags = summary.get("profiles", {}).get(candidate, {}).get("failure_tags", {})
+    hits = sorted(c for c in hard if cand_tags.get(c))
+    if hits:
+        problems.append(f"{candidate}: 安全違反の失敗分類 {hits} があります")
+    # 現行が配布物なしなら、配布物がないと通らない判定を両側とも外した値で比べる（deltas と同じ扱い）
+    cmp = bool((mp.get(incumbent) or {}).get("install_empty"))
+    m = metric + ("_cmp" if cmp else "")
+    ct, it = tasks_all.get(candidate, {}), tasks_all.get(incumbent, {})
+    diffs = [d for t in sorted(ct) if t in it and (d := _diff(ct[t], it[t], m)) is not None]
+    # 片側だけ値のあるタスク（試行がすべて除外された・結果にない）は差に入らないが、そこに悪化が隠れうる。
+    # 除外は環境起因でプロファイルごとに偏りうるので、こういうタスクがあれば昇格にしない
+    one_sided = sorted(t for t in set(ct) | set(it) if ((ct.get(t) or {}).get(m) is None) != ((it.get(t) or {}).get(m) is None))
+    ci = paired_bootstrap(diffs)
+    o = paired_outcomes(ct, it, m)
+    mm = max(1, int(comparisons))
+    alpha_adj = alpha / mm
+    # キャッシュの結果は別の時点の実行なので「同じ実行の中で比べる」前提が崩れる（holdout の実行は既定でキャッシュを使わない）
+    cached = {pid: sum(1 for r in records if r.profile_id == pid and r.from_cache) for pid in (candidate, incumbent)}
+    if len(o["regressed"]) > max_regressions:
+        problems.append(f"悪化したタスクが {len(o['regressed'])} 件で、回帰予算 {max_regressions} 件を超えています: {o['regressed'][:5]}")
+    if problems or (ci.estimate is not None and ci.estimate <= 0):
+        decision = "reject"
+    elif (ci.n_tasks < min_tasks or ci.low is None or ci.low <= min_improvement or o["sign_p"] > alpha_adj
+          or len(o["improved"]) <= len(o["regressed"]) or any(cached.values()) or one_sided):
+        # 符号検定は両側なので、悪化の方が多くても p が小さくなりうる → 改善したタスクが悪化より多いことも求める
+        decision = "inconclusive"
+    else:
+        decision = "promote"
+    pc, pi = summary.get("profiles", {}).get(candidate, {}), summary.get("profiles", {}).get(incumbent, {})
+    tok_c, tok_i = _per_trial_tokens(pc), _per_trial_tokens(pi)
+    return {"decision": decision, "candidate": candidate, "incumbent": incumbent, "metric": metric, "comparable_metric": cmp,
+            "n_tasks": ci.n_tasks, "estimate": ci.estimate, "ci": [ci.low, ci.high] if ci.low is not None else None,
+            "improved": o["improved"], "regressed": o["regressed"], "tied": o["tied"], "sign_p": o["sign_p"],
+            "alpha": alpha, "comparisons": mm, "alpha_adjusted": alpha_adj, "min_improvement": min_improvement,
+            "max_regressions": max_regressions, "min_tasks": min_tasks, "problems": problems,
+            "cached_trials": cached, "one_sided_tasks": one_sided,
+            "noise": split_half_noise(records, incumbent, comparable=cmp),
+            "cost_per_pass_delta_usd": (pc["cost_per_pass_usd"] - pi["cost_per_pass_usd"]
+                                        if pc.get("cost_per_pass_usd") is not None and pi.get("cost_per_pass_usd") is not None else None),
+            "input_tokens_per_trial": {"candidate": tok_c, "incumbent": tok_i}}

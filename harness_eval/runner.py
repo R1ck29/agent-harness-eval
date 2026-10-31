@@ -33,7 +33,7 @@ from .isolation import (ancestor_instructions, build_env, copy_credentials, fill
                         route_signature, run_install, run_process, snapshot)
 from .metrics import summarize
 from .record import EXCLUDED_ERRORS, TrialRecord
-from .spec import Profile, SpecError, Task
+from .spec import NO_SPLIT, Profile, SpecError, Task, split_mixing
 
 NOT_RUN_ERRORS = {"budget_stop"}
 CACHE_SCHEMA = "5"  # 試行レコードの形式を変えたら上げる（古いキャッシュを使わないため）
@@ -45,6 +45,7 @@ class RunOptions:
     k: int | None = None
     tags: list[str] = field(default_factory=list)
     task_ids: list[str] = field(default_factory=list)
+    splits: list[str] = field(default_factory=list)  # train / dev / holdout / none（分割なし）。空ならすべて
     jobs: int = 1
     llm: bool = True
     judge_agent: str = "claude_code"
@@ -78,6 +79,8 @@ def select_pairs(tasks: list[Task], profiles: list[Profile], opt: RunOptions) ->
                 continue
             if opt.task_ids and t.id not in opt.task_ids:
                 continue
+            if opt.splits and (t.split or NO_SPLIT) not in opt.splits:
+                continue
             out.append((t, p))
     return out
 
@@ -100,6 +103,19 @@ def schedule(pairs: list[tuple[Task, Profile]], trials: int, seed: int) -> list[
             r = (i + offsets[tid]) % len(items)
             jobs += [(t, p, i) for t, p in items[r:] + items[:r]]
     return jobs
+
+
+HOLDOUT_LEDGER = "holdout_uses.jsonl"
+
+
+def holdout_row(run_id: str, tasks: list[Task], profiles: list[Profile]) -> dict[str, Any]:
+    """holdout 利用台帳の 1 行。id とハッシュだけを書く（プロンプト・応答・ファイル内容は書かない）。
+    tasks: holdout のタスク id → 中身のハッシュ。profiles: プロファイル id → 配布物のハッシュ（harness_hash。id を変えても
+    同じ配布物は同じ値）と配布物なしかどうか。promote が「この holdout で何個の候補を見たか」を数えるのに使う。"""
+    hold = {t.id: t.content_hash() for t in tasks if t.split == "holdout"}
+    return {"at": datetime.now(timezone.utc).isoformat(), "run_id": run_id,
+            "tasks": dict(sorted(hold.items())),
+            "profiles": {p.id: {"harness": p.harness_hash(), "install_empty": not p.install} for p in sorted(profiles, key=lambda p: p.id)}}
 
 
 def cli_version(adapter) -> str | None:
@@ -161,6 +177,15 @@ class Runner:
     def __init__(self, tasks: list[Task], profiles: list[Profile], opt: RunOptions, out_dir: Path):
         self.opt = opt
         self.pairs = select_pairs(tasks, profiles, opt)
+        mixing = split_mixing(list({t.id: t for t, _ in self.pairs}.values()))
+        if mixing:
+            raise SpecError(mixing)
+        # holdout はキャッシュを読まず書かない: 候補と現行を同じ時点で実行して比べるため（キャッシュの現行は別の時点の結果）、
+        # また holdout の試行の記録（最終応答・ツール入力）を、train と共有するキャッシュフォルダに残さないため
+        self.holdout = any(t.split == "holdout" for t, _ in self.pairs)
+        if self.holdout:
+            opt.use_cache = False
+        self.out_dir = Path(out_dir).resolve()
         # 時刻順に並ぶ名前（同じ秒内の実行でも順序が崩れないようにミリ秒まで）
         self.run_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3] + f"-{random.randint(0, 0xff):02x}"
         # 絶対パスにする（エージェントは作業ディレクトリを cwd に起動するため、相対パスだと HOME などがずれる）
@@ -467,6 +492,11 @@ class Runner:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         started = datetime.now(timezone.utc).isoformat()
         records: list[TrialRecord] = []
+        if self.holdout:
+            # holdout を見た記録は実行の前に書く（中断しても、途中までのトランスクリプトで holdout を見たことに変わりはない）
+            row = holdout_row(self.run_id, list({t.id: t for t, _ in self.pairs}.values()), list({p.id: p for _, p in self.pairs}.values()))
+            with (self.out_dir / HOLDOUT_LEDGER).open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
         jsonl = (self.run_dir / "trials.jsonl").open("w", encoding="utf-8")
 
         def sink(rec: TrialRecord) -> None:
@@ -504,7 +534,7 @@ class Runner:
             "run_id": self.run_id, "tool_version": __version__, "started_at": started,
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "platform": f"{platform.system()} {platform.release()}", "python": sys.version.split()[0],
-            "options": {"trials": self.opt.trials, "k": self.opt.kk, "tags": self.opt.tags, "llm": self.opt.llm,
+            "options": {"trials": self.opt.trials, "k": self.opt.kk, "tags": self.opt.tags, "splits": self.opt.splits, "llm": self.opt.llm,
                         "judge_agent": self.opt.judge_agent, "judge_model": self.opt.judge_model,
                         "judge_profile": self.judge_profile.id if self.judge_profile else None,
                         "jobs": self.opt.jobs,
@@ -512,9 +542,11 @@ class Runner:
                         "month_spent_before_run_usd": self.month_spent, "use_cache": self.opt.use_cache,
                         "baseline": self.opt.baseline, "seed": self.opt.seed},
             "cli_versions": self.versions,
-            "profiles": {p.id: {"agent": p.agent, "hash": p.content_hash(), "model": p.model, "path": str(p.path)}
+            "profiles": {p.id: {"agent": p.agent, "hash": p.content_hash(), "model": p.model, "path": str(p.path),
+                                "harness_hash": p.harness_hash(), "install_empty": not p.install}
                          for p in {p.id: p for _, p in self.pairs}.values()},
-            "tasks": {t.id: {"hash": t.content_hash(), "tags": t.tags, "paired_negative": t.paired_negative, "llm": uses_llm(t)}
+            "tasks": {t.id: {"hash": t.content_hash(), "tags": t.tags, "paired_negative": t.paired_negative, "llm": uses_llm(t),
+                             "split": t.split, "family": t.family}
                       for t in {t.id: t for t, _ in self.pairs}.values()},
             "spent_usd_this_run": self.spent,
             "ancestor_instructions": ancestor_instructions(self.run_dir.parent),

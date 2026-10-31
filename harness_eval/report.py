@@ -83,15 +83,21 @@ def render(summary: dict[str, Any], records: list[TrialRecord], baseline: str | 
         d = deltas(summary, baseline)
         if d:
             out.append(f"<h2>基準 <code>{_e(baseline)}</code> との差（Δ）</h2><div class='wrap'><table><tr><th>プロファイル</th><th class='n'>共通タスク</th>"
-                       "<th class='n'>Δ pass^k</th><th class='n'>Δ pass@1</th><th class='n'>Δ 平均スコア</th><th class='n'>Δ 合格あたりコスト</th></tr>")
+                       "<th class='n'>Δ pass^k</th><th class='n'>Δ pass@1</th><th class='n'>Δ 平均スコア</th><th class='n'>Δ 合格あたりコスト</th>"
+                       "<th class='n'>改善／悪化（符号検定 p）</th></tr>")
             for pid, row in d.items():
                 cells = "".join(f"<td class='n'>{_delta(row[m])}{_ci(row[m + '_ci'])}</td>" for m in ("pass_hat_k", "pass_at_1", "mean_score"))
+                oc = row.get("outcomes")
+                oc_cell = (f"<span class='ok'>{oc['improved']}</span> ／ <span class='ng'>{oc['regressed']}</span>"
+                           f"<br><span class='mut'>p={oc['sign_p']:.3f}</span>") if oc else "—"
                 out.append(f"<tr><td>{_e(pid)}</td><td class='n'>{row['common_tasks']}</td>{cells}"
-                           f"<td class='n'>{_delta(row['cost_per_pass_usd'], pct=False, lower_better=True)}</td></tr>")
+                           f"<td class='n'>{_delta(row['cost_per_pass_usd'], pct=False, lower_better=True)}</td><td class='n'>{oc_cell}</td></tr>")
             out.append("</table></div><div class='mut'>Δ は両方で値があるタスクだけで計算。括弧内はタスク単位のブートストラップによる 95% 区間"
                        "（区間が 0 をまたぐなら差があるとは言えない）。配布物がないと通らない判定（スキル・サブエージェント・hook を"
                        "使うことの要求）は両側とも除いて比べる。合格あたりコストは負の値ほど安い。"
-                       "タスクが少ない（目安 10〜20 件）と区間は実際より狭く出やすい。</div>")
+                       "タスクが少ない（目安 10〜20 件）と区間は実際より狭く出やすい。"
+                       "改善／悪化は pass@1 が上がった・下がったタスクの数で、p は正確な両側符号検定"
+                       "（平均が上がっていても悪化したタスクがあることを見落とさないため）。</div>")
             if not all(row["comparable"] for row in d.values()):
                 out.append("<div class='warn'>この結果は v0.3.0 以前の形式のため、配布物がないと通らない判定を除けず、"
                            "全判定の値で Δ を計算しています（基準との差が大きめに出ることがあります）。</div>")
