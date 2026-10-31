@@ -437,9 +437,9 @@ def cmd_skill_variants(a) -> int:
     for s in a.skill:
         if not (harness / "skills" / s / "SKILL.md").is_file():
             raise SpecError(f"{profile.path} の配布物にスキル {s}（skills/{s}/SKILL.md）がありません")
-        paths = write_skill_variants(harness, s, profile, a.id_prefix or profile.id, out / "skills")
+        paths = write_skill_variants(harness, s, profile, a.id_prefix or profile.id, out)
         print(f"スキル {s}: " + "、".join(f"{k} → {v}" for k, v in paths.items()))
-    print(f"次: python -m harness_eval run --tasks <タスク> --profiles {out / 'skills'} --out <結果>（3 つを同じ実行で比べる）")
+    print(f"次: python -m harness_eval run --tasks <タスク> --profiles {out / 'skills' / a.skill[0]} --out <結果>（3 つを同じ実行で比べる）")
     return 0
 
 

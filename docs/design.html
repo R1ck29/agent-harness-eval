@@ -240,10 +240,20 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 
 <h3>残タスク（次の版の候補）</h3>
 <ul>
-<li>OTEL の信号を中央で集計し、弱い所（失敗の多いスキル・ツール）を改善の対象として出す部分。利用者から信号を戻す経路は別に調べている（Windows・Mac の Outlook を含む）ので、v0.6.0 では作らない。</li>
+<li>OTEL の信号を中央で集計し、弱い所（失敗の多いスキル・ツール）を改善の対象として出す部分。利用者から信号を戻す経路は下の調べの段階で、v0.6.0 では作らない。</li>
 <li>段階配布中の自動比較と切り戻し（OTEL の指標で前の版と比べる）。</li>
 <li>個人の層の「提案して本人が確認」の仕組み（上の 2 層）。</li>
 </ul>
+
+<h3>利用者から信号を戻す経路（調べ、2026-10-31。未実装）</h3>
+<p>方針: 内容を含まない報告を利用者が自分で確かめてから送る（黙って送らない）。社内に OTLP の受け口が許されたら、Claude Code 組み込みの OpenTelemetry に切り替える（プロンプト本文は既定で伏せられる。受け口が要る。<code>OTEL_LOG_TOOL_DETAILS=1</code> は Bash のコマンドやファイルのパスも送るので付けない）。社内の Mac からはメールを送れる。Windows の利用者は Outlook（従来版か新しい版かは未確認）で、追加のツールなしに使える手段は次のとおり（Microsoft の文書で確認）。</p>
+<table>
+<tr><th>手段</th><th>使える Outlook</th><th>扱い</th></tr>
+<tr><td>PowerShell の <code>Start-Process</code> で <code>mailto:</code> を開く（宛先・件名・本文の下書き）</td><td>従来版・新しい版</td><td>添付はできない</td></tr>
+<tr><td><code>outlook.exe /c ipm.note /m "宛先?subject=…&amp;body=…"</code>、添付は <code>/a "&lt;ファイル&gt;"</code></td><td>従来版だけ（新しい版のコマンドラインは <code>--reset</code> などだけ）</td><td>添付 1 つの下書き。<code>/m</code> と <code>/a</code> を 1 回で併用できるかは実機で未確認</td></tr>
+<tr><td>PowerShell から COM で自動送信</td><td>従来版だけ（新しい版は COM・VBA なし）</td><td>ウイルス対策の状態が最新と報告されないと「送信」の警告（5 秒待ち）が出うる。黙って送らない方針にも合わない</td></tr>
+<tr><td><code>Send-MailMessage</code></td><td>—</td><td>Microsoft が廃止扱いにしているので使わない</td></tr>
+</table>
 
 <h2 id="risks">11. 残るリスク・未確認</h2>
 <ul>
@@ -256,7 +266,8 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <li>MCP のモックサーバーは同梱していない（<code>install</code> で設定ファイルを置き、<code>extra_args</code> で <code>--mcp-config</code> を渡す）。</li>
 <li>holdout を読ませない仕組みは改善役（<code>improve</code>）だけのもの。<code>run</code>・<code>promote</code> を操作する人や、自分で用意した別の改善役からは holdout が見える。holdout は別の端末・別のユーザーに置けるならそうする。</li>
 <li>改善役の読み取りの制限は、本物のモデルでの実行をまだ確かめていない（開発機の CLI にログインがなく、手元の偽の API で CLI の権限の判定を確かめた。§8）。社内で最初の <code>improve</code> を動かしたら、improve.json の <code>permission_denials</code> と <code>isolation_check</code> を確かめる。</li>
-<li>Windows での deny の書き方（<code>//C:/…</code> と <code>//c/…</code> の両方を書く）は未確認。効かなければ自己確認が漏れを見つけて <code>improve</code> が止まる（安全側だが、そのままでは改善役を使えない）。組織の管理設定が接続先や権限モードを固定していると、自己確認が偽の API につながらず同じく止まる。</li>
+<li>Windows での deny の書き方（<code>//C:/…</code> と <code>//c/…</code> の両方を書く）は未確認。効かなければ自己確認が漏れを見つけて <code>improve</code> が止まる（安全側だが、そのままでは改善役を使えない）。組織の管理設定が接続先や権限モードを固定していると、自己確認が偽の API につながらず同じく止まる（プロキシの設定は自己確認のときだけ 127.0.0.1 には使わないようにしている）。</li>
+<li>改善役の作業フォルダ・一時ホーム（認証の複製を含みうる）は、強制終了（SIGKILL など）されると OS の一時フォルダに残る。普段の終了と Ctrl-C では消す。</li>
 <li>POSIX で、読ませない場所のパスに <code>\</code> を含むと deny で止められない（§8）ので、<code>improve</code> は起動しない。フォルダ名を変える。</li>
 <li>事前検査は文字列の照合なので、言い換えた近道や句読点を挟んだ写しは通る。一方で、train の依頼文にある一般的な語（4 桁以上の数値・大文字の名前など）を新しく書いた項目は、近道でなくても見送られることがある。見送りは理由（項目 id）を見てもう一度実行する。採否は holdout で決める。</li>
 <li><code>promote</code> の多重比較の補正は、同じ台帳（既定は結果フォルダの親の <code>holdout_uses.jsonl</code>）に記録された分しか数えない。別の <code>--out</code> で同じ holdout を試した分は数えないので、holdout は 1 つの <code>--out</code> で使う。</li>
@@ -275,6 +286,7 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <li>OSS: <a href="https://www.promptfoo.dev/docs/guides/test-agent-skills/">Promptfoo</a>、<a href="https://meridianlabs-ai.github.io/inspect_swe/">inspect_swe</a>、<a href="https://docs.harborframework.com/llms.txt">Harbor</a>、<a href="https://github.com/benchflow-ai/benchflow">BenchFlow</a>、<a href="https://github.com/mgechev/skillgrade">skillgrade</a>、<a href="https://pypi.org/project/mdarena/">mdarena</a></li>
 <li>論文: <a href="https://arxiv.org/abs/2602.12670">SkillsBench</a>、<a href="https://arxiv.org/abs/2603.15401">SWE-Skills-Bench</a>、<a href="https://arxiv.org/abs/2605.27922">Harness-Bench</a>、<a href="https://arxiv.org/abs/2406.12045">τ-bench（pass^k）</a></li>
 <li>自己改善ループ（§10）: <a href="https://arxiv.org/html/2607.12227v4">Rethinking the Evaluation of Harness Evolution for Agents（arXiv:2607.12227）</a>、<a href="https://arxiv.org/abs/2605.29668">GRASP（arXiv:2605.29668）</a>、<a href="https://arxiv.org/pdf/2608.23041">AutoSaddler（arXiv:2608.23041）</a>、<a href="https://arxiv.org/pdf/2607.22520">The Regression Tax（arXiv:2607.22520）</a>、<a href="https://arxiv.org/abs/2603.28052">Meta-Harness（arXiv:2603.28052）</a>、<a href="https://arxiv.org/abs/2505.22954">Darwin Gödel Machine（arXiv:2505.22954）</a>、<a href="https://arxiv.org/abs/2610.14224">Harness²（arXiv:2610.14224）</a>、<a href="https://arxiv.org/abs/2510.04618">ACE（arXiv:2510.04618）</a></li>
+<li>信号を戻す経路（§10）: <a href="https://support.microsoft.com/en-us/office/command-line-switches-for-microsoft-office-products-079164cd-4ef5-4178-b235-441737deb3a6">Command-line switches for Microsoft Office products</a>、<a href="https://learn.microsoft.com/en-us/office/vba/outlook/how-to/security/outlook-object-model-security-warnings">Outlook object model security warnings</a>、<a href="https://support.microsoft.com/en-us/outlook/getstarted/feature-comparison-between-new-outlook-and-classic-outlook">Feature comparison between new Outlook and classic Outlook</a>、<a href="https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/send-mailmessage">Send-MailMessage</a>、<a href="https://code.claude.com/docs/en/monitoring-usage">Claude Code: Monitoring usage（OpenTelemetry）</a></li>
 <li>実機・ソースで確かめた CLI の挙動は §8 に記録している</li>
 </ul>
 </main>

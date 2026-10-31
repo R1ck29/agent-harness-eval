@@ -142,9 +142,26 @@ def _trial_view(r: TrialRecord) -> dict[str, Any]:
             "files_created": r.files_created, "files_modified": r.files_modified, "num_turns": r.num_turns}
 
 
+def forbidden_marks(holdout_outs: list[Path], tasks: list[Task], run_dir: Path) -> list[str]:
+    """train の記録に出ていたら、その記録は渡さない目印: holdout の場所・タスク定義のフォルダ・train 以外のタスク id。
+    評価のエージェントは Read や Bash で外も読めるので、train の試行中に holdout などを読んで記録に残した可能性を除く。
+    結果フォルダを含む場所（記録のパスに普通に出る）は目印にしない。"""
+    run = run_dir.resolve()
+    marks = set()
+    for p in [Path(h) for h in holdout_outs] + [t.path.parent for t in tasks]:
+        if not run.is_relative_to(p.resolve()):  # 書き方の違う同じ場所（/var と /private/var・相対パス）も目印にする
+            marks |= {str(p), str(p.absolute()), str(p.resolve()), p.resolve().as_posix()}
+    return sorted(marks | {t.id for t in tasks if t.split != "train"})
+
+
+def _clean(text: str, marks: list[str]) -> bool:
+    return not any(m in text for m in marks)
+
+
 def write_material(work: Path, profile: Profile, tasks: dict[str, Task], failed: dict[str, list[TrialRecord]],
-                   previous: dict[str, Any] | None) -> None:
-    """改善役の作業フォルダに、読ませてよいものの写しだけを置く。"""
+                   previous: dict[str, Any] | None, marks: list[str] = ()) -> int:
+    """改善役の作業フォルダに、読ませてよいものの写しだけを置く。戻り値は目印を含むため渡さなかった記録の数。"""
+    skipped = 0
     materialize(profile, work / "harness")
     for tid, recs in sorted(failed.items()):
         d = work / "failures" / tid
@@ -154,12 +171,21 @@ def write_material(work: Path, profile: Profile, tasks: dict[str, Task], failed:
         for r in recs:
             td = d / str(r.trial)
             td.mkdir()
-            (td / "result.json").write_text(json.dumps(_trial_view(r), ensure_ascii=False, indent=2), encoding="utf-8")
+            view = json.dumps(_trial_view(r), ensure_ascii=False, indent=2)
+            if _clean(view, marks):
+                (td / "result.json").write_text(view, encoding="utf-8")
+            else:
+                skipped += 1
             src = Path(r.trial_dir) / "stdout.jsonl" if r.trial_dir else None
             if src and src.is_file():
-                shutil.copyfile(src, td / "transcript.jsonl")
+                text = src.read_text(encoding="utf-8", errors="replace")
+                if _clean(text, marks):
+                    (td / "transcript.jsonl").write_text(text, encoding="utf-8")
+                else:
+                    skipped += 1
     if previous is not None:
         (work / "previous.json").write_text(json.dumps(previous, ensure_ascii=False, indent=2), encoding="utf-8")
+    return skipped
 
 
 def check_predictions(prev: dict[str, Any], recs: list[TrialRecord], meta: dict[str, Any], profile_id: str) -> dict[str, Any]:
@@ -171,7 +197,8 @@ def check_predictions(prev: dict[str, Any], recs: list[TrialRecord], meta: dict[
     predicted = sorted(prev.get("predictions") or {})
     fixed = [t for t in predicted if by_task.get(t) and all(r.passed for r in by_task[t])]
     missed = [t for t in predicted if by_task.get(t) and t not in fixed]
-    same = (prev.get("candidate") or {}).get("harness_hash") == meta.get("profiles", {}).get(profile_id, {}).get("harness_hash")
+    before = (prev.get("candidate") or {}).get("harness_hash")
+    same = bool(before) and before == meta.get("profiles", {}).get(profile_id, {}).get("harness_hash")
     return {"predicted": predicted, "fixed": fixed, "not_fixed": missed, "not_run": [t for t in predicted if t not in by_task],
             "hit_rate": len(fixed) / (len(fixed) + len(missed)) if fixed or missed else None, "same_harness": same,
             "deltas": [{k: d.get(k) for k in ("id", "kind", "file", "reason", "fixes")} for d in prev.get("deltas") or []]}
@@ -211,16 +238,26 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
         "failed_tasks": {t: len(rs) for t, rs in sorted(failed.items())}}
     previous = None
     if o.previous:
-        prev = json.loads(Path(o.previous).read_text(encoding="utf-8"))
+        try:
+            prev = json.loads(Path(o.previous).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise SpecError(f"--previous を読めません: {e}") from e
+        if not isinstance(prev, dict):
+            raise SpecError(f"--previous は improve.json ではありません: {o.previous}")
         previous = report["previous"] = check_predictions(prev, mine, meta, o.profile.id)
     if not failed:
-        log("この実行に失敗した train の試行がありません（改善の材料がないので、改善役は呼びません）")
+        invalid = sum(1 for r in mine if not r.valid)
+        log("この実行に失敗した train の試行がありません（改善の材料がないので、改善役は呼びません）"
+            + (f"。環境起因で除外された試行が {invalid} 件あります（実行し直すと材料が出るかもしれません）" if invalid else ""))
         _write_report(o.out, report)
         return 3, report
     tasks = {t.id: t for t in o.tasks}
-    missing = sorted(t for t in failed if t not in tasks)
-    if missing:
-        raise SpecError(f"--tasks に失敗したタスクの定義がありません: {missing[:5]}")
+    for tid in sorted(failed):
+        t = tasks.get(tid)
+        if t is None:
+            raise SpecError(f"--tasks に失敗したタスク {tid} の定義がありません")
+        if t.split != "train" or t.content_hash() != meta["tasks"][tid].get("hash"):
+            raise SpecError(f"{t.path}: 実行のあとでタスクの分割か中身が変わっています（今の split: {t.split}）。今の定義で train を実行し直してください")
     root = Path(tempfile.mkdtemp(prefix="harness-eval-improve-")).resolve()
     try:
         tp = make_trial_paths(root / "agent", ".claude")
@@ -231,9 +268,14 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
         bad = [str(p) for p in deny if unusable_path(p)]
         if bad:
             raise SpecError(f"読ませない場所のパスに \\ が含まれ、権限設定で止められません: {bad}（フォルダ名を変えてください）")
-        write_material(tp.workdir, o.profile, tasks, failed, previous)
+        report["skipped_material"] = write_material(tp.workdir, o.profile, tasks, failed, previous,
+                                                    forbidden_marks(o.holdout_outs, o.tasks, o.run_dir))
+        if report["skipped_material"]:
+            log(f"holdout の場所・タスク定義・train 以外のタスク id を含む記録 {report['skipped_material']} 件は渡しません")
         auth = replace(o.auth, env_unset=list(o.auth.env_unset) + OTEL_PROMPT_VARS)
         env = build_env(auth, tp, "CLAUDE_CONFIG_DIR")
+        for k in OTEL_PROMPT_VARS:  # プロファイルの env で付けていても外す
+            env.pop(k, None)
         state, why = read_isolation_check(o.exe, o.model, env, special=special_chars(deny))
         report["isolation_check"] = {"state": state, "message": why}
         log(f"読み取りの隔離の自己確認: {state}（{why}）")
@@ -247,6 +289,8 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
         log(f"改善役を起動します（失敗した train タスク {len(failed)} 件、読ませない場所 {len(deny)} か所）")
         out, cost, err, denials = run_improver(o, tp, prompt, deny, env)
         spend(cost)
+        if cost is None:
+            log("改善役の費用が分からないため、費用台帳に記録していません")
         report.update(cost_usd=cost, permission_denials=denials)
         if err:
             report["error"] = err
@@ -308,7 +352,7 @@ def write_candidate(o: ImproveOptions, out: dict[str, Any], report: dict[str, An
     report["skills"] = {}
     for s in skills:
         try:
-            report["skills"][s] = {k: str(v) for k, v in write_skill_variants(harness, s, o.profile, o.candidate_id, o.out / "skills").items()}
+            report["skills"][s] = {k: str(v) for k, v in write_skill_variants(harness, s, o.profile, o.candidate_id, o.out).items()}
         except SpecError as e:
             report["skills"][s] = {"error": str(e)}
             log(f"スキル {s} の比較用プロファイルを作れません: {e}")

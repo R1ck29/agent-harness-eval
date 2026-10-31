@@ -204,9 +204,12 @@ def _events(msg: dict[str, Any]) -> list[dict[str, Any]]:
 def mock_env(env: dict[str, str], home: Path, url: str) -> dict[str, str]:
     """CLI を偽 API へ向ける環境変数。経路を変える変数（Bedrock の切り替え・本物のキーなど）は外す。"""
     drop = set(ROUTE_VARS["claude_code"]) | set(INHERITED_UNSET)
-    out = {k: v for k, v in env.items() if k not in drop and not k.startswith("ANTHROPIC_")}
+    # 社内のプロキシ設定があっても 127.0.0.1 へは直接つなぐ（プロキシ経由だと偽 API に届かず、確かめられないまま止まる）
+    out = {k: v for k, v in env.items()
+           if k not in drop and not k.startswith("ANTHROPIC_") and k.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
     out.update(HOME=str(home), USERPROFILE=str(home), CLAUDE_CONFIG_DIR=str(home / ".claude"), ANTHROPIC_BASE_URL=url,
-               ANTHROPIC_API_KEY=MOCK_KEY, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1")
+               ANTHROPIC_API_KEY=MOCK_KEY, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
+               NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
     return out
 
 
