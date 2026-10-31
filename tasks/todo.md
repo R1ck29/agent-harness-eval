@@ -44,7 +44,8 @@ rejected alternatives: best-of-N control, built-in `improve`, credential-sealed 
 - [x] Verify: 89 tests on Python 3.10 / 3.11 / 3.12 / 3.13, ruff clean, coverage 91%, no broken anchors, no new
       36-char passage shared by two documents, guide §11 figure rendered
 - [x] Independent review (fresh reviewer, no build context); fixes; re-review PASS (see Review of the port)
-- [ ] Commit and push (user approved 2026-10-31); verify GitHub's Download ZIP runs from an unzipped copy
+- [x] Commit and push (user approved 2026-10-31, efb35a3); GitHub's Download ZIP of main (237,811 bytes) unzips to
+      agent-harness-eval-main/, reports 0.5.0, passes the unit tests and `validate --selftest` from the unzipped copy
 - Distribution (user, 2026-10-31): the internal environment gets the code through GitHub's "Download ZIP", so the
   separate `git archive` zip (dist/agent-harness-eval.zip) and its README command were dropped.
 
@@ -75,7 +76,7 @@ rejected alternatives: best-of-N control, built-in `improve`, credential-sealed 
 
 ### Handoff (for the next session)
 
-State: v0.5.0 is in the working tree of main (not committed until the user says so). Not run against real CLIs
+State: v0.5.0 is on GitHub main (efb35a3). Not run against real CLIs
 (no `doctor --live`, no real holdout run); Windows still unverified.
 
 Decisions (user, 2026-10-31): collect as many content-free signals as possible, and fictionalized `harvest` tasks
