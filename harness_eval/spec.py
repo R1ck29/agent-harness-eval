@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import sys
@@ -385,15 +386,21 @@ def load_profile(path: Path) -> Profile:
 
 
 def _expand(paths: list[str], exts: tuple[str, ...]) -> list[Path]:
+    """ファイル・ディレクトリ・ワイルドカード（PowerShell・cmd は展開しないのでここで展開する）を YAML の一覧にする。"""
     out: list[Path] = []
     for p in paths:
-        pp = Path(p)
-        if pp.is_dir():
-            out += sorted(x for x in pp.rglob("*") if x.suffix in exts and x.is_file())
-        elif pp.is_file():
-            out.append(pp)
-        else:
+        # 実在するパスはそのまま使う（名前に [ を含むファイルを、パターンとして読み違えないため）
+        matches = [p] if Path(p).exists() or not any(c in p for c in "*?[") else sorted(glob.glob(p))
+        if not matches:
             raise SpecError(f"見つかりません: {p}")
+        for m in matches:
+            pp = Path(m)
+            if pp.is_dir():
+                out += sorted(x for x in pp.rglob("*") if x.suffix in exts and x.is_file())
+            elif pp.is_file():
+                out.append(pp)
+            else:
+                raise SpecError(f"見つかりません: {p}")
     return out
 
 
@@ -473,7 +480,7 @@ def split_mixing(tasks: list[Task]) -> str | None:
     other = sorted(t.id for t in tasks if t.split != "holdout")
     if hold and other:
         return (f"holdout のタスク {hold[:5]}{'…' if len(hold) > 5 else ''} と、それ以外のタスク {other[:5]}{'…' if len(other) > 5 else ''} を"
-                "同じ実行に混ぜられません。holdout は --split holdout で単独に、別の --out に実行してください"
+                "同じ実行に混ぜられません。holdout は --split holdout で単独に、holdout 専用の --out（毎回同じ場所）に実行してください"
                 "（改善役に渡す結果に holdout のトランスクリプトを入れないため）")
     return None
 

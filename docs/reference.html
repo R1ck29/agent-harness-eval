@@ -101,7 +101,7 @@ graders:
 <li><code>run</code> では <code>{python}</code>（実行中の Python）・<code>{workdir}</code>・<code>{task_dir}</code> を使えます。作業ディレクトリで実行され、環境変数 <code>TRIAL_WORKDIR</code> と <code>TRIAL_RECORD</code>（試行レコード JSON のパス）が渡ります。</li>
 <li><b>置換した値はシェル用に自動で引用されるので、YAML 側で <code>"{task_dir}"</code> のように囲まないでください</b>（空白を含むパスで壊れます）。</li>
 <li>正解は<b>元のフィクスチャ</b>から計算します。作業ディレクトリのファイルはエージェントが書き換えられるからです（同梱の採点スクリプトは元の sales.csv を引数で受け取ります）。</li>
-<li>「形式」と「正しさ」は別の判定に分け、形式の違いで正しさを落とさないようにします（同梱の <code>check_monthly_totals.py</code> は初版でこれを誤り、実出力で見つけて直しました。回帰テストは <code>tests/data/summaries</code>）。</li>
+<li>「形式」と「正しさ」は別の判定に分け、形式の違いで正しさを落とさないようにします。</li>
 </ul>
 <h3>ツール名はエージェントで違う</h3>
 <table>
@@ -204,7 +204,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <table>
 <tr><th>コマンド</th><th>主なオプション</th></tr>
 <tr><td><code>validate</code></td><td><code>--tasks</code>（必須）・<code>--profiles</code>（必須）・<code>--selftest</code></td></tr>
-<tr><td><code>doctor</code></td><td><code>--profiles</code>（必須）・<code>--live</code>（最小の試行を 1 回ずつ実際に実行）・<code>--out</code>（既定 <code>results</code>）</td></tr>
+<tr><td><code>doctor</code></td><td><code>--profiles</code>（必須）・<code>--live</code>（最小の試行を 1 回ずつ実際に実行）・<code>--out</code>（<code>run</code> と同じ場所を指定）</td></tr>
 <tr><td><code>plan</code>・<code>run</code></td><td>下の表</td></tr>
 <tr><td><code>report</code></td><td><code>&lt;結果フォルダ&gt;</code>・<code>--baseline</code></td></tr>
 <tr><td><code>gate</code></td><td><code>--current</code>・<code>--previous</code>・<code>--margin</code>（すべて必須）・<code>--metric</code>（<code>pass_hat_k</code> 既定／<code>pass_at_1</code>／<code>mean_score</code>）・<code>--min-tasks</code>（既定 10）・<code>--max-regressions</code>（悪化してよいタスクの数。既定は数えない）・<code>--hard-category</code>（複数可。<code>unsafe_access</code> は常に含む）。判定の決まり方は <a href="guide.html#metrics">図解ガイド 7 章</a></td></tr>
@@ -215,7 +215,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <h3>run・plan のオプション</h3>
 <table>
 <tr><th>オプション</th><th>意味</th><th>既定</th></tr>
-<tr><td><code>--tasks</code>・<code>--profiles</code></td><td>YAML のファイルかディレクトリ（必須）</td><td>—</td></tr>
+<tr><td><code>--tasks</code>・<code>--profiles</code></td><td>YAML のファイル・ディレクトリ・ワイルドカード（<code>claude-*.yaml</code>。PowerShell でもツール側で展開する）。必須</td><td>—</td></tr>
 <tr><td><code>--trials</code>・<code>--k</code></td><td>1 組あたりの試行回数・pass^k の k</td><td>1・<code>--trials</code> と同じ</td></tr>
 <tr><td><code>--tag</code>・<code>--task</code></td><td>このタグ・id のタスクだけ（複数可）</td><td>すべて</td></tr>
 <tr><td><code>--split</code></td><td>この分割のタスクだけ（<code>train</code>／<code>dev</code>／<code>holdout</code>／<code>none</code>＝分割なし。複数可）。holdout は他のタスクと混ぜられない</td><td>すべて</td></tr>
@@ -229,7 +229,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <tr><td><code>--no-cache</code>・<code>--cache-dir</code></td><td>キャッシュを使わない・置き場所（holdout のタスクを含む実行は指定がなくても使わない）</td><td>使う・<code>.harness-eval-cache</code></td></tr>
 <tr><td><code>--keep</code></td><td>作業ディレクトリを残す範囲（<code>all</code>／<code>failed</code>／<code>none</code>。<code>none</code> は生ログも消す）</td><td><code>failed</code></td></tr>
 <tr><td><code>--allow-ancestor-instructions</code></td><td><code>--out</code> の上に指示ファイルがあっても実行する（結果に記録）</td><td>—</td></tr>
-<tr><td><code>--out</code></td><td>結果の出力先（リポジトリやホームの外に置く）</td><td><code>results</code></td></tr>
+<tr><td><code>--out</code></td><td>結果の出力先。リポジトリやホームの外に置く（既定はカレントディレクトリの <code>results</code> で、ホームの下で実行すると止まる。毎回指定する）</td><td><code>results</code></td></tr>
 </table>
 
 <h2 id="cost">8. 費用の出どころ</h2>
