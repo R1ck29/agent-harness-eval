@@ -104,6 +104,7 @@ python -m harness_eval harvest --out my-tasks --limit 10 --ledger "$OUT/spend.js
 
 ```bash
 python -m unittest discover -s tests        # 偽の claude / codex CLI を使うのでトークンは使わない
+HARNESS_EVAL_REAL_CLI=1 python -m unittest discover -s tests   # 加えて、インストール済みの claude で改善役の読み取り制限を確かめる（費用 0。付けないと 1 件スキップ）
 uv run pytest --cov                         # pytest・カバレッジ 80% 以上・ruff は pyproject.toml の dev グループ
 ```
 
