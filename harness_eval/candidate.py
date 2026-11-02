@@ -66,6 +66,22 @@ def target_problem(rel: str) -> str:
     return ""
 
 
+def unread_skill_file(harness: Path, rel: str) -> str:
+    """skills/<名前>/ の中で読まれないファイルなら理由。読み込まれるのは skills/<名前>/SKILL.md だけで、ほかのファイルは
+    SKILL.md に skills/<名前>/ からのパスで書かれているとき（./ 付き・Markdown のリンクも可）に必要に応じて読まれる。
+    読まれないファイルは配っても効かず、配布物を汚すだけ。"""
+    p = PurePosixPath(rel)
+    if len(p.parts) < 3 or p.parts[0] != "skills" or p.parts[2:] == ("SKILL.md",):
+        return ""
+    skill = harness / "skills" / p.parts[1] / "SKILL.md"
+    if not skill.is_file():
+        return f"skills/{p.parts[1]}/ に SKILL.md がなく、{rel} は読まれません"
+    inner = "/".join(p.parts[2:])
+    if not re.search(rf"(?<![\w./-])(?:\./)?{re.escape(inner)}(?![\w-])", _read(skill)):
+        return f"{rel} は skills/{p.parts[1]}/SKILL.md にパス（{inner}）が書かれておらず、読まれません"
+    return ""
+
+
 def _read(f: Path, strict: bool = False) -> str:
     """改行（CRLF）をそのまま読む。検査では UTF-8 以外も読み飛ばさず置き換えて読み、書き換える対象は strict で読む
     （置き換えた文字のまま書き戻すと元の内容が壊れるので、UTF-8 以外のファイルへの項目は「適用できない」にする）。"""
@@ -184,7 +200,8 @@ def prechecks(current: Path, candidate: Path, applied: list[dict[str, Any]], not
     """評価の前に候補を落とす理由（空なら通過）。値そのもの（train の依頼の一部）は表示しないので、件数と項目 id だけを返す。
     1. train のタスク固有の文字列を足す（候補の全文と現行の全文の差で見る。項目をまたいで組み立てても見つける）
     2. 採点に関わるファイルを変える・採点スクリプトの名前を書く・Markdown 以外や配布物の外を変える
-    3. 常時読み込まれる指示（@ で読み込まれる先・サブエージェントの説明を含む）を max_growth 文字より増やす"""
+    3. 常時読み込まれる指示（@ で読み込まれる先・サブエージェントの説明を含む）を max_growth 文字より増やす
+    4. skills/ の中に読まれないファイルを足す（SKILL.md がない・SKILL.md にパスが書かれていない）"""
     problems = []
     if not applied:
         problems.append("適用できた変更項目がありません")
@@ -196,6 +213,11 @@ def prechecks(current: Path, candidate: Path, applied: list[dict[str, Any]], not
             problems.append(f"{did}: {target_problem(rel)}")
         if PurePosixPath(rel).name.lower() in terms or PurePosixPath(rel).stem.lower() in terms:
             problems.append(f"{did}: 採点に使うファイルと同じ名前のファイルを変えます（{PurePosixPath(rel).name}）")
+    for d in applied:  # 足したファイルだけを見る（現行にあるファイルの書き換えは、その項目のせいではない）
+        rel = str(d.get("file", ""))
+        unread = "" if (current / rel).exists() else unread_skill_file(candidate, rel)
+        if unread:
+            problems.append(f"{d.get('id')}: {unread}")
     named = sorted(g for g in terms if _mentions(g, cand_text.lower()) and not _mentions(g, cur_text.lower()))
     if named:
         problems.append(f"採点スクリプトの名前を書いています（{named}）。採点の中身に合わせた変更は holdout で通用しません")

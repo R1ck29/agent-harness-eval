@@ -602,6 +602,7 @@ python -m harness_eval promote --run "$HOLDOUT/&lt;実行ID&gt;" --candidate can
 <tr><td>train のタスク固有の文字列を足す</td><td>候補の全文と現行の全文の差に、train の依頼文にある識別子・ファイル名・大文字の名前・4 桁以上の数値、25 文字以上同じ文、タスク id が新しく出る（項目をまたいで組み立てても見つける）</td></tr>
 <tr><td>採点に関わる</td><td>Markdown 以外・配布物の外を変える、採点スクリプトと同じ名前のファイルを変える、採点スクリプトの名前（拡張子を除いた名前も、6 文字以上なら）を書く</td></tr>
 <tr><td>常時読み込まれる指示を増やす</td><td>CLAUDE.md・AGENTS.md・rules/、そこから <code>@</code> で読み込むファイル、agents/ の説明の文字数が <code>--max-growth-chars</code>（既定 0）より増える。配布物の外を <code>@</code> で読み込む指示を足す。スキルの説明文はここでは数えず、下の 3 つのプロファイルで比べる</td></tr>
+<tr><td>読まれないファイルを足す</td><td><code>skills/&lt;名前&gt;/</code> に新しく足したファイルのうち、SKILL.md にそのパス（<code>skills/&lt;名前&gt;/</code> から）が書かれていないもの、SKILL.md のないフォルダのもの（読み込まれないので配っても効かない）</td></tr>
 <tr><td>当てられた項目がない</td><td>—</td></tr>
 </table>
 <p>見送りの理由には件数と項目 id だけを出し、依頼文の一部は表示しません。通った候補でも、言い換えた近道までは見つけられないので、採否は holdout の <code>promote</code> で決めます。</p>

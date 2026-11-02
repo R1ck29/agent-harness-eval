@@ -52,7 +52,8 @@ PROMPT = """あなたは、多くの利用者に配る Claude Code の配布物�
 - 多くの依頼に通じる変更にする。特定のタスクの名前・ファイル名・列名・数値・依頼の文をそのまま書かない。採用するかは、あなたが
   見ていない別のタスクで決めるので、特定のタスクだけに効く変更は採用されない
 - kind: INV = 作業手順（確認・検証・形式の守り方など、業務によらない手順）／ DOM = 業務知識（その業務の用語・データの扱い）
-- file は harness/ からの相対パスで、Markdown（.md）だけ（例: CLAUDE.md、skills/<名前>/SKILL.md）。スクリプト・設定・hooks は変えない
+- file は harness/ からの相対パスで、Markdown（.md）だけ（例: CLAUDE.md、skills/<名前>/SKILL.md）。スクリプト・設定・hooks は変えない。
+  skills/<名前>/ に SKILL.md 以外のファイルを足すなら、SKILL.md にそのパス（skills/<名前>/ から）を書く（書かれていないファイルは読まれない）
 - 毎回読み込まれる指示（CLAUDE.md・AGENTS.md・rules/、そこから @ で読み込むファイル、agents/ の説明）は合計で {max_growth} 文字までしか
   増やせない。足すなら既存の文を置き換えて短くするか、必要なときだけ読まれるスキル（skills/<名前>/SKILL.md。先頭に --- で囲んだ
   name と description）に入れる

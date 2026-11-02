@@ -280,6 +280,27 @@ class PrecheckTests(unittest.TestCase):
         skill = self.d(op="add", old="", kind="DOM", file="skills/ask/SKILL.md", new="---\nname: ask\ndescription: 曖昧な依頼\n---\n確認する")
         self.assertEqual(self.check([skill]), [])  # スキルは 3 つのプロファイルで比べるので、ここでは数えない
 
+    def test_unread_skill_files(self):
+        """skills/<名前>/ で読まれるのは SKILL.md と、SKILL.md に名前が書かれたファイルだけ（実測: 中身 x の SKIN.md を足した候補）。"""
+        stray = self.d(op="add", old="", file="skills/monthly/SKIN.md", new="x")
+        self.assertTrue(any("読まれません" in p for p in self.check([stray])))
+        ref = self.d(op="add", old="", file="skills/monthly/reference/cols.md", new="- 列の説明")
+        link = self.d(id="d2", op="add", old="", file="skills/monthly/SKILL.md", new="\n詳しくは reference/cols.md を読む。\n")
+        self.assertEqual(self.check([ref, link]), [])
+        self.assertTrue(any("読まれません" in p for p in self.check([ref])))
+        orphan = self.d(op="add", old="", file="skills/ask/notes.md", new="- 確認する")
+        self.assertTrue(any("SKILL.md がなく" in p for p in self.check([orphan])))
+        # ./ 付き・Markdown のリンクは参照。名前の一部（footnotes.md）や別の場所の同じ名前（other/cols.md）は参照ではない
+        linked = self.d(id="d2", op="add", old="", file="skills/monthly/SKILL.md", new="\n[列](./reference/cols.md)\n")
+        self.assertEqual(self.check([ref, linked]), [])
+        for text, file in (("footnotes.md を見る", "notes.md"), ("other/cols.md を見る", "cols.md")):
+            added = self.d(op="add", old="", file="skills/monthly/" + file, new="x")
+            noise = self.d(id="d2", op="add", old="", file="skills/monthly/SKILL.md", new="\n" + text + "\n")
+            self.assertTrue(any(p.startswith("d1:") and "読まれません" in p for p in self.check([added, noise])), text)
+        # 現行にあるファイルの書き換えは、参照されていなくてもその項目のせいにしない
+        write(self.cur / "skills" / "monthly" / "old.md", "- 古いメモ\n")
+        self.assertEqual(self.check([self.d(file="skills/monthly/old.md", old="- 古いメモ", new="- 新しいメモ")]), [])
+
     def test_copy_detected_even_if_harness_shares_a_phrase(self):
         shared = "結果は必ず日本語で、表は Markdown の表として出力してください。"
         self.train += shared
