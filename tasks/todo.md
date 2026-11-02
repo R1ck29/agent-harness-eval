@@ -1,6 +1,40 @@
 # Harness Eval Work Plan
 
-## Current: the improver (`improve`, v0.6.0) — 2026-10-31
+## Current: real-model verification of v0.6.0 and follow-ups — 2026-11-01 → 11-02
+
+PR R1ck29/agent-harness-eval#1 (v0.6.0) merged into main (62ffd9e) on the user's "Merge it". Real runs used a
+setup-token subscription token from the user's Keychain, passed only through the environment (company users use
+`ANTHROPIC_API_KEY` instead; same `inherit_env` mechanism, not exercised for real here).
+
+### Found and fixed (each reviewed independently, pushed to main)
+
+- bf87c0f: trials inherited the desktop app's session variables (CLAUDE_EFFORT, CLAUDE_CODE_SIMPLE, auth refresh,
+  messaging socket…). INHERITED_UNSET extended (names confirmed in the CLI binary), doctor lists any other CLAUDE*
+  variable reaching trials, four auth/connection variables added to ROUTE_VARS.
+- 8a15bee: the improver added a stray `SKIN.md` ("x") — pre-check now rejects skill files Claude Code never reads.
+- 5238d1b: `--retries` (default 1) returns pre-check reasons to the improver; train strings only in the workdir
+  `retry.json`; `attempts` in improve.json. README / sample profiles document API-key auth. Graph: 4 nodes PASS.
+- a8bc6a0: rejected proposals' old/new/reason and notes are not written to improve.json. Graph: 1 node PASS.
+- 2f1da2f: README shows `HARNESS_EVAL_REAL_CLI=1` (the one skipped test; with it 144/144 pass).
+
+### Real-model results (claude-sonnet-5-5, CLI 2.1.295; scratch copies of the samples with `split: train`)
+
+- doctor --live OK; ds-lite smoke 4/4; ds-lite minus CLAUDE.md rules still 4/4 (the skill carries the format) —
+  the bundled smoke tasks do not discriminate harnesses with current models.
+- CLAUDE.md-only harness without rules: 2 failures → improve: isolation ok (7 routes blocked), 0 denials. Without
+  retry both proposals were rejected (a train file name written as an example); with retry the second passed, and
+  the candidate passed 4/4 on train, predictions 2/2 (1 trial each, holdout not compared).
+
+### Open
+
+- Real holdout run + `promote` (needs ≥ 20 holdout tasks, e.g. from harvest).
+- Windows: deny path forms, Outlook switches; real Codex runs.
+- An API-key run in the company environment (`doctor --live` first; a gateway in ANTHROPIC_BASE_URL goes in
+  `inherit_env`).
+- Version is still 0.6.0 although `--retries` and fixes landed after it.
+- Merged branch `claude/ecstatic-panini-c6209e` (local, remote, worktree) still exists.
+
+## Previous: the improver (`improve`, v0.6.0) — 2026-10-31
 
 Asked by the v0.5 session (user, 2026-10-31: "やり残しなく"): build the improver that v0.5 left outside the tool
 (design.html §10 残タスク 1–3, guide §11 step 3). Scope: an isolated `claude -p` that reads only the failed train
