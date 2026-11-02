@@ -396,13 +396,14 @@ def cmd_improve(a) -> int:
         raise SpecError("改善役は Claude Code で動かします。--auth-profile に認証を借りる claude_code のプロファイルを指定してください")
     if not ID_RE.match(a.candidate_id) or a.candidate_id == profile.id:
         raise SpecError(f"--candidate-id は英数字・_・.・- の id で、現行（{profile.id}）とは別の名前にします")
-    if a.max_growth_chars < 0:
-        raise SpecError("--max-growth-chars は 0 以上")
+    if a.max_growth_chars < 0 or a.retries < 0:
+        raise SpecError("--max-growth-chars と --retries は 0 以上")
     run_dir = Path(a.run)
     o = ImproveOptions(run_dir=run_dir, profile=profile, tasks=load_tasks(a.tasks), holdout_outs=[Path(h) for h in a.holdout_out],
                        out=Path(a.out), exe=ClaudeAdapter(auth, a.executable).exe, auth=auth, model=a.model or None,
                        candidate_id=a.candidate_id, max_growth=a.max_growth_chars,
-                       previous=Path(a.previous) if a.previous else None, max_turns=a.max_turns, timeout_s=a.timeout_s)
+                       previous=Path(a.previous) if a.previous else None, max_turns=a.max_turns, timeout_s=a.timeout_s,
+                       retries=a.retries)
     ledger = Path(a.ledger) if a.ledger else run_dir.parent / "spend.jsonl"
     run_id = "improve-" + datetime.now().strftime("%Y%m%d-%H%M%S")
     code, r = improve(o, print, lambda usd: append_spend(ledger, usd, run_id, "claude_code", auth.billing))
@@ -416,7 +417,8 @@ def cmd_improve(a) -> int:
         print(f"  {d['id']} [{d['kind']}] {d['op']} {d['file']}: {state}。直る予想 {d['fixes'] or 'なし'}")
     for p in r.get("precheck", {}).get("problems", []):
         print(f"  - 見送る理由: {p}")
-    print(f"改善役: {IMPROVE_LABEL[code]}（費用 {r.get('cost_usd')}、権限で止められた読み取り {r.get('permission_denials', 0)} 回）")
+    calls = f"呼び出し {len(r['attempts'])} 回、" if r.get("attempts") else ""
+    print(f"改善役: {IMPROVE_LABEL[code]}（{calls}費用 {r.get('cost_usd')}、権限で止められた読み取り {r.get('permission_denials', 0)} 回）")
     if code == 0:
         print(f"候補: {Path(a.out) / 'harness'}（中身を確かめてから評価してください）")
         print(f"  dev の足切り（現行と同じ id）: {r['profiles']['dev']}")
@@ -562,6 +564,8 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--previous", help="前回の improve.json。予想した「直るタスク」がこの実行で直ったかを確かめる")
     sp.add_argument("--max-turns", type=int, default=40)
     sp.add_argument("--timeout-s", type=int, default=1800)
+    sp.add_argument("--retries", type=int, default=1,
+                    help="事前検査で見送ったとき、理由を返して作り直させる回数（既定 1。0 で作り直さない）")
     sp.add_argument("--ledger", help="費用台帳（既定: --run の親の spend.jsonl）")
     sp.set_defaults(fn=cmd_improve)
     sp = sub.add_parser("skill-variants", help="スキルを「なし／説明文だけ／説明文＋本文」の 3 つのプロファイルにする")

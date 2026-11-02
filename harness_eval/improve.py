@@ -19,7 +19,7 @@ from typing import Any, Callable
 from . import __version__
 from .adapters import _classify_message, _status_type
 from .candidate import (KINDS, OPS, apply_deltas, changed_skills, install_targets, materialize, prechecks, profile_raw,
-                        write_profile, write_skill_variants)
+                        train_specific_strings, write_profile, write_skill_variants)
 from .isolation import TrialPaths, ancestor_instructions, build_env, copy_credentials, make_trial_paths, run_process
 from .mockapi import improver_cmd, init_problem, parse_stream, read_isolation_check, special_chars, unusable_path
 from .record import TrialRecord
@@ -47,7 +47,7 @@ PROMPT = """あなたは、多くの利用者に配る Claude Code の配布物�
 - failures/<タスク id>/task.md : 現行の配布物で失敗した練習用（train）タスクの依頼
 - failures/<タスク id>/<試行>/result.json : 採点の結果・失敗の分類・最終応答・ツールの呼び出し
 - failures/<タスク id>/<試行>/transcript.jsonl : 試行の記録（ある場合）
-{previous}
+{previous}{retry}
 失敗の原因を読み、配布物への変更項目を出してください。守ること:
 - 多くの依頼に通じる変更にする。特定のタスクの名前・ファイル名・列名・数値・依頼の文をそのまま書かない。採用するかは、あなたが
   見ていない別のタスクで決めるので、特定のタスクだけに効く変更は採用されない
@@ -66,6 +66,8 @@ PROMPT = """あなたは、多くの利用者に配る Claude Code の配布物�
 失敗した train タスク: {tasks}
 """
 
+RETRY_MATERIAL = ("- retry.json : 直前の案（deltas）と、評価の前の検査で見送られた理由（problems）・その元になった train の依頼の"
+                  "文字列（train_strings）。\n  理由を直した案を出す（その文字列は言い換えても書かない）\n")
 OTEL_PROMPT_VARS = ["OTEL_LOG_USER_PROMPTS", "OTEL_LOG_TOOL_DETAILS"]  # 依頼文・記録を読ませるので、テレメトリへの記録は止める
 SCRIPT_RE = re.compile(r"[\w./\\-]+\.(?:py|sh|ps1|js)")  # command グレーダーの採点スクリプト（spec.Task.content_hash と同じ見つけ方）
 
@@ -85,6 +87,7 @@ class ImproveOptions:
     previous: Path | None = None
     max_turns: int = 40
     timeout_s: int = 1800
+    retries: int = 1          # 事前検査で見送ったとき、理由を返して作り直させる回数
 
 
 def train_failures(run_dir: Path, profile: Profile) -> tuple[dict[str, Any], dict[str, list[TrialRecord]], list[TrialRecord]]:
@@ -289,22 +292,38 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
             return 2, report
         if auth.copy_credentials:
             copy_credentials("claude_code", tp)
-        prompt = PROMPT.format(tasks=", ".join(sorted(failed)), max_growth=o.max_growth, max_deltas=MAX_DELTAS,
-                               previous="- previous.json : 前回の改善の予想と、それが当たったか\n" if previous else "")
         log(f"改善役を起動します（失敗した train タスク {len(failed)} 件、読ませない場所 {len(deny)} か所）")
-        out, cost, err, denials = run_improver(o, tp, prompt, deny, env)
-        spend(cost)
-        if cost is None:
-            log("改善役の費用が分からないため、費用台帳に記録していません")
-        report.update(cost_usd=cost, permission_denials=denials)
-        if err:
-            report["error"] = err
-            log(err)
-            _write_report(o.out, report)
-            return 2, report
+        attempts: list[dict[str, Any]] = []
+        report["attempts"] = attempts
+        for n in range(o.retries + 1):
+            prompt = PROMPT.format(tasks=", ".join(sorted(failed)), max_growth=o.max_growth, max_deltas=MAX_DELTAS,
+                                   previous="- previous.json : 前回の改善の予想と、それが当たったか\n" if previous else "",
+                                   retry=RETRY_MATERIAL if n else "")
+            out, cost, err, denials = run_improver(o, tp, prompt, deny, env)
+            spend(cost)
+            if cost is None:
+                log("改善役の費用が分からないため、費用台帳に記録していません")
+            attempts.append({"cost_usd": cost, "permission_denials": denials})
+            costs = [a["cost_usd"] for a in attempts]
+            report.update(cost_usd=None if None in costs else sum(costs),
+                          permission_denials=sum(a["permission_denials"] for a in attempts))
+            if err:
+                report["error"] = err
+                log(err)
+                _write_report(o.out, report)
+                return 2, report
+            built = build_candidate(o, out, failed, tasks, sorted(meta.get("tasks", {})))
+            attempts[-1]["precheck_problems"] = built["problems"]
+            if not built["problems"] or n == o.retries:
+                break
+            # 理由の元になった train の依頼の文字列は、改善役の作業フォルダ（このあと消す）にだけ置く
+            (tp.workdir / "retry.json").write_text(json.dumps(
+                {"deltas": built["deltas"], "problems": built["problems"], "train_strings": built["train_strings"]},
+                ensure_ascii=False, indent=2), encoding="utf-8")
+            log(f"事前検査で見送りました（理由 {len(built['problems'])} 件）。理由を返して作り直させます（{n + 1}/{o.retries} 回目）")
     finally:
         shutil.rmtree(root, ignore_errors=True)  # 依頼文・トランスクリプトの写しと認証の複製を残さない
-    return write_candidate(o, out, report, failed, tasks, sorted(meta.get("tasks", {})), log)
+    return write_candidate(o, built, report, log)
 
 
 def _clean_delta(d: Any, i: int, failed: dict[str, list[TrialRecord]]) -> tuple[dict[str, Any], int]:
@@ -317,24 +336,28 @@ def _clean_delta(d: Any, i: int, failed: dict[str, list[TrialRecord]]) -> tuple[
     return clean, len(raw_fixes) - len(fixes)
 
 
-def write_candidate(o: ImproveOptions, out: dict[str, Any], report: dict[str, Any], failed: dict[str, list[TrialRecord]],
-                    tasks: dict[str, Task], train_ids: list[str], log: Callable[[str], None]) -> tuple[int, dict[str, Any]]:
-    """変更項目を現行の写しに適用し、事前検査を通れば dev・holdout・スキル比較のプロファイルを書き出す。"""
+def build_candidate(o: ImproveOptions, out: dict[str, Any], failed: dict[str, list[TrialRecord]], tasks: dict[str, Task],
+                    train_ids: list[str]) -> dict[str, Any]:
+    """変更項目を現行の写しに適用して <out>/harness を組み立て（作り直すときは前の案を消してから）、事前検査をする。
+    train_strings（見送りの元になった train の依頼の文字列）は改善役に返すためだけのもので、記録には入れない。"""
     deltas, dropped = [], 0
     for i, d in enumerate((out.get("deltas") if isinstance(out.get("deltas"), list) else [])[:MAX_DELTAS]):
         c, n = _clean_delta(d, i, failed)
         deltas.append(c)
         dropped += n
     harness = o.out / "harness"
+    if harness.exists():
+        shutil.rmtree(harness)
     current = Path(tempfile.mkdtemp(prefix="harness-eval-current-"))
     try:
         materialize(o.profile, current)
         materialize(o.profile, harness)
         results = apply_deltas(harness, deltas)
         applied = [d for d, r in zip(deltas, results, strict=True) if r["applied"]]
-        train = [tasks[t] for t in train_ids if t in tasks]
+        train_text = "\n".join(tasks[t].prompt for t in train_ids if t in tasks)
         problems = prechecks(current, harness, applied, [d for d, r in zip(deltas, results, strict=True) if not r["applied"]],
-                             "\n".join(t.prompt for t in train), train_ids, grader_files(list(tasks.values())), o.max_growth)
+                             train_text, train_ids, grader_files(list(tasks.values())), o.max_growth)
+        strings = train_specific_strings(current, harness, train_text, train_ids) if problems else []
         skills = changed_skills(current, harness)
     finally:
         shutil.rmtree(current, ignore_errors=True)
@@ -342,8 +365,16 @@ def write_candidate(o: ImproveOptions, out: dict[str, Any], report: dict[str, An
     for d in applied:
         for t in d["fixes"]:
             predictions.setdefault(t, []).append(d["id"])
-    report.update(notes=str(out.get("notes") or ""), deltas=[{**d, **r} for d, r in zip(deltas, results, strict=True)],
-                  predictions=predictions, dropped_fixes=dropped, precheck={"passed": not problems, "problems": problems})
+    return {"notes": str(out.get("notes") or ""), "deltas": [{**d, **r} for d, r in zip(deltas, results, strict=True)],
+            "predictions": predictions, "dropped": dropped, "problems": problems, "train_strings": strings, "skills": skills}
+
+
+def write_candidate(o: ImproveOptions, built: dict[str, Any], report: dict[str, Any],
+                    log: Callable[[str], None]) -> tuple[int, dict[str, Any]]:
+    """事前検査の結果を記録し、通っていれば dev・holdout・スキル比較のプロファイルを書き出す。"""
+    harness, problems, skills = o.out / "harness", built["problems"], built["skills"]
+    report.update(notes=built["notes"], deltas=built["deltas"], predictions=built["predictions"], dropped_fixes=built["dropped"],
+                  precheck={"passed": not problems, "problems": problems})
     if problems:
         _write_report(o.out, report)
         return 1, report

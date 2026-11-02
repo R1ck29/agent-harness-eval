@@ -109,7 +109,8 @@ if os.environ.get("ANTHROPIC_API_KEY") == "sk-ant-harness-eval-mock":
 
 def improver():
     """improve の改善役。作業フォルダの材料を見て変更項目を返す。FAKE_IMPROVE: overfit（train のタスク id を書く）／
-    bash（管理設定で Bash が有効になった起動を真似る）／ error（失敗）。FAKE_IMPROVE_MANIFEST に見えたファイルと deny を書く。"""
+    copy-once（retry.json がなければ依頼の 1 行を写す）／ bash（管理設定で Bash が有効になった起動を真似る）／ error（失敗）。
+    FAKE_IMPROVE_MANIFEST に見えたファイルと deny（と retry.json の中身）を書く。"""
     mode = os.environ.get("FAKE_IMPROVE", "")
     tools = args[args.index("--tools") + 1].split(",") + ["StructuredOutput"] + (["Bash"] if mode == "bash" else [])
     perm = args[args.index("--permission-mode") + 1] if "--permission-mode" in args else "auto"
@@ -119,7 +120,9 @@ def improver():
         deny = json.loads(args[args.index("--settings") + 1]).get("permissions", {}).get("deny", [])
         Path(os.environ["FAKE_IMPROVE_MANIFEST"]).write_text(json.dumps(
             {"files": sorted(p.relative_to(cwd).as_posix() for p in cwd.rglob("*") if p.is_file()), "deny": deny,
-             "home": os.environ.get("HOME"), "cfg": os.environ.get("CLAUDE_CONFIG_DIR")}, ensure_ascii=False), encoding="utf-8")
+             "home": os.environ.get("HOME"), "cfg": os.environ.get("CLAUDE_CONFIG_DIR"),
+             "retry": json.loads((cwd / "retry.json").read_text(encoding="utf-8")) if (cwd / "retry.json").exists() else None},
+            ensure_ascii=False), encoding="utf-8")
     if mode == "error":
         out({"type": "result", "subtype": "success", "is_error": True, "result": "Not logged in · Please run /login"})
         sys.exit(1)
@@ -136,6 +139,10 @@ def improver():
     if mode == "overfit":
         deltas.append({"id": "d3", "kind": "DOM", "file": "skills/table-format/SKILL.md", "op": "add", "old": "",
                        "new": f"- {failures[0]} では必ず表にする。", "reason": "", "fixes": failures[:1]})
+    if mode == "copy-once" and not (cwd / "retry.json").exists():
+        asks = [x for t in failures for x in (cwd / "failures" / t / "task.md").read_text(encoding="utf-8").split("## 依頼")[-1].splitlines()]
+        deltas.append({"id": "d3", "kind": "DOM", "file": "skills/table-format/SKILL.md", "op": "add", "old": "",
+                       "new": "\n- " + max(asks, key=len), "reason": "", "fixes": failures[:1]})
     out({"type": "result", "subtype": "success", "is_error": False, "result": "", "num_turns": 5, "total_cost_usd": 0.05,
          "permission_denials": [], "structured_output": {"deltas": deltas, "notes": "fake"}})
     sys.exit(0)

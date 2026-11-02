@@ -547,7 +547,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <ol>
 <li>タスクに <code>split</code>・<code>family</code> を書き、<code>validate --selftest</code> を通す。</li>
 <li>現行の配布物で train を実行する（<code>run --tasks my-tasks/tasks --split train --profiles prof/current.yaml --out "$OUT"</code>）。</li>
-<li><b>改善役で候補を作る</b>：その実行のフォルダ（<code>$OUT/&lt;実行ID&gt;</code>）を <code>improve</code> に渡す（下の「改善役の仕組み」）。終了コード 0 なら <code>&lt;候補&gt;/harness/</code> の中身を人が確かめる。1（事前検査で見送り）なら理由を読んでもう一度、3 なら train に失敗がない。</li>
+<li><b>改善役で候補を作る</b>：その実行のフォルダ（<code>$OUT/&lt;実行ID&gt;</code>）を <code>improve</code> に渡す（下の「改善役の仕組み」）。終了コード 0 なら <code>&lt;候補&gt;/harness/</code> の中身を人が確かめる。事前検査で見送ると、理由を改善役に返して 1 回作り直させる。それでも 1（見送り）なら理由を読んでもう一度実行する。3 なら train に失敗がない。</li>
 <li><b>dev で足切り</b>：<code>gate</code> は前回と今回の<b>同じプロファイル id</b> を比べるので、候補は現行と同じ id のプロファイル（<code>improve</code> が書き出す <code>&lt;候補&gt;/dev/current.yaml</code>。同じフォルダに置くと id が重複して読み込めないので別のフォルダにある）で dev を実行し、現行の dev の実行と比べる。dev は 10 タスク以上（<code>--min-tasks</code> の既定）にする。不通過なら 3 に戻り、判定不能なら dev のタスクを増やす。</li>
 <li><b>holdout で昇格判定</b>：今度は候補を別の id のプロファイル（<code>&lt;候補&gt;/holdout/candidate.yaml</code>、<code>id: candidate</code>）にし、現行と 1 回の実行で holdout を実行して <code>promote</code>。新しいスキルを足した候補は、スキルなし・説明文だけ・説明文＋本文の 3 つも同じ実行で比べる（下の「スキルの候補」）。<code>--candidate</code>・<code>--incumbent</code> にはプロファイルの id を書きます。</li>
 <li>昇格したら、人が変更の中身を確かめてから配布する。見送り・判定不能なら 3 に戻る。次の回の <code>improve</code> に <code>--previous &lt;候補&gt;/improve.json</code> を付けると、前回「直る」と予想したタスクが直ったかを確かめ、改善役にも見せる。m が 10 前後になったら holdout を作り直す（偶然の勝ちが出やすくなるため）。</li>
@@ -605,7 +605,7 @@ python -m harness_eval promote --run "$HOLDOUT/&lt;実行ID&gt;" --candidate can
 <tr><td>読まれないファイルを足す</td><td><code>skills/&lt;名前&gt;/</code> に新しく足したファイルのうち、SKILL.md にそのパス（<code>skills/&lt;名前&gt;/</code> から）が書かれていないもの、SKILL.md のないフォルダのもの（読み込まれないので配っても効かない）</td></tr>
 <tr><td>当てられた項目がない</td><td>—</td></tr>
 </table>
-<p>見送りの理由には件数と項目 id だけを出し、依頼文の一部は表示しません。通った候補でも、言い換えた近道までは見つけられないので、採否は holdout の <code>promote</code> で決めます。</p>
+<p>見送りの理由には件数と項目 id だけを出し、依頼文の一部は表示しません。見送ったときは、理由と、その元になった train の依頼の文字列を改善役の作業フォルダ（<code>retry.json</code>。終わると消す）にだけ置いて作り直させます（<code>--retries</code>、既定 1）。候補は最後の案だけで組み立て直します。通った候補でも、言い換えた近道までは見つけられないので、採否は holdout の <code>promote</code> で決めます。</p>
 <h3>スキルの候補（3 つのプロファイル）</h3>
 <p>スキルは説明文だけでも、呼ばれ方が変わって振る舞いが変わります。そこで足した・変えたスキルごとに、<b>スキルなし／説明文だけ（本文と付属ファイルを外す）／説明文＋本文</b>の 3 つのプロファイル（<code>&lt;候補&gt;/skills/&lt;名前&gt;/</code>。<code>run --profiles</code> にこのフォルダを渡す）を書き出します。それ以外の配布物は 3 つとも同じです。同じ実行で並べると、「説明文だけ − なし」が説明文の効果、「説明文＋本文 − 説明文だけ」が本文の効果になります。人が書いたスキルも <code>skill-variants</code> で同じ 3 つにできます。</p>
 <pre><code>python -m harness_eval skill-variants --profile prof/current.yaml --skill monthly-summary --out sv-01

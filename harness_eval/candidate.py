@@ -185,6 +185,31 @@ def _spans(train: str, text: str) -> set[str]:
     return {t[i:i + NGRAM] for i in range(max(len(t) - NGRAM + 1, 0)) if t[i:i + NGRAM].strip() and t[i:i + NGRAM] in body}
 
 
+def _train_specific(cur_text: str, cand_text: str, train_text: str, task_ids: list[str]) -> tuple[set[str], set[str], list[str]]:
+    """候補で新しく出た train 固有の文字列: (依頼文の識別子・数値など, NGRAM 文字の一致, タスク id)。"""
+    tokens = {t for t in leaked(train_text, {"x": cand_text}) - leaked(train_text, {"x": cur_text}) if t != "<ngram>"}
+    copies = _spans(train_text, cand_text) - _spans(train_text, cur_text)
+    ids = sorted(t for t in task_ids if t.lower() in cand_text.lower() and t.lower() not in cur_text.lower())
+    return tokens, copies, ids
+
+
+def train_specific_strings(current: Path, candidate: Path, train_text: str, task_ids: list[str]) -> list[str]:
+    """改善役に作り直させるときに返す、候補で新しく出た train 固有の文字列（一致はつながった範囲ごと）。
+    train の依頼の一部なので、改善役の作業フォルダにだけ置き、記録・画面には出さない。"""
+    if not train_text:
+        return []
+    tokens, copies, ids = _train_specific(_all_text(current), _all_text(candidate), train_text, task_ids)
+    t, runs, start = _norm(train_text), set(), None
+    for i in range(max(len(t) - NGRAM + 1, 0) + 1):  # 最後の 1 回は、続いていた一致を閉じるため
+        hit = i < len(t) - NGRAM + 1 and t[i:i + NGRAM] in copies
+        if hit and start is None:
+            start = i
+        elif not hit and start is not None:
+            runs.add(t[start:i - 1 + NGRAM])
+            start = None
+    return sorted(tokens | runs | set(ids))
+
+
 def grader_terms(grader_names: set[str]) -> set[str]:
     """採点スクリプトの名前と、拡張子を除いた名前（6 文字以上のときだけ。短い名前は普通の語と重なる）。"""
     return {n.lower() for n in grader_names} | {Path(n).stem.lower() for n in grader_names if len(Path(n).stem) >= 6}
@@ -222,9 +247,7 @@ def prechecks(current: Path, candidate: Path, applied: list[dict[str, Any]], not
     if named:
         problems.append(f"採点スクリプトの名前を書いています（{named}）。採点の中身に合わせた変更は holdout で通用しません")
     if train_text:
-        tokens = {t for t in leaked(train_text, {"x": cand_text}) - leaked(train_text, {"x": cur_text}) if t != "<ngram>"}
-        copies = _spans(train_text, cand_text) - _spans(train_text, cur_text)
-        ids = sorted(t for t in task_ids if t.lower() in cand_text.lower() and t.lower() not in cur_text.lower())
+        tokens, copies, ids = _train_specific(cur_text, cand_text, train_text, task_ids)
         if tokens or copies or ids:
             who = sorted({str(d.get("id")) for d in applied
                           if any(x in _norm(str(d.get("new") or "")).lower() for x in tokens | {c.lower() for c in copies} | set(ids))})

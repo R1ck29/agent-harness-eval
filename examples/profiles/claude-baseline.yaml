@@ -2,6 +2,9 @@
 id: claude-baseline
 agent: claude_code
 model: sonnet
+# API キーを環境変数 ANTHROPIC_API_KEY に設定している場合（その端末で実行する。値はここに書かない）:
+# inherit_env: [ANTHROPIC_API_KEY]   # 組織のゲートウェイを ANTHROPIC_BASE_URL で指定していれば、それも並べる
+# （billing は既定の api: 呼び出しごとに課金。--max-cost-usd と月の予算が効く）
 # Bedrock を使う場合（利用先の値に置き換える）:
 # env:
 #   CLAUDE_CODE_USE_BEDROCK: "1"

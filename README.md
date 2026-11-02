@@ -44,9 +44,10 @@ python -m harness_eval --version
 
 - **結果の置き場所（`--out`）はリポジトリとホームの外**にします。上のフォルダに `CLAUDE.md` や `.claude/` があると、
   エージェントがそれを読んで比較が壊れるため、`run` が止まります（[図解ガイド 5 章](docs/guide.html#isolation)）。
-- **認証**：試行は一時ホームで動くので、普段のログイン（macOS のキーチェーン）は届きません。Bedrock なら
-  `examples/profiles/claude-*.yaml` の 2 つに `env:` を、サブスクリプションなら `claude setup-token` のトークンを `inherit_env` で
-  渡します（書き方は `claude-baseline.yaml` のコメントと [リファレンス 5 章](docs/reference.html#auth)）。
+- **認証**：試行は一時ホームで動くので、普段のログイン（macOS のキーチェーン）は届きません。`examples/profiles/claude-*.yaml` の 2 つに、
+  API キーを環境変数に設定しているなら `inherit_env: [ANTHROPIC_API_KEY]`（名前だけ。値は書かない。`billing` は既定の `api`）、Bedrock なら `env:`、
+  サブスクリプションなら `claude setup-token` のトークンを `inherit_env` で書き足します（書き方は `claude-baseline.yaml` のコメントと
+  [リファレンス 5 章](docs/reference.html#auth)）。
 - **Windows（PowerShell）**：1 行目を `$OUT="C:\harness-eval"` にし、行末の `\` を `` ` `` に置き換えます。
 
 ```bash

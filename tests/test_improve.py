@@ -604,6 +604,51 @@ class ImproveE2E(unittest.TestCase):
         self.assertEqual(code, 2, out)
         self.assertIn("変わっています", out)
 
+    def test_retry_with_precheck_reasons(self):
+        """事前検査で見送ったら、理由と元の文字列を作業フォルダの retry.json だけで改善役に返し、作り直させる。"""
+        run = self.train_run(self.thin)
+        os.environ["FAKE_IMPROVE"] = "copy-once"  # 1 回目は依頼の 1 行を写し、retry.json があれば写さない
+        code, out = self.improve(run, self.tmp / "c-retry")
+        self.assertEqual(code, 0, out)
+        self.assertIn("作り直させます", out)
+        r = json.loads((self.tmp / "c-retry" / "improve.json").read_text(encoding="utf-8"))
+        self.assertEqual([bool(a["precheck_problems"]) for a in r["attempts"]], [True, False])
+        self.assertAlmostEqual(r["cost_usd"], 0.1)  # 2 回分の合計（台帳にも 2 回記録）
+        self.assertEqual((self.res / "spend.jsonl").read_text(encoding="utf-8").count("improve-"), 2)
+        self.assertTrue(r["precheck"]["passed"])
+        self.assertNotIn("d3", [d["id"] for d in r["deltas"]])  # 候補は最後の案だけで組み立て直す
+        self.assertNotIn("sales.csv", (self.tmp / "c-retry" / "harness" / "skills" / "table-format" / "SKILL.md").read_text(encoding="utf-8"))
+        retry = json.loads(self.manifest.read_text(encoding="utf-8"))["retry"]
+        self.assertEqual([d["id"] for d in retry["deltas"]][-1], "d3")
+        self.assertTrue(retry["problems"])
+        found = " ".join(retry["train_strings"])
+        self.assertIn("sales.csv", found)
+        self.assertTrue(any(len(s) >= 25 for s in retry["train_strings"]), retry["train_strings"])
+        # 元の文字列は作業フォルダ（消える）にだけ置き、記録と画面には出さない
+        self.assertFalse(Path(json.loads(self.manifest.read_text(encoding="utf-8"))["home"]).exists())
+        for text in (out, (self.tmp / "c-retry" / "improve.json").read_text(encoding="utf-8")):
+            self.assertNotIn("sales.csv", text)
+            self.assertFalse(any(s in text for s in retry["train_strings"] if len(s) >= 25))
+
+    def test_retries_exhausted_or_off(self):
+        run = self.train_run(self.thin)
+        os.environ["FAKE_IMPROVE"] = "overfit"  # 毎回 train のタスク id を書く
+        code, out = self.improve(run, self.tmp / "c-twice")
+        self.assertEqual(code, 1, out)
+        r = json.loads((self.tmp / "c-twice" / "improve.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(r["attempts"]), 2)
+        self.assertFalse((self.tmp / "c-twice" / "holdout").exists())
+        code, out = self.improve(run, self.tmp / "c-once", None, "--retries", "0")
+        self.assertEqual(code, 1, out)
+        r = json.loads((self.tmp / "c-once" / "improve.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(r["attempts"]), 1)
+        self.assertNotIn("作り直させます", out)
+        os.environ["FAKE_IMPROVE"] = "error"  # 改善役の失敗では作り直さない
+        code, out = self.improve(run, self.tmp / "c-err")
+        self.assertEqual(code, 2, out)
+        self.assertEqual(len(json.loads((self.tmp / "c-err" / "improve.json").read_text(encoding="utf-8"))["attempts"]), 1)
+        self.assertEqual(self.improve(run, self.tmp / "c-neg", None, "--retries", "-1")[0], 2)
+
     def test_transcript_mentioning_holdout_is_not_given(self):
         run = self.train_run(self.thin)
         logs = sorted(run.glob("trials/csv-summary-format/claude-thin/*/stdout.jsonl"))
