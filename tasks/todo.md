@@ -31,7 +31,7 @@ setup-token subscription token from the user's Keychain, passed only through the
 - Windows: deny path forms, Outlook switches; real Codex runs.
 - An API-key run in the company environment (`doctor --live` first; a gateway in ANTHROPIC_BASE_URL goes in
   `inherit_env`).
-- Version is still 0.6.0 although `--retries` and fixes landed after it.
+- Done 2026-11-02 (user: "Yes, bump it"): version 0.7.0 for `--retries` and the fixes after 0.6.0 (no tags exist).
 - Merged branch `claude/ecstatic-panini-c6209e` (local, remote, worktree) still exists.
 
 ## Previous: the improver (`improve`, v0.6.0) — 2026-10-31
