@@ -240,7 +240,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <tr><td><code>HOME</code>・<code>USERPROFILE</code></td><td><code>home/</code></td><td>普段のユーザー設定・スキルを読ませない（<code>isolate_home: false</code> で無効）</td></tr>
 <tr><td><code>CLAUDE_CONFIG_DIR</code> / <code>CODEX_HOME</code></td><td><code>home/.claude</code> / <code>home/.codex</code></td><td>配布物だけを置いた設定ディレクトリで起動する</td></tr>
 <tr><td><code>AWS_SHARED_CREDENTIALS_FILE</code>・<code>AWS_CONFIG_FILE</code></td><td>本物の <code>~/.aws/…</code></td><td>ホームを差し替えても Bedrock の認証を使える（<code>isolate_home: true</code> で、未設定かつファイルがあるときだけ）</td></tr>
-<tr><td><code>CLAUDECODE</code> など親セッションの変数</td><td>削除</td><td>Claude Code の中から実行しても入れ子扱いにならない</td></tr>
+<tr><td><code>CLAUDECODE</code>・<code>CLAUDE_EFFORT</code> など親セッションの変数</td><td>削除</td><td>Claude Code・デスクトップアプリの中から実行しても、推論の強さ・認証の付帯情報（トークンのスコープなど）・親アプリとの通信を引き継がず、端末から実行したときと同じに動く（一覧は <code>harness_eval/isolation.py</code> の <code>INHERITED_UNSET</code>。それ以外で試行に渡る <code>CLAUDE…</code> 変数は <code>doctor</code> が名前を表示）</td></tr>
 <tr><td>プロファイルの <code>env</code></td><td>追加・上書き</td><td>Bedrock の設定など</td></tr>
 <tr><td>経路を変える変数（API キー・Bedrock の切り替え・モデルの別名など）</td><td>親の値をそのまま渡す</td><td>経路と請求先が変わるので、プロファイルで宣言させる（<a href="reference.html#auth">リファレンス「認証」</a>）</td></tr>
 </table>

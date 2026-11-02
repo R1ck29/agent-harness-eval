@@ -12,7 +12,7 @@ from pathlib import Path
 import yaml
 
 from . import __version__
-from .isolation import ancestor_instructions, missing_inherited, route_variables
+from .isolation import ancestor_instructions, missing_inherited, passed_claude_vars, route_variables
 from .metrics import HARD_CATEGORIES, gate, holdout_comparisons, promote
 from .report import render
 from .runner import HOLDOUT_LEDGER, RunOptions, Runner, load_run
@@ -293,6 +293,9 @@ def cmd_doctor(a) -> int:
         if inherited:
             static_ok = False
             print(f"  NG: 親の環境から経路を変える変数 {inherited} を宣言なしに引き継ぎます（値は表示しません）。意図して親の値を使うならプロファイルの inherit_env に名前だけ書き（値は書かない）、不要なら env_unset に入れてください")
+        passed = passed_claude_vars(p, dict(os.environ))
+        if passed:
+            print(f"  注意: 親の環境から試行に渡る Claude Code の変数（経路以外）: {passed}。意図しない設定ならプロファイルの env_unset に入れてください")
     leaks = ancestor_instructions(Path(a.out))
     if leaks:
         static_ok = False

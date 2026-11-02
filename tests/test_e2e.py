@@ -299,9 +299,10 @@ class E2E(unittest.TestCase):
         """親の環境から経路を変える変数（API キーなど）を引き継ぐと NG。値は表示しない。"""
         from harness_eval.isolation import ROUTE_VARS
         clean = {k: v for k, v in os.environ.items() if k not in {x for xs in ROUTE_VARS.values() for x in xs}}
-        with mock.patch.dict(os.environ, clean, clear=True):
+        with mock.patch.dict(os.environ, {**clean, "CLAUDE_CODE_CLIENT_CERT": "/c.pem"}, clear=True):
             code, out = run_cli("doctor", "--profiles", str(self.ex / "profiles"), "--out", str(self.out))
-            self.assertEqual(code, 0, out)
+            self.assertEqual(code, 0, out)  # 経路以外で試行に渡る変数は注意として名前を出すだけ（NG にしない）
+            self.assertIn("CLAUDE_CODE_CLIENT_CERT", out)
             os.environ["ANTHROPIC_API_KEY"] = "sk-secret-value"
             code, out = run_cli("doctor", "--profiles", str(self.ex / "profiles"), "--out", str(self.out))
         self.assertEqual(code, 1, out)

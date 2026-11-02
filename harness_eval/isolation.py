@@ -26,10 +26,21 @@ from pathlib import Path
 
 from .spec import ROUTE_VARS, Profile
 
-# 親プロセス（Claude Code の中から実行した場合など）から受け継ぐと挙動が変わる変数
+# 親プロセス（Claude Code・デスクトップアプリ・Agent SDK の中から実行した場合など）が子に渡すセッションの変数。
+# 受け継ぐと、同じプロファイルでも起動元で挙動が変わる（入れ子扱い・推論の強さ・簡易モード・認証の更新・親アプリへの通信など）。
+# CLI の実行ファイルに名前が含まれることを確認したもの（2.1.295）。CLAUDE で始まる変数には組織で意図して設定するもの
+# （クライアント証明書など）もあるので、接頭辞ではまとめて消さない。ここにない変数は doctor が名前を表示する
 INHERITED_UNSET = [
     "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_CODE_SSE_PORT", "CLAUDE_CONFIG_DIR", "CLAUDE_PROJECT_DIR", "CODEX_HOME",
+    "CLAUDE_EFFORT", "CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_OAUTH_SCOPES", "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH",
+    "CLAUDE_CODE_ACCOUNT_UUID", "CLAUDE_CODE_ORGANIZATION_UUID", "CLAUDE_CODE_USER_EMAIL",
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_HOST_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_TERMINAL_MCP_TOOLS", "CLAUDE_CODE_REPORT_FINDINGS",
+    "CLAUDE_CODE_DESKTOP_APP_VERSION", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
+    "CLAUDE_CODE_EMIT_STARTUP_TIMING", "CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES", "CLAUDE_CODE_EAGER_FLUSH",
+    "CLAUDE_CODE_STARTUP_FAILURE_RESULTS", "CLAUDE_CODE_DISABLE_CRON", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+    "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_AGENT_SDK_MCP_NO_PREFIX", "CLAUDE_PID",
 ]
 
 
@@ -51,6 +62,15 @@ def missing_inherited(profile: Profile, environ: dict[str, str]) -> list[str]:
     API キーやトークンなら、全試行がログインできずに終わる。"""
     dropped = set(INHERITED_UNSET) | set(profile.env_unset)
     return [n for n in profile.inherit_env if n not in profile.env and (not environ.get(n) or n in dropped)]
+
+
+def passed_claude_vars(profile: Profile, environ: dict[str, str]) -> list[str]:
+    """経路以外で親の環境から試行にそのまま渡る Claude Code の変数（名前だけ）。組織で意図した設定か、
+    INHERITED_UNSET にない新しいセッションの変数。意図しないものは env_unset に入れる。"""
+    if profile.agent != "claude_code":
+        return []
+    skip = set(INHERITED_UNSET) | set(profile.env_unset) | set(profile.env) | set(ROUTE_VARS["claude_code"])
+    return sorted(n for n in environ if n.startswith("CLAUDE") and n not in skip)
 
 
 def route_signature(profile: Profile, environ: dict[str, str]) -> str:

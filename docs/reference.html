@@ -185,6 +185,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <p>API キー・トークン・Bedrock などへの切り替え・接続先・モデルの別名の実体を変える環境変数（<code>ANTHROPIC_API_KEY</code>・<code>CLAUDE_CODE_OAUTH_TOKEN</code>・<code>CLAUDE_CODE_USE_BEDROCK</code>・<code>AWS_BEARER_TOKEN_BEDROCK</code>・<code>ANTHROPIC_DEFAULT_SONNET_MODEL</code>・<code>OPENAI_API_KEY</code>・<code>CODEX_API_KEY</code> など。一覧は <code>harness_eval/spec.py</code> の <code>ROUTE_VARS</code>）は、試行の経路と請求先を変えます。値を固定してよいものは <code>env</code>、親の環境の値を使うもの（秘密）は <code>inherit_env</code> に名前だけ書きます。</p>
 <ul>
 <li>宣言せずに親から引き継いでいる変数と、<code>inherit_env</code> で宣言したのに設定されていない変数（別の端末で export した、など）があると、<code>doctor</code> が NG（終了コード 1）、<code>run</code> が警告します。</li>
+<li>Claude のデスクトップアプリの中から実行すると、アプリの接続先 <code>ANTHROPIC_BASE_URL</code> が親の環境に入っていて NG になります。アプリの経路を使わないので <code>env_unset: [ANTHROPIC_BASE_URL]</code> に入れます。</li>
 <li>経路の変数とキャッシュの関係は <a href="guide.html#cost">図解ガイド 8 章</a> にあります。</li>
 </ul>
 <h3>LLM 判定の認証</h3>

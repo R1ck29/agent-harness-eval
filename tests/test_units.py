@@ -8,6 +8,7 @@ import time
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -18,9 +19,11 @@ from harness_eval.isolation import (build_env, make_trial_paths, run_install, ru
 from harness_eval.metrics import decide, deltas, gate, paired_bootstrap, pass_hat_k, summarize  # noqa: E402
 from harness_eval.runner import append_spend, month_spent, schedule  # noqa: E402
 from harness_eval.adapters import older_than_verified  # noqa: E402
-from harness_eval.isolation import ancestor_instructions, missing_inherited, route_signature, route_variables  # noqa: E402
+from harness_eval.isolation import (INHERITED_UNSET, ancestor_instructions, missing_inherited,  # noqa: E402
+                                    passed_claude_vars, route_signature, route_variables)
 from harness_eval.record import TrialRecord  # noqa: E402
-from harness_eval.spec import Grader, SpecError, lint, load_profile, load_task, load_tasks, load_profiles  # noqa: E402
+from harness_eval.spec import (ROUTE_VARS, Grader, SpecError, lint, load_profile, load_profiles, load_task,  # noqa: E402
+                               load_tasks)
 
 DATA = ROOT / "tests" / "data"
 
@@ -475,6 +478,19 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(missing_inherited(p, {"CLAUDE_CODE_OAUTH_TOKEN": ""}), ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"])
         self.assertEqual(missing_inherited(p, {"CLAUDE_CODE_OAUTH_TOKEN": "t", "ANTHROPIC_BASE_URL": "u"}), ["ANTHROPIC_BASE_URL"])
 
+    def test_passed_claude_vars(self):
+        """経路以外で親の環境から試行に渡る Claude Code の変数（名前だけ）。消す親セッションの変数・env_unset・env で決めたものは除く。"""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        p = load_profile(write(tmp / "p.yaml", "id: p\nagent: claude_code\nenv: {CLAUDE_CODE_MAX_OUTPUT_TOKENS: '1'}\n"
+                                               "env_unset: [CLAUDE_CODE_DROP]\n"))
+        parent = {"CLAUDE_CODE_CLIENT_CERT": "/c.pem", "CLAUDE_EFFORT": "high", "CLAUDE_CODE_DROP": "1",
+                  "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "9", "CLAUDE_CODE_OAUTH_TOKEN": "t", "PATH": "/bin"}
+        self.assertEqual(passed_claude_vars(p, parent), ["CLAUDE_CODE_CLIENT_CERT"])
+        self.assertEqual(passed_claude_vars(load_profile(write(tmp / "c.yaml", "id: c\nagent: codex\n")), parent), [])
+        # 経路の変数を消す一覧に入れると、宣言なしの引き継ぎ（doctor の NG）も inherit_env も効かなくなる
+        self.assertEqual(set(INHERITED_UNSET) & {n for ns in ROUTE_VARS.values() for n in ns}, set())
+
     def test_billing_not_in_profile_hash(self):
         tmp = Path(tempfile.mkdtemp())
         a = load_profile(write(tmp / "a.yaml", "id: a\nagent: claude_code\n")).content_hash()
@@ -550,15 +566,14 @@ install:
   - {run: '{python} -c "import os,pathlib; pathlib.Path(os.environ[\\"CLAUDE_CONFIG_DIR\\"],\\"ran\\").write_text(\\"1\\")"'}
 """))
         tp = make_trial_paths(self.tmp / "trial", ".claude")
-        os.environ["CLAUDECODE"] = "1"
-        os.environ["DROP_ME"] = "1"
-        try:
+        # 親セッション（デスクトップアプリなど）の変数は消し、組織で意図して設定した変数（クライアント証明書など）は渡す
+        parent = {"CLAUDECODE": "1", "CLAUDE_EFFORT": "low", "CLAUDE_CODE_MESSAGING_SOCKET": "/s", "DROP_ME": "1",
+                  "CLAUDE_CODE_CLIENT_CERT": "/c.pem"}
+        with mock.patch.dict(os.environ, parent):
             env = build_env(p, tp, "CLAUDE_CONFIG_DIR")
-        finally:
-            os.environ.pop("CLAUDECODE")
-            os.environ.pop("DROP_ME")
-        self.assertNotIn("CLAUDECODE", env)
-        self.assertNotIn("DROP_ME", env)
+        for k in ("CLAUDECODE", "CLAUDE_EFFORT", "CLAUDE_CODE_MESSAGING_SOCKET", "DROP_ME"):
+            self.assertNotIn(k, env)
+        self.assertEqual(env["CLAUDE_CODE_CLIENT_CERT"], "/c.pem")
         self.assertEqual(env["HOME"], str(tp.home))
         self.assertEqual(env["USERPROFILE"], str(tp.home))
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(tp.config_dir))
