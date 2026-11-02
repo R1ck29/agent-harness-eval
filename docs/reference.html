@@ -252,7 +252,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <tr><td><code>run</code>・<code>profile</code></td><td>材料にした実行（<code>run_id</code>・パス）と現行の配布物（id・<code>harness_hash</code>）</td></tr>
 <tr><td><code>failed_tasks</code>・<code>skipped_material</code></td><td>改善役に見せた失敗タスクと、その失敗した試行の数。渡さなかった記録（result.json・transcript.jsonl）の数（条件は <a href="guide.html#improve">図解ガイド 11 章</a>）</td></tr>
 <tr><td><code>isolation_check</code></td><td>自己確認の結果（<code>state</code>: <code>ok</code>／<code>leak</code>／<code>unverified</code>、<code>message</code>）</td></tr>
-<tr><td><code>deltas</code></td><td>最後の呼び出しの変更項目（<code>id</code>・<code>kind</code>（INV／DOM）・<code>file</code>・<code>op</code>（add／replace／remove）・<code>old</code>・<code>new</code>・<code>reason</code>・<code>fixes</code>・<code>applied</code>・<code>why</code>）</td></tr>
+<tr><td><code>deltas</code></td><td>最後の呼び出しの変更項目（<code>id</code>・<code>kind</code>（INV／DOM）・<code>file</code>・<code>op</code>（add／replace／remove）・<code>old</code>・<code>new</code>・<code>reason</code>・<code>fixes</code>・<code>applied</code>・<code>why</code>）。見送ったときは、train の依頼の写しを含みうる <code>old</code>・<code>new</code>・<code>reason</code> と <code>notes</code> を書かない（中身は <code>harness/</code> で確かめる）</td></tr>
 <tr><td><code>predictions</code>・<code>dropped_fixes</code></td><td>直ると予想したタスク → 当てられた項目の id。失敗タスクにない id を予想した数（外した）</td></tr>
 <tr><td><code>precheck</code></td><td><code>passed</code> と、見送るなら <code>problems</code></td></tr>
 <tr><td><code>profiles</code>・<code>candidate</code>・<code>skills</code></td><td>書き出したプロファイルのパス、holdout 用の id と <code>harness_hash</code>、スキルごとの 3 つのパス（作れなかったスキルは <code>{"error": 理由}</code>）</td></tr>

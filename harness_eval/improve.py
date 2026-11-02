@@ -373,11 +373,12 @@ def write_candidate(o: ImproveOptions, built: dict[str, Any], report: dict[str, 
                     log: Callable[[str], None]) -> tuple[int, dict[str, Any]]:
     """事前検査の結果を記録し、通っていれば dev・holdout・スキル比較のプロファイルを書き出す。"""
     harness, problems, skills = o.out / "harness", built["problems"], built["skills"]
-    report.update(notes=built["notes"], deltas=built["deltas"], predictions=built["predictions"], dropped_fixes=built["dropped"],
-                  precheck={"passed": not problems, "problems": problems})
-    if problems:
+    report.update(predictions=built["predictions"], dropped_fixes=built["dropped"], precheck={"passed": not problems, "problems": problems})
+    if problems:  # 見送った案の本文と見立ては train の依頼の写しを含みうるので記録しない（中身は <out>/harness で確かめる）
+        report["deltas"] = [{k: v for k, v in d.items() if k not in ("old", "new", "reason")} for d in built["deltas"]]
         _write_report(o.out, report)
         return 1, report
+    report.update(notes=built["notes"], deltas=built["deltas"])
     desc = f"improve の候補（元: {o.profile.id}、実行 {report['run']['run_id']}）"
     # dev 用（現行と同じ id。gate は同じ id を前回と比べる）と holdout 用（別の id。promote は同じ実行の中で比べる）。
     # どちらも ../harness を指すので、配布物のハッシュは同じになる

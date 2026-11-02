@@ -513,6 +513,7 @@ class ImproveE2E(unittest.TestCase):
         self.assertEqual(r["isolation_check"]["state"], "ok")
         self.assertTrue(r["precheck"]["passed"], r["precheck"])
         self.assertEqual({d["kind"] for d in r["deltas"]}, {"INV", "DOM"})
+        self.assertTrue(all({"old", "new", "reason"} <= set(d) for d in r["deltas"]) and "notes" in r)  # 通った案は本文も記録する
         self.assertEqual(r["dropped_fixes"], 1)  # 失敗タスクにない予想（no-such-task）は外す
         self.assertTrue(set(r["predictions"]) <= set(r["failed_tasks"]) and r["predictions"])
         # 改善役に見えたのは材料の写しだけ（タスク定義・採点スクリプト・holdout は作業フォルダにない）。deny に holdout とタスク定義
@@ -629,6 +630,21 @@ class ImproveE2E(unittest.TestCase):
         for text in (out, (self.tmp / "c-retry" / "improve.json").read_text(encoding="utf-8")):
             self.assertNotIn("sales.csv", text)
             self.assertFalse(any(s in text for s in retry["train_strings"] if len(s) >= 25))
+
+    def test_rejected_text_not_recorded(self):
+        """見送った案の本文（old・new・reason）と見立ては train の依頼の写しを含みうるので improve.json に書かない。中身は harness/ で見る。"""
+        run = self.train_run(self.thin)
+        os.environ["FAKE_IMPROVE"] = "copy-once"
+        code, out = self.improve(run, self.tmp / "c-rej", None, "--retries", "0")
+        self.assertEqual(code, 1, out)
+        text = (self.tmp / "c-rej" / "improve.json").read_text(encoding="utf-8")
+        r = json.loads(text)
+        self.assertNotIn("sales.csv", text)
+        self.assertNotIn("notes", r)
+        for d in r["deltas"]:
+            self.assertFalse({"old", "new", "reason"} & set(d), d)
+            self.assertTrue({"id", "kind", "file", "op", "fixes", "applied", "why"} <= set(d), d)
+        self.assertIn("sales.csv", (self.tmp / "c-rej" / "harness" / "skills" / "table-format" / "SKILL.md").read_text(encoding="utf-8"))
 
     def test_retries_exhausted_or_off(self):
         run = self.train_run(self.thin)
