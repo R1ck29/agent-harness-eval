@@ -32,7 +32,7 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <body>
 <main>
 <h1>Agent Harness Eval 設計記録</h1>
-<p class="lead">なぜこの作りなのか（採用・不採用の理由、評価の方法、確かめた事実、残るリスク）の記録です。仕組みは <a href="guide.html">図解ガイド</a>、書き方とオプションは <a href="reference.html">リファレンス</a> にあります。最終更新 2026-11-02（v0.6.0）。</p>
+<p class="lead">なぜこの作りなのか（採用・不採用の理由、評価の方法、確かめた事実、残るリスク）の記録です。仕組みは <a href="guide.html">図解ガイド</a>、書き方とオプションは <a href="reference.html">リファレンス</a> にあります。最終更新 2026-11-02（v0.7.0）。</p>
 <nav>
 <a href="#decision">1. 結論</a><a href="#lineage">2. 統合の経緯</a><a href="#tools">3. 既存ツールとの比較</a><a href="#method">4. 評価の方法</a><a href="#cost">5. 費用と経路</a><a href="#trust">6. 信頼の境界</a><a href="#rejected">7. 採らなかった案</a><a href="#facts">8. 確かめた CLI の挙動</a><a href="#measured">9. 開発時の実測</a><a href="#loop">10. 自己改善ループとの関係</a><a href="#risks">11. 残るリスク</a><a href="#sources">12. 根拠</a>
 </nav>
@@ -224,7 +224,7 @@ th{background:var(--accent-bg);font-weight:600;white-space:nowrap}
 <tr><td>2</td><td>起動ごとの自己確認（偽の API で deny が効くかを確かめ、確かめられなければ止める）</td><td>§8 の実機確認、利用者の指示</td><td>deny の効き方は CLI の版・OS・パスの書き方で変わりうる（<code>[ ]</code> と <code>\</code> は実際に違った）。利用先の Windows や将来の版でも、動かすその場で確かめる</td></tr>
 <tr><td>3</td><td>変更項目を作業手順（INV）と業務知識（DOM）に分け、項目ごとに追記・置き換え・削除で返させる</td><td>Harness²（INV / DOM）、ACE（項目ごとの差分）</td><td>まとめて書き直させると、どの変更が効いたか・壊したかが分からず、良い部分まで失われやすい</td></tr>
 <tr><td>4</td><td>直ると予想するタスクを書かせ、次の回で当たったかを照合して改善役にも見せる</td><td>Harness²</td><td>当たらない予想が続くなら、改善役が失敗の原因を読み違えている</td></tr>
-<tr><td>5</td><td>評価の前の事前検査（train 固有の文字列・採点に関わる変更・常時読み込まれる指示の増加・読まれないスキルのファイル）。見送ったら理由を返して 1 回作り直させる</td><td>arXiv:2607.12227（改善は「タスク固有の近道」だった）、The Regression Tax（指示を足すほど他が壊れる）</td><td>明らかな近道と肥大化は、費用のかかる評価の前に落とす。言い換えた近道は見つけられないので、採否は holdout で決める</td></tr>
+<tr><td>5</td><td>評価の前の事前検査（train 固有の文字列・採点に関わる変更・常時読み込まれる指示の増加・v0.7.0 から読まれないスキルのファイル）。v0.7.0 からは見送ったら理由を返して 1 回作り直させる</td><td>arXiv:2607.12227（改善は「タスク固有の近道」だった）、The Regression Tax（指示を足すほど他が壊れる）</td><td>明らかな近道と肥大化は、費用のかかる評価の前に落とす。言い換えた近道は見つけられないので、採否は holdout で決める</td></tr>
 <tr><td>6</td><td>スキルの候補を「なし／説明文だけ／説明文＋本文」の 3 つのプロファイルで比べる（<code>skill-variants</code> でも作れる）</td><td>The Regression Tax（説明文だけでも振る舞いが変わる）</td><td>説明文の効果（呼ばれ方の変化）と本文の効果を分けて見る</td></tr>
 </table>
 <p>改善の対象は 2 層に分けて考える（利用者と決定、2026-10-31）。<b>共有の層</b>は全員に配る配布物で、改善役が複数の利用者から集めた材料をもとに中央で改善し、複数の利用者の架空化したタスクで作った holdout の <code>promote</code> を通ったときだけ配る（1 人にしか効かない変更は配らない）。<b>個人の層</b>は各利用者の <code>~/.claude/CLAUDE.md</code> などで、v0.6.0 では扱わない（将来は提案して本人が確認する形にし、自動では書き換えない。理由は §7）。</p>
