@@ -469,7 +469,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <figcaption>書き換えは Claude Code を、OS の一時フォルダの一時ホーム・ツールなし・会話を保存しない（<code>--no-session-persistence</code>）・構造化出力の設定で呼びます。書き出すのは <code>--out</code> の <code>tasks/</code>・<code>fixtures/</code>・<code>checks/</code>・<code>references/</code>（正解例）で、既にあるファイルは上書きしません。</figcaption>
 </figure>
 <h3>読む履歴</h3>
-<p><code>CLAUDE_CONFIG_DIR</code>・<code>CODEX_HOME</code> を設定していればその場所を読みます。チームの履歴をまとめて使うなら <code>--source</code> にフォルダか履歴ファイルを並べます。</p>
+<p><code>CLAUDE_CONFIG_DIR</code>・<code>CODEX_HOME</code> を設定していればその場所を読みます。履歴が複数の場所にあるなら <code>--source</code> にフォルダか履歴ファイルを並べます（使うのは自分の履歴だけです。他の利用者の依頼は、本人が自分の端末で harvest して確かめた架空化タスクとして受け取ります）。</p>
 <table>
 <tr><th>読む履歴</th><th>中身</th><th>取り出すもの</th></tr>
 <tr><td>Claude Code <code>history.jsonl</code></td><td>入力欄に打った文。貼り付けは <code>[Pasted text #1 +N lines]</code> と <code>pastedContents</code></td><td>貼り付けを展開した依頼文</td></tr>

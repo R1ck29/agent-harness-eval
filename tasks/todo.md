@@ -13,8 +13,10 @@ promote-efficiency 2, improve-efficiency 3 and docs 3 with user-granted extra at
   descriptions, SKILL.md name/description must stay non-empty).
 - Real model (2026-11-03): a 52-char cut gave -55.7..-58 context tokens per task (0.3%); cost difference lost in
   noise (+1.0%), efficiency promote rejected; success decision identical to 0.7.0.
-- Open: GitHub Pages / public-repo wording (user asked to drop the word 組織内 and rewrite history); guide §9
-  "team histories" wording under the own-data premise.
+- Done 2026-11-04 (user): the in-house wording replaced with neutral wording in every tracked file and in the
+  whole git history (git filter-repo, force-pushed); guide §9 now says only your own history is used.
+- Open (user to decide): other company-identifying details in the public repo (installer and environment
+  description, card-brand stop words, payment-themed test prompts, a claude.ai share link above).
 
 ## Previous: real-model verification of v0.6.0 and follow-ups — 2026-11-01 → 11-02
 
