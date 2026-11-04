@@ -236,7 +236,7 @@ class PrecheckTests(unittest.TestCase):
         write(self.cur / "skills" / "monthly" / "SKILL.md", SKILL)
         self.train = "acme_orders.csv の 2026年9月 の売上を store_code ごとに集計して summary.md に書いてください。"
 
-    def check(self, deltas, max_growth=0, graders=("check_monthly_totals.py",)):
+    def check(self, deltas, max_growth=0, graders=("check_monthly_totals.py",), goal="fix"):
         cand = self.tmp / "cand"
         if cand.exists():
             import shutil
@@ -246,7 +246,7 @@ class PrecheckTests(unittest.TestCase):
         results = apply_deltas(cand, deltas)
         applied = [d for d, r in zip(deltas, results, strict=True) if r["applied"]]
         return prechecks(self.cur, cand, applied, [d for d, r in zip(deltas, results, strict=True) if not r["applied"]],
-                         self.train, ["csv-summary-train"], set(graders), max_growth)
+                         self.train, ["csv-summary-train"], set(graders), max_growth, goal=goal)
 
     def d(self, **kw):
         base = {"id": "d1", "kind": "INV", "file": "CLAUDE.md", "op": "replace", "old": "- 表は Markdown。", "new": "- 表はMarkdown。",
@@ -279,6 +279,31 @@ class PrecheckTests(unittest.TestCase):
         self.assertTrue(any("常時" in p for p in self.check([rule])))
         skill = self.d(op="add", old="", kind="DOM", file="skills/ask/SKILL.md", new="---\nname: ask\ndescription: 曖昧な依頼\n---\n確認する")
         self.assertEqual(self.check([skill]), [])  # スキルは 3 つのプロファイルで比べるので、ここでは数えない
+
+    def test_efficiency_keeps_skill_headers(self):
+        """efficiency: 既存のスキルの name・description を消す・空にする候補は、パスの書き方によらず見送る。"""
+        long_md = "# ルール\n- 表は Markdown。\n- " + "長い説明。" * 40 + "\n"
+        write(self.cur / "CLAUDE.md", long_md)
+        shrink = self.d(op="replace", old="- " + "長い説明。" * 40, new="- 短く。")
+        self.assertEqual(self.check([shrink], goal="efficiency"), [])
+        head = "---\nname: monthly\ndescription: 月別の集計に使う\n---\n"
+        for file, new in (("skills/monthly/SKILL.md", ""), ("skills/monthly/SKILL.md", "---\n---\n"),
+                          ("skills/monthly/SKILL.md", "---\nname: monthly\n---\n"),
+                          *(("skills/monthly/SKILL.md", f"---\nname: monthly\ndescription: {v}\n---\n") for v in (">", '""', "~", "# x"))):
+            strip = self.d(id="d2", op="replace", file=file, old=head, new=new)
+            self.assertTrue(any("name と description" in p for p in self.check([shrink, strip], goal="efficiency")), (file, new))
+        self.assertTrue(any("減っていません" in p for p in self.check([self.d(op="add", old="", new="- 足す。")], goal="efficiency")))
+        # 小文字の skill.md で新しいスキルを足しても、説明文は数え、ファイル名は見送る（数え漏れで「減った」ことにしない）
+        for new in ("---\nname: neo\ndescription: " + "長い説明。" * 300 + "\n---\n本文\n", "本文だけ\n"):
+            lower = self.d(id="d3", op="add", old="", file="skills/neo/skill.md", new=new)
+            problems = self.check([shrink, lower], goal="efficiency")
+            self.assertTrue(any("SKILL.md（大文字）" in p for p in problems), problems)
+        bloat = self.d(id="d3", op="add", old="", file="skills/neo/skill.md", new="---\nname: neo\ndescription: " + "長い説明。" * 300 + "\n---\n")
+        self.assertTrue(any("減っていません" in p for p in self.check([shrink, bloat], goal="efficiency")))
+        # 大文字小文字だけ違うパス: 区別しないファイルシステム（macOS など）では同じ SKILL.md を書き換える → 見送る
+        alias = self.d(id="d2", op="replace", file="skills/monthly/skill.md", old=head, new="---\n---\n")
+        if (self.cur / "skills" / "monthly" / "skill.md").exists():
+            self.assertTrue(any("name と description" in p for p in self.check([shrink, alias], goal="efficiency")))
 
     def test_unread_skill_files(self):
         """skills/<名前>/ で読まれるのは SKILL.md と、SKILL.md に名前が書かれたファイルだけ（実測: 中身 x の SKIN.md を足した候補）。"""
@@ -416,6 +441,34 @@ class SkillVariantTests(unittest.TestCase):
         write(b / "skills" / "edit" / "SKILL.md", SKILL + "2. 確認する\n")
         write(b / "skills" / "new" / "SKILL.md", SKILL)
         self.assertEqual(changed_skills(a, b), ["edit", "new"])
+
+
+class EfficiencyMaterialTests(unittest.TestCase):
+    def test_capped_expensive_trials_and_marks(self):
+        from harness_eval.improve import EXPENSIVE_TRIALS, write_efficiency_material
+        from harness_eval.record import TrialRecord
+        from harness_eval.spec import load_task
+        tmp = Path(tempfile.mkdtemp())
+        p = make_profile(tmp)
+        t = load_task(write(tmp / "tasks" / "a.yaml", "id: a\nprompt: 集計して\nsplit: train\ngraders: [{type: regex, pattern: x}]\n"))
+        recs = []
+        for i in range(EXPENSIVE_TRIALS + 3):
+            d = write(tmp / "runs" / str(i) / "stdout.jsonl", "secret-holdout-path\n" if i == 7 else "{}\n").parent
+            recs.append(TrialRecord(run_id="r", task_id="a", profile_id="cur", agent="claude_code", trial=i, cache_key="k",
+                                    task_hash="h", profile_hash="p", cli_version="v", passed=i % 2 == 0, trial_dir=str(d),
+                                    tokens={"input": 100 * i, "output": 1, "cache_read": 0, "cache_write": 0},
+                                    meta={"context_tokens": 1000}))
+        work = tmp / "work"
+        skipped = write_efficiency_material(work, p, {"a": t}, {"a": recs}, ["secret-holdout-path"])
+        kept = sorted(int(x.name) for x in (work / "trials" / "a").iterdir())
+        self.assertEqual(kept, [3, 4, 5, 6, 7])  # トークンの多い EXPENSIVE_TRIALS 件だけ
+        self.assertEqual(skipped, 1)  # 目印を含む記録は渡さない
+        self.assertFalse((work / "trials" / "a" / "7" / "transcript.jsonl").exists())
+        stats = json.loads((work / "stats.json").read_text(encoding="utf-8"))
+        self.assertEqual((stats["a"]["trials"], stats["a"]["pass_rate"], stats["a"]["mean_context_tokens"]), (8, 0.5, 1000))
+        al = json.loads((work / "always_loaded.json").read_text(encoding="utf-8"))
+        self.assertIn("skills/monthly/SKILL.md", al)
+        self.assertEqual(al["skills/monthly/SKILL.md"], len("---\nname: monthly\ndescription: 月別の集計に使う\n---\n"))
 
 
 class ImproveUnitTests(unittest.TestCase):
@@ -630,6 +683,38 @@ class ImproveE2E(unittest.TestCase):
         for text in (out, (self.tmp / "c-retry" / "improve.json").read_text(encoding="utf-8")):
             self.assertNotIn("sales.csv", text)
             self.assertFalse(any(s in text for s in retry["train_strings"] if len(s) >= 25))
+
+    def test_efficiency_goal(self):
+        """--goal efficiency: 有効な train の試行すべてを統計で渡し、毎回読み込まれる量が減る候補だけを通す。"""
+        run = self.train_run(self.thin)
+        os.environ["FAKE_IMPROVE"] = "shrink"
+        code, out = self.improve(run, self.tmp / "c-eff", None, "--goal", "efficiency")
+        self.assertEqual(code, 0, out)
+        r = json.loads((self.tmp / "c-eff" / "improve.json").read_text(encoding="utf-8"))
+        self.assertEqual((r["goal"], r["precheck"]["passed"], r["predictions"]), ("efficiency", True, {}))
+        m = json.loads(self.manifest.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(m["stats"]), sorted(self.TRAIN))  # 失敗したタスクだけでなく全 train タスク
+        self.assertTrue(all({"pass_rate", "mean_tokens", "mean_turns", "mean_context_tokens", "skills_used"} <= set(v)
+                            for v in m["stats"].values()))
+        self.assertIn("CLAUDE.md", m["always_loaded"])
+        self.assertFalse(any(f.startswith("failures/") for f in m["files"]))
+        self.assertTrue(all(any(f == f"tasks/{t}/task.md" for f in m["files"]) for t in self.TRAIN))
+        self.assertFalse(any(t in f for f in m["files"] for t in self.HOLDOUT))
+        # 毎回読み込まれる量が増える候補（説明文つきのスキルを足す）は見送る。max_growth を大きくしても同じ
+        os.environ["FAKE_IMPROVE"] = ""
+        code, out = self.improve(run, self.tmp / "c-grow", None, "--goal", "efficiency", "--retries", "0", "--max-growth-chars", "100000")
+        self.assertEqual(code, 1, out)
+        self.assertIn("減っていません", out)
+        os.environ["FAKE_IMPROVE"] = "empty-skill"
+        code, out = self.improve(run, self.tmp / "c-empty", None, "--goal", "efficiency", "--retries", "0")
+        self.assertEqual(code, 1, out)
+        self.assertIn("name と description", out)
+        # 既定（fix）は今までどおり失敗だけを渡す
+        os.environ["FAKE_IMPROVE"] = "shrink"
+        code, out = self.improve(run, self.tmp / "c-fix")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads((self.tmp / "c-fix" / "improve.json").read_text(encoding="utf-8"))["goal"], "fix")
+        self.assertTrue(any(f.startswith("failures/") for f in json.loads(self.manifest.read_text(encoding="utf-8"))["files"]))
 
     def test_rejected_text_not_recorded(self):
         """見送った案の本文（old・new・reason）と見立ては train の依頼の写しを含みうるので improve.json に書かない。中身は harness/ で見る。"""

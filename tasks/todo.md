@@ -1,6 +1,22 @@
 # Harness Eval Work Plan
 
-## Current: real-model verification of v0.6.0 and follow-ups — 2026-11-01 → 11-02
+## Current: efficiency as a first-class objective (v0.8.0) — 2026-11-03 → 11-04
+
+Premise (user, 2026-11-03): the distributor can see only their own usage data. Plan reviewed before execution
+(architect: approve with changes), five graph nodes, each independently reviewed (context-metric 2 attempts,
+promote-efficiency 2, improve-efficiency 3 and docs 3 with user-granted extra attempts, real-verify 1).
+
+- Measure: per-trial context_tokens (first main-thread request input incl. cache), per-task agent cost/tokens.
+- Judge: promote --objective efficiency (success non-inferior at one-sided alpha/m, per-task log cost ratio
+  significantly < 0, --anchor against creeping loss, objective recorded in the ledger).
+- Propose: improve --goal efficiency (stats for all valid train trials, net always-loaded reduction incl. skill
+  descriptions, SKILL.md name/description must stay non-empty).
+- Real model (2026-11-03): a 52-char cut gave -55.7..-58 context tokens per task (0.3%); cost difference lost in
+  noise (+1.0%), efficiency promote rejected; success decision identical to 0.7.0.
+- Open: GitHub Pages / public-repo wording (user asked to drop the word 組織内 and rewrite history); guide §9
+  "team histories" wording under the own-data premise.
+
+## Previous: real-model verification of v0.6.0 and follow-ups — 2026-11-01 → 11-02
 
 PR R1ck29/agent-harness-eval#1 (v0.6.0) merged into main (62ffd9e) on the user's "Merge it". Real runs used a
 setup-token subscription token from the user's Keychain, passed only through the environment (company users use

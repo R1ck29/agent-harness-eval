@@ -175,6 +175,43 @@ def always_loaded_chars(harness: Path) -> int:
     return total + sum(len(frontmatter(_read(f))) for f in sorted((harness / "agents").rglob("*.md")))
 
 
+def _skill_header_ok(text: str) -> bool:
+    """SKILL.md の先頭の --- の部分が YAML として読め、name と description が空でない文字列か
+    （description: > の続きがない・"" ・~ なども空とみなす）。"""
+    fm = frontmatter(text)
+    try:
+        d = yaml.safe_load("".join(fm.splitlines(keepends=True)[1:-1])) if fm else None
+    except yaml.YAMLError:
+        return False
+    return isinstance(d, dict) and all(isinstance(d.get(k), str) and d[k].strip() for k in ("name", "description"))
+
+
+def _skill_files(harness: Path) -> list[Path]:
+    """skills/<名前>/ の中の SKILL.md。大文字小文字を区別しないファイルシステムでは skill.md も同じ扱いになるので、
+    名前の大文字小文字を問わず選ぶ（数え漏れ・検査漏れを防ぐ）。"""
+    root = harness / "skills"
+    dirs = sorted(d for d in root.iterdir() if d.is_dir()) if root.is_dir() else []
+    return [f for d in dirs for f in sorted(d.iterdir()) if f.is_file() and f.name.lower() == "skill.md"]
+
+
+def skill_description_chars(harness: Path) -> int:
+    """スキルの説明文（SKILL.md の先頭の --- の部分）の文字数。スキルの一覧として毎回の会話に読み込まれる。"""
+    return sum(len(frontmatter(_read(f))) for f in _skill_files(harness))
+
+
+def always_loaded_breakdown(harness: Path) -> dict[str, int]:
+    """毎回読み込まれる部分のファイルごとの文字数（@ で読み込まれる分は読み込み元に足す。サブエージェント・スキルは説明文だけ）。"""
+    out: dict[str, int] = {}
+    files = _always_files(harness)
+    seen = {f.resolve() for f in files}
+    for f in files:
+        out[f.relative_to(harness).as_posix()] = len(_read(f)) + _imports(f, harness, seen)
+    for f in sorted((harness / "agents").rglob("*.md")) + _skill_files(harness):
+        if f.is_file():
+            out[f.relative_to(harness).as_posix()] = len(frontmatter(_read(f)))
+    return out
+
+
 def _all_text(harness: Path) -> str:
     return "\n".join(_read(f) for f in sorted(harness.rglob("*.md")) if f.is_file())
 
@@ -221,12 +258,14 @@ def _mentions(term: str, text: str) -> bool:
 
 
 def prechecks(current: Path, candidate: Path, applied: list[dict[str, Any]], not_applied: list[dict[str, Any]],
-              train_text: str, task_ids: list[str], grader_names: set[str], max_growth: int) -> list[str]:
+              train_text: str, task_ids: list[str], grader_names: set[str], max_growth: int, goal: str = "fix") -> list[str]:
     """評価の前に候補を落とす理由（空なら通過）。値そのもの（train の依頼の一部）は表示しないので、件数と項目 id だけを返す。
     1. train のタスク固有の文字列を足す（候補の全文と現行の全文の差で見る。項目をまたいで組み立てても見つける）
     2. 採点に関わるファイルを変える・採点スクリプトの名前を書く・Markdown 以外や配布物の外を変える
     3. 常時読み込まれる指示（@ で読み込まれる先・サブエージェントの説明を含む）を max_growth 文字より増やす
-    4. skills/ の中に読まれないファイルを足す（SKILL.md がない・SKILL.md にパスが書かれていない）"""
+    4. skills/ の中に読まれないファイルを足す（SKILL.md がない・SKILL.md にパスが書かれていない）
+    goal が efficiency のときは、毎回読み込まれる量（スキルの説明文を含む）が減らない候補と、SKILL.md を空にする・
+    先頭の --- の部分（name と description）をなくす候補も落とす（max_growth は見ない）"""
     problems = []
     if not applied:
         problems.append("適用できた変更項目がありません")
@@ -257,6 +296,24 @@ def prechecks(current: Path, candidate: Path, applied: list[dict[str, Any]], not
     added_outside = outside_imports(candidate) - outside_imports(current)
     if added_outside:
         problems.append(f"配布物の外のファイルを @ で読み込む指示を足しています（{len(added_outside)} 件）")
+    if goal == "efficiency":
+        before = always_loaded_chars(current) + skill_description_chars(current)
+        after = always_loaded_chars(candidate) + skill_description_chars(candidate)
+        if after >= before:
+            problems.append(f"毎回読み込まれる量（スキルの説明文を含む）が減っていません（現行 {before} 文字 → 候補 {after} 文字）")
+        # 項目のパスではなく、候補にある SKILL.md そのものを現行と比べる（大文字小文字の違うパスで同じファイルを書き換えられるため）
+        for f in _skill_files(candidate):
+            rel = f.relative_to(candidate).as_posix()
+            cur = current / "skills" / f.parent.name / f.name
+            text = _read(f)
+            if cur.is_file() and _read(cur) == text:
+                continue
+            if f.name != "SKILL.md":
+                problems.append(f"{rel}: スキルのファイル名は SKILL.md（大文字）にします（小文字では読み込まれない環境がある）")
+            elif not _skill_header_ok(text):
+                problems.append(f"skills/{f.parent.name}/SKILL.md の先頭の --- の部分に name と description がありません"
+                                "（空・説明文を消した）。スキルとして見つけられなくなります")
+        return problems
     growth = always_loaded_chars(candidate) - always_loaded_chars(current)
     if growth > max_growth:
         problems.append(f"常時読み込まれる指示（CLAUDE.md・AGENTS.md・rules/・その @ 読み込み・agents/ の説明）が {growth} 文字増えます"

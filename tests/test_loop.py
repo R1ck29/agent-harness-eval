@@ -8,8 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from harness_eval.metrics import (gate, holdout_comparisons, paired_outcomes, promote, sign_test, split_half_noise,  # noqa: E402
-                                  summarize)
+from harness_eval.metrics import (gate, holdout_comparisons, paired_outcomes, promote, promote_efficiency,  # noqa: E402
+                                  sign_test, split_half_noise, summarize)
 from harness_eval.record import TrialRecord  # noqa: E402
 from harness_eval.runner import RunOptions, select_pairs  # noqa: E402
 from harness_eval.spec import SpecError, lint, load_profile, load_task, split_mixing  # noqa: E402
@@ -107,10 +107,12 @@ class SignTestTests(unittest.TestCase):
         self.assertEqual(o["sign_p"], 1.0)
 
 
-def run_summary(rows, k=1, splits=None, install_empty=None):
-    """rows: {(profile, task): [passed, ...]}"""
+def run_summary(rows, k=1, splits=None, install_empty=None, costs=None):
+    """rows: {(profile, task): [passed, ...]}。costs: プロファイル → 1 試行の費用（既定 0.01。トークンも同じ比で増減）"""
+    c = lambda p: (costs or {}).get(p, 0.01)
     rs = [rec(profile_id=p, task_id=t, trial=i, passed=ok, score=1.0 if ok else 0.0, cmp_passed=ok, cmp_score=1.0 if ok else 0.0,
-              profile_hash=f"h-{p}", cost_usd=0.01, tokens={"input": 100, "output": 10, "cache_read": 0, "cache_write": 0})
+              profile_hash=f"h-{p}", cost_usd=c(p), cost_source="client_estimate",
+              tokens={"input": round(10000 * c(p)), "output": 10, "cache_read": 0, "cache_write": 0})
           for (p, t), oks in rows.items() for i, ok in enumerate(oks)]
     s = summarize(rs, k)
     tids = sorted({t for _, t in rows})
@@ -134,6 +136,110 @@ class GateRegressionBudgetTests(unittest.TestCase):
         self.assertEqual(gate(cur, prev, metric="pass_at_1", margin=0.3, min_tasks=10, max_regressions=1)["decision"], "pass")
 
 
+class PromoteEfficiencyTests(unittest.TestCase):
+    """効率の昇格: 成功率が許容幅の中で悪化せず、タスクごとの費用がはっきり下がったときだけ。"""
+    def setUp(self):
+        self.p = dict(candidate="cand", incumbent="inc", metric="pass_at_1", alpha=0.05, margin=0.05,
+                      max_regressions=0, min_tasks=10, comparisons=1, require_split="holdout")
+
+    def build(self, cand, inc, cand_cost, inc_cost, extra=None, **kw):
+        rows = {**{("cand", f"t{i}"): v for i, v in enumerate(cand)}, **{("inc", f"t{i}"): v for i, v in enumerate(inc)}, **(extra or {})}
+        return run_summary(rows, costs={"cand": cand_cost, "inc": inc_cost, "anc": 0.01}, **kw)
+
+    def test_cheaper_and_non_inferior_promotes(self):
+        s, rs = self.build([[True] * 2] * 12, [[True] * 2] * 12, 0.006, 0.01)
+        r = promote_efficiency(s, rs, **self.p)
+        self.assertEqual(r["decision"], "promote", r)
+        self.assertAlmostEqual(r["relative_saving"], 0.4)
+        self.assertEqual((len(r["cheaper"]), len(r["costlier"])), (12, 0))
+        self.assertEqual((r["objective"], r["efficiency_metric"]), ("efficiency", "cost_usd"))
+        self.assertEqual(promote_efficiency(s, rs, **self.p, efficiency_metric="tokens")["decision"], "promote")
+        with self.assertRaises(ValueError):
+            promote_efficiency(s, rs, **{**self.p, "alpha": 0.6})  # 信頼度が負になる α は受け付けない
+
+    def test_no_saving_rejects(self):
+        s, rs = self.build([[True] * 2] * 12, [[True] * 2] * 12, 0.012, 0.01)
+        self.assertEqual(promote_efficiency(s, rs, **self.p)["decision"], "reject")
+        s2, rs2 = self.build([[True] * 2] * 12, [[True] * 2] * 12, 0.01, 0.01)
+        self.assertEqual(promote_efficiency(s2, rs2, **self.p)["decision"], "reject")
+
+    def test_success_loss_blocks(self):
+        s, rs = self.build([[True]] * 10 + [[False]] * 2, [[True]] * 12, 0.006, 0.01)
+        self.assertEqual(promote_efficiency(s, rs, **self.p)["decision"], "reject")  # 回帰予算 0 を超える
+        r = promote_efficiency(s, rs, **{**self.p, "max_regressions": 5})
+        self.assertEqual(r["decision"], "inconclusive", r)  # 安くても成功率の下端が −margin を下回る
+        self.assertLess(r["success_ci"][0], -0.05)
+
+    def test_multiplicity_widens_the_success_bound(self):
+        s, rs = self.build([[True]] * 2 + [[False]] * 2, [[True]] * 4, 0.006, 0.01)  # 少ない例で区間を確かめる
+        wide = promote_efficiency(s, rs, **{**self.p, "min_tasks": 2, "max_regressions": 10, "margin": 1.0, "comparisons": 5})
+        narrow = promote_efficiency(s, rs, **{**self.p, "min_tasks": 2, "max_regressions": 10, "margin": 1.0})
+        self.assertLessEqual(wide["success_ci"][0], narrow["success_ci"][0])  # α/m が小さいほど区間は広い
+
+    def test_profiles_must_match_agent_and_cost_source(self):
+        s, rs = self.build([[True] * 2] * 12, [[True] * 2] * 12, 0.006, 0.01)
+        for r in rs:
+            if r.profile_id == "cand":
+                r.cost_source = "token_estimate"
+        r = promote_efficiency(s, rs, **self.p)
+        self.assertEqual(r["decision"], "reject")
+        self.assertTrue(any("cost_source" in x for x in r["problems"]))
+        self.assertEqual(promote_efficiency(s, rs, **self.p, efficiency_metric="tokens")["decision"], "promote")
+        for r in rs:
+            if r.profile_id == "cand":
+                r.agent = "codex"
+        self.assertTrue(any("エージェント" in x for x in promote_efficiency(s, rs, **self.p, efficiency_metric="tokens")["problems"]))
+
+    def test_unknown_cost_is_named_not_zero(self):
+        s, rs = self.build([[True] * 2] * 12, [[True] * 2] * 12, 0.006, 0.01)
+        s["tasks"]["cand"]["t3"]["mean_cost_usd"] = None  # timeout など費用の分からない試行がある
+        r = promote_efficiency(s, rs, **self.p)
+        self.assertEqual((r["decision"], r["unknown_cost_tasks"]), ("inconclusive", ["t3"]))
+        for t in s["tasks"]["cand"]:
+            s["tasks"]["cand"][t]["mean_cost_usd"] = None
+        self.assertIn("tokens", promote_efficiency(s, rs, **self.p)["hint"])
+
+    def test_anchor_blocks_creeping_losses(self):
+        anchor = {("anc", f"t{i}"): [True] for i in range(12)}
+        s, rs = self.build([[True]] * 11 + [[False]], [[True]] * 11 + [[False]], 0.006, 0.01, extra=anchor)
+        self.assertEqual(promote_efficiency(s, rs, **{**self.p, "max_regressions": 1})["decision"], "promote")
+        r = promote_efficiency(s, rs, **{**self.p, "max_regressions": 1}, anchor="anc")
+        self.assertEqual(r["decision"], "inconclusive", r)  # 何度も効率で昇格して積み重なった悪化を、固定の基準で止める
+        self.assertLess(r["anchor_ci"][0], -0.05)
+        self.assertEqual(promote_efficiency(s, rs, **self.p, anchor="none")["decision"], "reject")  # 結果にない基準
+        self.assertEqual(promote_efficiency(s, rs, **{**self.p, "max_regressions": 1}, anchor="inc")["decision"], "reject")
+        # 一部のタスクにしかない基準では、残りのタスクの悪化を見落とす → 判定不能
+        part = {("anc", f"t{i}"): [True] for i in range(2)}
+        s2, rs2 = self.build([[True] * 2] * 12, [[True] * 2] * 12, 0.006, 0.01, extra=part)
+        r = promote_efficiency(s2, rs2, **self.p, anchor="anc")
+        self.assertEqual((r["decision"], r["anchor_n_tasks"], len(r["anchor_one_sided_tasks"])), ("inconclusive", 2, 10), r)
+        # 配布物なしの基準とは、配布物がないと通らない判定を外した値で比べる
+        full = {("anc", f"t{i}"): [True] for i in range(12)}
+        s3, rs3 = self.build([[True] * 2] * 12, [[True] * 2] * 12, 0.006, 0.01, extra=full, install_empty={"anc": True})
+        for t in s3["tasks"]["cand"]:
+            s3["tasks"]["cand"][t]["pass_at_1_cmp"] = 0.0  # 候補は配布物の力でだけ合格していた
+        self.assertEqual(promote_efficiency(s3, rs3, **self.p, anchor="anc")["decision"], "inconclusive")
+        cached = {("anc", f"t{i}"): [True] for i in range(12)}
+        s4, rs4 = self.build([[True] * 2] * 12, [[True] * 2] * 12, 0.006, 0.01, extra=cached)
+        for r in rs4:
+            if r.profile_id == "anc":
+                r.from_cache = True
+        self.assertEqual(promote_efficiency(s4, rs4, **self.p, anchor="anc")["decision"], "inconclusive")
+
+    def test_promotes_with_success_gains_too(self):
+        s, rs = self.build([[True] * 2] * 12, [[True] * 2] * 10 + [[False] * 2] * 2, 0.006, 0.01)
+        r = promote_efficiency(s, rs, **self.p)
+        self.assertEqual(r["decision"], "promote", r)  # 成功率が上がりつつ安くなった候補も通る
+        self.assertGreater(r["success_estimate"], 0)
+
+    def test_cached_and_small_runs_stay_inconclusive(self):
+        s, rs = self.build([[True] * 2] * 6, [[True] * 2] * 6, 0.006, 0.01)
+        self.assertEqual(promote_efficiency(s, rs, **self.p)["decision"], "inconclusive")
+        s2, rs2 = self.build([[True] * 2] * 12, [[True] * 2] * 12, 0.006, 0.01)
+        rs2[0].from_cache = True
+        self.assertEqual(promote_efficiency(s2, rs2, **self.p)["decision"], "inconclusive")
+
+
 class PromoteTests(unittest.TestCase):
     def setUp(self):
         self.p = dict(candidate="cand", incumbent="inc", metric="pass_at_1", alpha=0.05, min_improvement=0.0,
@@ -147,6 +253,8 @@ class PromoteTests(unittest.TestCase):
         s, rs = self.build([[True]] * 12, [[False]] * 8 + [[True]] * 4)
         r = promote(s, rs, **self.p)
         self.assertEqual(r["decision"], "promote", r)
+        self.assertEqual(r["objective"], "success")
+        self.assertIn("context_tokens_delta", r)  # 成功率での判定でも、固定費の増減は情報として出す
         self.assertEqual((len(r["improved"]), len(r["regressed"])), (8, 0))
         self.assertLess(r["sign_p"], 0.05)
 

@@ -43,6 +43,14 @@ def _delta(x: float | None, pct: bool = True, lower_better: bool = False) -> str
     return f'<span class="{cls}">{txt}</span>'
 
 
+def _tokens_delta(x: float | None) -> str:
+    """トークンの差（少ないほど良い）。"""
+    if x is None:
+        return "—"
+    cls = "ok" if x < -0.5 else ("ng" if x > 0.5 else "mut")
+    return f'<span class="{cls}">{x:+,.0f}</span>'
+
+
 def _ci(ci: list[float] | None) -> str:
     return "" if not ci else f"<br><span class='mut'>[{ci[0] * 100:+.0f}, {ci[1] * 100:+.0f}]</span>"
 
@@ -62,39 +70,43 @@ def render(summary: dict[str, Any], records: list[TrialRecord], baseline: str | 
 
     out.append("<h2>サマリー</h2><div class='wrap'><table><tr><th>プロファイル</th><th>エージェント</th><th class='n'>pass^k</th>"
                "<th class='n'>pass@1</th><th class='n'>平均スコア</th><th class='n'>有効/全試行</th><th class='n'>総コスト</th>"
-               "<th class='n'>合格あたり</th><th class='n'>平均時間</th><th class='n'>平均ターン</th><th class='n'>キャッシュ</th></tr>")
+               "<th class='n'>合格あたり</th><th class='n'>平均時間</th><th class='n'>平均ターン</th><th class='n'>開始時の文脈</th><th class='n'>キャッシュ</th></tr>")
     for pid, s in P.items():
         dur = "—" if s["mean_duration_ms"] is None else f"{s['mean_duration_ms'] / 1000:.1f}s"
         turns = "—" if s["mean_turns"] is None else f"{s['mean_turns']:.1f}"
+        ctx = "—" if s.get("mean_context_tokens") is None else f"{s['mean_context_tokens']:,.0f}"
         cost = _usd(s["total_cost_usd"]) if s["total_cost_usd"] is not None else f"<span class='warn'>不明（既知 {_usd(s['known_cost_usd'])}）</span>"
         excl = f" <span class='warn'>除外 {s['excluded']}: {_e(s['excluded_reasons'])}</span>" if s["excluded"] else ""
         out.append(f"<tr><td><b>{_e(pid)}</b>{' <span class=mut>(基準)</span>' if pid == baseline else ''}</td><td>{_e(s['agent'])}</td>"
                    f"<td class='n'>{_pct(s['pass_hat_k'])} <span class='mut'>({s['pass_hat_k_tasks']}/{s['tasks']})</span></td>"
                    f"<td class='n'>{_pct(s['pass_at_1'])}</td><td class='n'>{_pct(s['mean_score'])}</td>"
                    f"<td class='n'>{s['valid']}/{s['trials']}{excl}</td><td class='n'>{cost}</td><td class='n'>{_usd(s['cost_per_pass_usd'])}</td>"
-                   f"<td class='n'>{dur}</td><td class='n'>{turns}</td><td class='n'>{s['cached_trials']}</td></tr>")
+                   f"<td class='n'>{dur}</td><td class='n'>{turns}</td><td class='n'>{ctx}</td><td class='n'>{s['cached_trials']}</td></tr>")
     nr = meta.get("not_run") or 0
     if nr:
         out.append(f"<div class='warn'>未実行 {nr} 試行（--max-cost-usd / --monthly-budget-usd に到達）。集計に含めていません。</div>")
     out.append("</table></div><div class='mut'>pass^k の括弧内は「算出できたタスク数/全タスク数」（有効試行が k 回未満のタスクは算出しない）。"
-               "除外 = レート制限・認証失敗など環境起因の異常終了で、集計に含めていません。</div>")
+               "除外 = レート制限・認証失敗など環境起因の異常終了で、集計に含めていません。"
+               "開始時の文脈 = 最初のリクエストの入力トークン（システムプロンプト・ツール・常に読み込まれる指示・依頼）の平均。"
+               "Claude Code だけで測り、測れた試行だけで平均します（1 試行も測れなければ —）。</div>")
 
     if baseline and baseline in P:
         d = deltas(summary, baseline)
         if d:
             out.append(f"<h2>基準 <code>{_e(baseline)}</code> との差（Δ）</h2><div class='wrap'><table><tr><th>プロファイル</th><th class='n'>共通タスク</th>"
                        "<th class='n'>Δ pass^k</th><th class='n'>Δ pass@1</th><th class='n'>Δ 平均スコア</th><th class='n'>Δ 合格あたりコスト</th>"
-                       "<th class='n'>改善／悪化（符号検定 p）</th></tr>")
+                       "<th class='n'>Δ 開始時の文脈</th><th class='n'>改善／悪化（符号検定 p）</th></tr>")
             for pid, row in d.items():
                 cells = "".join(f"<td class='n'>{_delta(row[m])}{_ci(row[m + '_ci'])}</td>" for m in ("pass_hat_k", "pass_at_1", "mean_score"))
                 oc = row.get("outcomes")
                 oc_cell = (f"<span class='ok'>{oc['improved']}</span> ／ <span class='ng'>{oc['regressed']}</span>"
                            f"<br><span class='mut'>p={oc['sign_p']:.3f}</span>") if oc else "—"
                 out.append(f"<tr><td>{_e(pid)}</td><td class='n'>{row['common_tasks']}</td>{cells}"
-                           f"<td class='n'>{_delta(row['cost_per_pass_usd'], pct=False, lower_better=True)}</td><td class='n'>{oc_cell}</td></tr>")
+                           f"<td class='n'>{_delta(row['cost_per_pass_usd'], pct=False, lower_better=True)}</td>"
+                           f"<td class='n'>{_tokens_delta(row.get('context_tokens'))}</td><td class='n'>{oc_cell}</td></tr>")
             out.append("</table></div><div class='mut'>Δ は両方で値があるタスクだけで計算。括弧内はタスク単位のブートストラップによる 95% 区間"
                        "（区間が 0 をまたぐなら差があるとは言えない）。配布物がないと通らない判定（スキル・サブエージェント・hook を"
-                       "使うことの要求）は両側とも除いて比べる。合格あたりコストは負の値ほど安い。"
+                       "使うことの要求）は両側とも除いて比べる。合格あたりコストは負の値ほど安い。Δ 開始時の文脈は配布物が毎回の会話に足す固定費（トークン）。"
                        "タスクが少ない（目安 10〜20 件）と区間は実際より狭く出やすい。"
                        "改善／悪化は pass@1 が上がった・下がったタスクの数で、p は正確な両側符号検定"
                        "（平均が上がっていても悪化したタスクがあることを見落とさないため）。</div>")

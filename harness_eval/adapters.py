@@ -150,6 +150,14 @@ class ClaudeAdapter(_Adapter):
                 retries.append(str(e.get("error")))
             elif t == "assistant":
                 parent = e.get("parent_tool_use_id")
+                u = (e.get("message") or {}).get("usage")
+                if parent is None and "context_tokens" not in r.meta and isinstance(u, dict):
+                    # 開始時の文脈: 本体の最初のリクエストの入力側（システムプロンプト・ツール・常に読み込まれる指示・依頼）。
+                    # キャッシュの状態によらず同じ合計になる。同じメッセージが複数行に分かれて届くので最初の 1 行だけ使う。
+                    # 数値でない・すべて 0 の usage（合成のエラーメッセージなど）は測れなかったものとして次を待つ
+                    vals = [u.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")]
+                    if all(isinstance(v, int) and not isinstance(v, bool) for v in vals) and sum(vals) > 0:
+                        r.meta["context_tokens"] = sum(vals)
                 for b in (e.get("message") or {}).get("content") or []:
                     if not isinstance(b, dict):
                         continue

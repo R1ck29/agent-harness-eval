@@ -10,6 +10,7 @@ Claude Code と Codex の「ハーネス」（CLAUDE.md / AGENTS.md・Skills・S
 - train タスクの失敗から、改善役（読み取りだけの `claude -p`）が配布物の変更案を作る（`improve`）。評価用のタスク（holdout）は
   権限設定で読ませず、効くことを起動のたびに確かめる
 - 配布物の変更案は、改善に使っていない評価用のタスク（holdout）で現行と比べて採否を出す（`promote`。自己改善ループの関門）
+- 毎回読み込まれる量（開始時の文脈）と成功あたりの費用を測り、成功率を落とさず費用を下げた変更案も採用できる（`promote --objective efficiency`）
 - 各試行は一時ホームで隔離し、普段の `~/.claude` / `~/.codex` には触らない
 - 採点はコード判定が基本（独自スクリプトも可）。LLM 判定は補助
 - 依存は Python 3.10+ と PyYAML だけ。各 CLI（`claude -p` / `codex exec --json`）を直接呼ぶ

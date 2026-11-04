@@ -18,8 +18,8 @@ from typing import Any, Callable
 
 from . import __version__
 from .adapters import _classify_message, _status_type
-from .candidate import (KINDS, OPS, apply_deltas, changed_skills, install_targets, materialize, prechecks, profile_raw,
-                        train_specific_strings, write_profile, write_skill_variants)
+from .candidate import (KINDS, OPS, always_loaded_breakdown, apply_deltas, changed_skills, install_targets, materialize, prechecks,
+                        profile_raw, train_specific_strings, write_profile, write_skill_variants)
 from .isolation import TrialPaths, ancestor_instructions, build_env, copy_credentials, make_trial_paths, run_process
 from .mockapi import improver_cmd, init_problem, parse_stream, read_isolation_check, special_chars, unusable_path
 from .record import TrialRecord
@@ -66,6 +66,34 @@ PROMPT = """あなたは、多くの利用者に配る Claude Code の配布物�
 失敗した train タスク: {tasks}
 """
 
+PROMPT_EFFICIENCY = """あなたは、多くの利用者に配る Claude Code の配布物（設定ディレクトリに入る CLAUDE.md・rules/・skills/）を、
+成功率を落とさずに軽くする担当です。作業フォルダの中だけを読めます（書き込みはできません。変更は最後に構造化出力で返します）。
+- harness/ : 現行の配布物（設定ディレクトリに入ったときの形）
+- always_loaded.json : 毎回の会話に読み込まれる部分のファイルごとの文字数（スキル・サブエージェントは説明文の部分だけ）
+- stats.json : 練習用（train）タスクごとの成功率・トークン・ターン数・開始時の文脈（トークン）・呼ばれたスキルとサブエージェント
+- tasks/<タスク id>/task.md : train タスクの依頼
+- trials/<タスク id>/<試行>/result.json・transcript.jsonl : トークンを多く使った試行の記録（最大 5 件）
+{previous}{retry}
+毎回読み込まれる量と、迷い（ターン数）を減らす変更項目を出してください。守ること:
+- 成功に要る指示は残す。stats.json で成功しているタスクが、変更のあとも同じように成功するようにする
+- 毎回読み込まれる指示（CLAUDE.md・AGENTS.md・rules/、そこから @ で読み込むファイル、agents/ とスキルの説明文）の合計を
+  必ず減らす。冗長な文を削る・短く言い換える、特定の作業でしか要らない手順は必要なときだけ読まれるスキルの本文へ移す、
+  使われていないスキル・サブエージェントは説明文を短くする（ファイルは消せない。外したほうがよいものは notes に書く）。
+  移すときは説明文を短く保つ（説明文は毎回読み込まれる）
+- スキルを残すなら SKILL.md の先頭の --- で囲んだ name と description を消さない
+- 特定のタスクの名前・ファイル名・列名・数値・依頼の文をそのまま書かない
+- kind: INV = 作業手順 ／ DOM = 業務知識。file は harness/ からの相対パスで Markdown（.md）だけ
+- op: add = 末尾に追記（ファイルがなければ作る）／ replace = old をちょうど 1 回含む箇所を new に置き換える／ remove = old を消す。
+  old は harness/ のファイルから一字一句そのまま写す
+- fixes は空でよい（成功率を上げるための変更ではない）
+- 採点の方法や採点スクリプトに合わせた変更はしない
+- 項目は効果の大きいものから {max_deltas} 個まで。notes には全体の見立てを短く書く
+
+train タスク: {tasks}
+"""
+GOALS = ("fix", "efficiency")  # fix: train の失敗を直す ／ efficiency: 成功率を落とさず、毎回読み込まれる量と迷いを減らす
+EXPENSIVE_TRIALS = 5  # efficiency で記録ごと渡す、トークンを多く使った試行の数（材料が大きくなりすぎないように）
+
 RETRY_MATERIAL = ("- retry.json : 直前の案（deltas）と、評価の前の検査で見送られた理由（problems）・その元になった train の依頼の"
                   "文字列（train_strings）。\n  理由を直した案を出す（その文字列は言い換えても書かない）\n")
 OTEL_PROMPT_VARS = ["OTEL_LOG_USER_PROMPTS", "OTEL_LOG_TOOL_DETAILS"]  # 依頼文・記録を読ませるので、テレメトリへの記録は止める
@@ -88,6 +116,7 @@ class ImproveOptions:
     max_turns: int = 40
     timeout_s: int = 1800
     retries: int = 1          # 事前検査で見送ったとき、理由を返して作り直させる回数
+    goal: str = "fix"         # GOALS のどれか
 
 
 def train_failures(run_dir: Path, profile: Profile) -> tuple[dict[str, Any], dict[str, list[TrialRecord]], list[TrialRecord]]:
@@ -192,6 +221,51 @@ def write_material(work: Path, profile: Profile, tasks: dict[str, Task], failed:
     return skipped
 
 
+def write_efficiency_material(work: Path, profile: Profile, tasks: dict[str, Task], trials: dict[str, list[TrialRecord]],
+                               marks: list[str] = ()) -> int:
+    """efficiency の材料: 全 train タスクの統計、毎回読み込まれる部分のファイルごとの文字数、依頼、トークンを多く使った試行の記録
+    （EXPENSIVE_TRIALS 件まで）。記録は write_material と同じく目印を含むものを渡さない。戻り値は渡さなかった記録の数。"""
+    from .metrics import _trial_tokens
+    materialize(profile, work / "harness")
+    stats = {}
+    for tid, recs in sorted(trials.items()):
+        tok = [x for r in recs if (x := _trial_tokens(r)) is not None]
+        ctx = [r.meta.get("context_tokens") for r in recs if r.meta.get("context_tokens") is not None]
+        turns = [r.num_turns for r in recs if r.num_turns is not None]
+        stats[tid] = {"trials": len(recs), "pass_rate": sum(r.passed for r in recs) / len(recs),
+                      "mean_tokens": sum(tok) / len(tok) if tok else None,
+                      "mean_turns": sum(turns) / len(turns) if turns else None,
+                      "mean_context_tokens": sum(ctx) / len(ctx) if ctx else None,
+                      "skills_used": sorted({s for r in recs for s in r.skill_calls}),
+                      "subagents_used": sorted({s for r in recs for s in r.subagent_calls})}
+        d = work / "tasks" / tid
+        d.mkdir(parents=True)
+        t = tasks[tid]
+        (d / "task.md").write_text(f"# {tid}\n\n{t.description}\n\n## 依頼\n\n{t.prompt}\n", encoding="utf-8")
+    (work / "stats.json").write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
+    (work / "always_loaded.json").write_text(json.dumps(always_loaded_breakdown(work / "harness"), ensure_ascii=False, indent=2),
+                                             encoding="utf-8")
+    skipped = 0
+    ranked = sorted((r for recs in trials.values() for r in recs), key=lambda r: -(_trial_tokens(r) or 0))
+    for r in ranked[:EXPENSIVE_TRIALS]:
+        td = work / "trials" / r.task_id / str(r.trial)
+        td.mkdir(parents=True)
+        view = json.dumps({**_trial_view(r), "tokens": _trial_tokens(r), "context_tokens": r.meta.get("context_tokens")},
+                          ensure_ascii=False, indent=2)
+        if _clean(view, marks):
+            (td / "result.json").write_text(view, encoding="utf-8")
+        else:
+            skipped += 1
+        src = Path(r.trial_dir) / "stdout.jsonl" if r.trial_dir else None
+        if src and src.is_file():
+            text = src.read_text(encoding="utf-8", errors="replace")
+            if _clean(text, marks):
+                (td / "transcript.jsonl").write_text(text, encoding="utf-8")
+            else:
+                skipped += 1
+    return skipped
+
+
 def check_predictions(prev: dict[str, Any], recs: list[TrialRecord], meta: dict[str, Any], profile_id: str) -> dict[str, Any]:
     """前回の改善役の予想（直るはずのタスク）が、この実行で当たったか。直った = 有効な試行がすべて合格。"""
     by_task: dict[str, list[TrialRecord]] = {}
@@ -234,8 +308,17 @@ def run_improver(o: ImproveOptions, tp: TrialPaths, prompt: str, deny: list[Path
 
 def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[float | None], None]) -> tuple[int, dict[str, Any]]:
     """戻り値: (終了コード, improve.json の中身)。0 候補あり／1 事前検査で見送り／2 止めた（隔離を確かめられない・改善役の失敗）／
-    3 材料なし（失敗した train の試行がない）。"""
+    3 材料なし（fix: 失敗した train の試行がない／ efficiency: 有効な train の試行がない）。"""
+    if o.goal not in GOALS:
+        raise SpecError(f"goal は {GOALS} のどれか")
     meta, failed, mine = train_failures(o.run_dir, o.profile)
+    eff = o.goal == "efficiency"
+    material: dict[str, list[TrialRecord]] = failed
+    if eff:  # 失敗だけでなく、有効な試行すべて（成功している手順を軽くするため）
+        material = {}
+        for r in mine:
+            if r.valid:
+                material.setdefault(r.task_id, []).append(r)
     install_targets(o.profile)  # 編集できない配布物（install の run）なら、材料の有無によらず先に止める
     if o.out.exists() and any(o.out.iterdir()):
         raise SpecError(f"{o.out} は空ではありません（候補ごとに新しいフォルダを指定してください）")
@@ -243,7 +326,7 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
         "tool_version": __version__, "created_at": datetime.now(timezone.utc).isoformat(),
         "run": {"run_id": meta.get("run_id"), "path": str(o.run_dir.resolve())},
         "profile": {"id": o.profile.id, "harness_hash": o.profile.harness_hash()}, "model": o.model,
-        "failed_tasks": {t: len(rs) for t, rs in sorted(failed.items())}}
+        "goal": o.goal, "failed_tasks": {t: len(rs) for t, rs in sorted(failed.items())}}
     previous = None
     if o.previous:
         try:
@@ -253,17 +336,18 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
         if not isinstance(prev, dict):
             raise SpecError(f"--previous は improve.json ではありません: {o.previous}")
         previous = report["previous"] = check_predictions(prev, mine, meta, o.profile.id)
-    if not failed:
+    if not material:
         invalid = sum(1 for r in mine if not r.valid)
-        log("この実行に失敗した train の試行がありません（改善の材料がないので、改善役は呼びません）"
+        log(("この実行に有効な train の試行がありません" if eff else "この実行に失敗した train の試行がありません")
+            + "（改善の材料がないので、改善役は呼びません）"
             + (f"。環境起因で除外された試行が {invalid} 件あります（実行し直すと材料が出るかもしれません）" if invalid else ""))
         _write_report(o.out, report)
         return 3, report
     tasks = {t.id: t for t in o.tasks}
-    for tid in sorted(failed):
+    for tid in sorted(material):
         t = tasks.get(tid)
         if t is None:
-            raise SpecError(f"--tasks に失敗したタスク {tid} の定義がありません")
+            raise SpecError(f"--tasks に材料にするタスク {tid} の定義がありません")
         if t.split != "train" or t.content_hash() != meta["tasks"][tid].get("hash"):
             raise SpecError(f"{t.path}: 実行のあとでタスクの分割か中身が変わっています（今の split: {t.split}）。今の定義で train を実行し直してください")
     root = Path(tempfile.mkdtemp(prefix="harness-eval-improve-")).resolve()
@@ -276,8 +360,13 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
         bad = [str(p) for p in deny if unusable_path(p)]
         if bad:
             raise SpecError(f"読ませない場所のパスに \\ が含まれ、権限設定で止められません: {bad}（フォルダ名を変えてください）")
-        report["skipped_material"] = write_material(tp.workdir, o.profile, tasks, failed, previous,
-                                                    forbidden_marks(o.holdout_outs, o.tasks, o.run_dir))
+        marks = forbidden_marks(o.holdout_outs, o.tasks, o.run_dir)
+        if eff:
+            report["skipped_material"] = write_efficiency_material(tp.workdir, o.profile, tasks, material, marks)
+            if previous is not None:
+                (tp.workdir / "previous.json").write_text(json.dumps(previous, ensure_ascii=False, indent=2), encoding="utf-8")
+        else:
+            report["skipped_material"] = write_material(tp.workdir, o.profile, tasks, failed, previous, marks)
         if report["skipped_material"]:
             log(f"holdout の場所・タスク定義・train 以外のタスク id を含む記録 {report['skipped_material']} 件は渡しません")
         auth = replace(o.auth, env_unset=list(o.auth.env_unset) + OTEL_PROMPT_VARS)
@@ -292,13 +381,14 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
             return 2, report
         if auth.copy_credentials:
             copy_credentials("claude_code", tp)
-        log(f"改善役を起動します（失敗した train タスク {len(failed)} 件、読ませない場所 {len(deny)} か所）")
+        log(f"改善役を起動します（{'train タスク' if eff else '失敗した train タスク'} {len(material)} 件、読ませない場所 {len(deny)} か所）")
         attempts: list[dict[str, Any]] = []
         report["attempts"] = attempts
         for n in range(o.retries + 1):
-            prompt = PROMPT.format(tasks=", ".join(sorted(failed)), max_growth=o.max_growth, max_deltas=MAX_DELTAS,
-                                   previous="- previous.json : 前回の改善の予想と、それが当たったか\n" if previous else "",
-                                   retry=RETRY_MATERIAL if n else "")
+            fmt = dict(tasks=", ".join(sorted(material)), max_deltas=MAX_DELTAS,
+                       previous="- previous.json : 前回の改善の予想と、それが当たったか\n" if previous else "",
+                       retry=RETRY_MATERIAL if n else "")
+            prompt = PROMPT_EFFICIENCY.format(**fmt) if eff else PROMPT.format(max_growth=o.max_growth, **fmt)
             out, cost, err, denials = run_improver(o, tp, prompt, deny, env)
             spend(cost)
             if cost is None:
@@ -312,7 +402,8 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
                 log(err)
                 _write_report(o.out, report)
                 return 2, report
-            built = build_candidate(o, out, failed, tasks, sorted(meta.get("tasks", {})))
+            # efficiency は成功率を上げる変更ではないので予想を残さない（成功済みのタスクを「直った」と数えないため）
+            built = build_candidate(o, out, {} if eff else material, tasks, sorted(meta.get("tasks", {})))
             attempts[-1]["precheck_problems"] = built["problems"]
             if not built["problems"] or n == o.retries:
                 break
@@ -356,7 +447,7 @@ def build_candidate(o: ImproveOptions, out: dict[str, Any], failed: dict[str, li
         applied = [d for d, r in zip(deltas, results, strict=True) if r["applied"]]
         train_text = "\n".join(tasks[t].prompt for t in train_ids if t in tasks)
         problems = prechecks(current, harness, applied, [d for d, r in zip(deltas, results, strict=True) if not r["applied"]],
-                             train_text, train_ids, grader_files(list(tasks.values())), o.max_growth)
+                             train_text, train_ids, grader_files(list(tasks.values())), o.max_growth, goal=o.goal)
         strings = train_specific_strings(current, harness, train_text, train_ids) if problems else []
         skills = changed_skills(current, harness)
     finally:

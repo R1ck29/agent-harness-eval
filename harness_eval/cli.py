@@ -13,7 +13,7 @@ import yaml
 
 from . import __version__
 from .isolation import ancestor_instructions, missing_inherited, passed_claude_vars, route_variables
-from .metrics import HARD_CATEGORIES, gate, holdout_comparisons, promote
+from .metrics import EFFICIENCY_METRICS, HARD_CATEGORIES, gate, holdout_comparisons, promote, promote_efficiency
 from .report import render
 from .runner import HOLDOUT_LEDGER, RunOptions, Runner, load_run
 from .spec import MIN_HOLDOUT_TASKS, NO_SPLIT, SPLITS, Grader, SpecError, Task, lint, load_profiles, load_tasks
@@ -212,7 +212,8 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 def cmd_promote(a) -> int:
-    """候補（--candidate）を現行（--incumbent）と同じ実行の中で比べ、昇格してよいかを promote（0）/ reject（1）/ inconclusive（3）で返す。"""
+    """候補（--candidate）を現行（--incumbent）と同じ実行の中で比べ、昇格してよいかを promote（0）/ reject（1）/ inconclusive（3）で返す。
+    --objective success は成功率が上がったときだけ、efficiency は成功率が許容幅の中で費用がはっきり下がったときだけ昇格する。"""
     if not 0 < a.alpha < 1:
         raise SpecError("--alpha は 0 より大きく 1 未満（例: 0.05）")
     if a.max_regressions < 0:
@@ -223,30 +224,83 @@ def cmd_promote(a) -> int:
         raise SpecError("--comparisons は 1 以上")
     if not 0 <= a.min_improvement < 1:
         raise SpecError("--min-improvement は 0 以上 1 未満（区間の下端がこれを超えたら改善とみなす）")
+    if a.objective == "efficiency":
+        if a.margin is None:
+            raise SpecError("--objective efficiency には --margin（成功率の許容幅。結果を見る前に決める。例 0.05）が要ります")
+        if not 0 <= a.margin < 1:
+            raise SpecError("--margin は 0 以上 1 未満")
+        if a.min_improvement:
+            raise SpecError("--min-improvement は --objective success のときだけ使います（efficiency は --margin で決める）")
+        if a.alpha >= 0.5:
+            raise SpecError("--objective efficiency の --alpha は 0.5 未満（片側の区間を 1 − 2α/m の信頼度で作るため）")
+    elif a.margin is not None or a.anchor or a.efficiency_metric is not None:
+        raise SpecError("--margin・--anchor・--efficiency-metric は --objective efficiency のときだけ使います")
     run_dir = Path(a.run)
     recs, summary = load_run(run_dir)
     meta = summary.get("meta", {})
     notes = []
+    ledger = Path(a.holdout_log) if a.holdout_log else run_dir.parent / HOLDOUT_LEDGER
+    try:
+        rows = _read_jsonl(ledger)
+    except SpecError as e:
+        if a.comparisons is None:  # 評価済みの候補の数を台帳から数えるなら、読めない台帳は止める（数え漏れるため）
+            raise
+        rows = []
+        notes.append(f"{e}（--comparisons を指定しているので続けます。別の目的での判定済みかは確かめられません）")
     m = a.comparisons
     if m is None:
-        ledger = Path(a.holdout_log) if a.holdout_log else run_dir.parent / HOLDOUT_LEDGER
-        rows = _read_jsonl(ledger)
         hold = {t: str(v.get("hash")) for t, v in meta.get("tasks", {}).items() if v.get("split") == "holdout"}
         inc_meta = meta.get("profiles", {}).get(a.incumbent) or {}
         m = holdout_comparisons(rows, hold, inc_meta.get("harness_hash") or inc_meta.get("hash"))
         if not ledger.is_file():
             notes.append(f"holdout 利用台帳 {ledger} がないため、評価済みの候補の数を 1 とします（--comparisons で指定できます）")
-        elif hold and not any(r.get("run_id") == meta.get("run_id") for r in rows):
+        elif hold and not any(r.get("run_id") == meta.get("run_id") and "tasks" in r for r in rows):
             notes.append(f"この実行（{meta.get('run_id')}）が holdout 利用台帳 {ledger} にありません。別の --out で実行した分は数えていないため、"
                          "評価済みの候補の数が少なく出ている可能性があります（--holdout-log か --comparisons で指定してください）")
-    r = promote(summary, recs, a.candidate, a.incumbent, a.metric, a.alpha, a.min_improvement, a.max_regressions, a.min_tasks,
-                m, None if a.any_split else "holdout", a.hard_category or ())
+    # 同じ実行を目的を変えて何度も判定すると、通る方を選べてしまう。別の目的で判定済みなら評価済みの候補を 1 つ多く数える
+    others = sorted({str(r["promote"].get("objective")) for r in rows if r.get("run_id") == meta.get("run_id")
+                     and isinstance(r.get("promote"), dict)} - {a.objective})
+    if others:
+        m = max(1, m) + 1
+        notes.append(f"この実行は別の目的（{', '.join(others)}）でも判定済みです。通る方を選べないよう、評価済みの候補を 1 つ多く数えました。"
+                     "目的は holdout を実行する前に決めてください")
+    split = None if a.any_split else "holdout"
+    if a.objective == "efficiency":
+        r = promote_efficiency(summary, recs, a.candidate, a.incumbent, a.metric, a.alpha, a.margin, a.max_regressions,
+                               a.min_tasks, m, split, a.hard_category or (), a.efficiency_metric or "cost_usd", a.anchor)
+    else:
+        r = promote(summary, recs, a.candidate, a.incumbent, a.metric, a.alpha, a.min_improvement, a.max_regressions,
+                    a.min_tasks, m, split, a.hard_category or ())
     r["notes"] = notes
     (run_dir / "promote.json").write_text(json.dumps(r, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:  # 台帳には id と結果だけを書く（依頼の中身は書かない）。holdout の数え方（holdout_comparisons）はこの行を読まない
+        with ledger.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": datetime.now().astimezone().isoformat(), "run_id": meta.get("run_id"),
+                                "promote": {"objective": a.objective, "candidate": a.candidate, "incumbent": a.incumbent,
+                                            "decision": r["decision"]}}, ensure_ascii=False) + "\n")
+    except OSError as e:
+        print(f"注意: holdout 利用台帳 {ledger} に判定を記録できません: {e}")
     label = {"promote": "昇格", "reject": "見送り", "inconclusive": "判定不能（データ不足・有意でない）"}[r["decision"]]
+    what = f"{a.candidate} − {a.incumbent} の {a.metric}{'（配布物がないと通らない判定を除いた値）' if r['comparable_metric'] else ''}"
+    if a.objective == "efficiency":
+        _print_efficiency(a, r, label, what)
+    else:
+        _print_success(a, r, label, what)
+    ctx = r.get("context_tokens_delta")
+    if ctx is not None:
+        print(f"  開始時の文脈の差: {ctx:+,.0f} トークン（配布物が毎回の会話に足す固定費の増減）")
+    for p in r["problems"]:
+        print(f"  - 見送る理由: {p}")
+    for n in notes:
+        print(f"  注意: {n}")
+    print(f"記録: {run_dir / 'promote.json'}")
+    return PROMOTE_EXIT[r["decision"]]
+
+
+def _print_success(a, r: dict, label: str, what: str) -> None:
     ci = "—" if r["ci"] is None else f"[{r['ci'][0]:+.3f}, {r['ci'][1]:+.3f}]"
     est = "—" if r["estimate"] is None else f"{r['estimate']:+.3f}"
-    print(f"昇格判定 {label}: {a.candidate} − {a.incumbent} の {a.metric}{'（配布物がないと通らない判定を除いた値）' if r['comparable_metric'] else ''}")
+    print(f"昇格判定 {label}: {what}")
     print(f"  差 {est} {ci}（タスク {r['n_tasks']} 件、最低 {a.min_tasks} 件。区間の下端が {a.min_improvement:g} を超えること）")
     print(f"  改善 {len(r['improved'])}・悪化 {len(r['regressed'])}・同じ {r['tied']}、符号検定 p={r['sign_p']:.4f}"
           f"（α {a.alpha:g} ÷ 評価済みの候補 {r['comparisons']} = {r['alpha_adjusted']:.4f} 以下で有意）")
@@ -259,15 +313,36 @@ def cmd_promote(a) -> int:
         print(f"  現行の雑音幅: 同じ配布物の試行を 2 分割した差から換算した 95% 範囲 [{nz['low']:+.3f}, {nz['high']:+.3f}]（{nz['n_tasks']} タスク。目安）")
     else:
         print("  現行の雑音幅: 算出できません（各タスク 2 試行以上が必要。--trials 3 以上を推奨）")
+    cp = r.get("cost_per_pass_delta_usd")
+    if cp is not None:
+        print(f"  合格 1 件あたりの費用の差: {cp:+.4f} USD" + ("（候補の方が高い。成功率だけでなく費用も確かめてください）" if cp > 0 else ""))
     tk = r["input_tokens_per_trial"]
     if tk["candidate"] is not None and tk["incumbent"] is not None:
         print(f"  1 試行あたりの入力側トークン: 候補 {tk['candidate']:.0f} ／ 現行 {tk['incumbent']:.0f}（常時読み込まれる指示が増えるとここが増える）")
-    for p in r["problems"]:
-        print(f"  - 見送る理由: {p}")
-    for n in notes:
-        print(f"  注意: {n}")
-    print(f"記録: {run_dir / 'promote.json'}")
-    return PROMOTE_EXIT[r["decision"]]
+
+
+def _print_efficiency(a, r: dict, label: str, what: str) -> None:
+    rng = lambda c: "—" if c is None else f"[{c[0]:+.3f}, {c[1]:+.3f}]"
+    sv = "—" if r["relative_saving"] is None else f"{r['relative_saving']:.1%}"
+    print(f"効率の昇格判定 {label}: {what} が許容幅 {a.margin:g} の中で、費用（{r['efficiency_metric']}）がはっきり下がったか")
+    print(f"  成功率の差 {'—' if r['success_estimate'] is None else format(r['success_estimate'], '+.3f')} "
+          f"{rng(r['success_ci'])}（信頼度 {r['confidence']:.1%}。下端が −{a.margin:g} 以上であること。タスク {r['n_tasks']} 件、最低 {a.min_tasks} 件）")
+    print(f"  費用の削減 {sv}（タスクごとの比 log(候補/現行) {rng(r['log_cost_ratio_ci'])}。上端が 0 未満であること）")
+    print(f"  安くなった {len(r['cheaper'])}・高くなった {len(r['costlier'])}、符号検定 p={r['cost_sign_p']:.4f}"
+          f"（α {a.alpha:g} ÷ 評価済みの候補 {r['comparisons']} = {r['alpha_adjusted']:.4f} 以下で有意）。成功率が悪化したタスク {len(r['regressed'])}")
+    if r["anchor"]:
+        print(f"  基準 {r['anchor']} との成功率の差 {rng(r['anchor_ci'])}（下端が −{a.margin:g} 以上・タスク {r['anchor_n_tasks']} 件が"
+              f"最低 {a.min_tasks} 件以上であること）")
+        if r["anchor_one_sided_tasks"]:
+            print(f"  基準にないタスク: {r['anchor_one_sided_tasks'][:5]}（悪化が隠れうるので昇格にはしません）")
+    if r["unknown_cost_tasks"]:
+        print(f"  費用の分からないタスク: {r['unknown_cost_tasks'][:5]}（時間切れ・異常終了の試行がある。昇格にはしません）")
+    if r["hint"]:
+        print(f"  {r['hint']}")
+    if r["one_sided_tasks"]:
+        print(f"  片側だけ値のあるタスク: {r['one_sided_tasks'][:5]}（悪化が隠れうるので昇格にはしません）")
+    if any(r["cached_trials"].values()):
+        print(f"  キャッシュの試行: {r['cached_trials']}（別の時点の結果が混ざるため昇格にはしません）")
 
 
 def cmd_doctor(a) -> int:
@@ -403,7 +478,7 @@ def cmd_improve(a) -> int:
                        out=Path(a.out), exe=ClaudeAdapter(auth, a.executable).exe, auth=auth, model=a.model or None,
                        candidate_id=a.candidate_id, max_growth=a.max_growth_chars,
                        previous=Path(a.previous) if a.previous else None, max_turns=a.max_turns, timeout_s=a.timeout_s,
-                       retries=a.retries)
+                       retries=a.retries, goal=a.goal)
     ledger = Path(a.ledger) if a.ledger else run_dir.parent / "spend.jsonl"
     run_id = "improve-" + datetime.now().strftime("%Y%m%d-%H%M%S")
     code, r = improve(o, print, lambda usd: append_spend(ledger, usd, run_id, "claude_code", auth.billing))
@@ -531,6 +606,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="この holdout で評価済みの候補の数（既定: holdout 利用台帳から数える）")
     sp.add_argument("--holdout-log", help=f"holdout 利用台帳（既定: 結果フォルダの親の {HOLDOUT_LEDGER}）")
     sp.add_argument("--any-split", action="store_true", help="holdout 以外のタスクでも判定する（試験用。昇格の根拠にはしない）")
+    sp.add_argument("--objective", choices=["success", "efficiency"], default="success",
+                    help="success: 成功率が上がったら昇格（既定）／ efficiency: 成功率が許容幅の中で費用がはっきり下がったら昇格。holdout の実行前に決める")
+    sp.add_argument("--margin", type=float, help="efficiency で許す成功率の悪化の幅（必須。例 0.05）")
+    sp.add_argument("--efficiency-metric", choices=sorted(EFFICIENCY_METRICS),
+                    help="efficiency で比べる費用（cost_usd: エージェントの費用。判定の費用は含めない。既定／ tokens: トークン数）")
+    sp.add_argument("--anchor", help="efficiency で成功率が劣ってはいけない、もう 1 つの基準のプロファイル id（同じ実行の中。"
+                                     "効率の昇格を重ねて成功率が少しずつ下がるのを防ぐ）")
     sp.add_argument("--hard-category", action="append",
                     help=f"1 件でもあれば見送る失敗分類を追加（複数可。{list(HARD_CATEGORIES)} は常に含む）")
     sp.set_defaults(fn=cmd_promote)
@@ -564,6 +646,8 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--previous", help="前回の improve.json。予想した「直るタスク」がこの実行で直ったかを確かめる")
     sp.add_argument("--max-turns", type=int, default=40)
     sp.add_argument("--timeout-s", type=int, default=1800)
+    sp.add_argument("--goal", choices=["fix", "efficiency"], default="fix",
+                    help="fix: train の失敗を直す（既定）／ efficiency: 成功率を落とさず、毎回読み込まれる量と迷いを減らす")
     sp.add_argument("--retries", type=int, default=1,
                     help="事前検査で見送ったとき、理由を返して作り直させる回数（既定 1。0 で作り直さない）")
     sp.add_argument("--ledger", help="費用台帳（既定: --run の親の spend.jsonl）")

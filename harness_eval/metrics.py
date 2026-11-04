@@ -32,6 +32,7 @@
 """
 from __future__ import annotations
 
+import math
 import random
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -168,6 +169,18 @@ def _mean(xs: Iterable[float | None]) -> float | None:
     return mean(v) if v else None
 
 
+def _trial_tokens(r: TrialRecord) -> int | None:
+    """1 試行で使ったトークン。Claude はキャッシュ読み書きを input と別に数え、Codex はキャッシュが input の内数。"""
+    keys = ("input", "output") if r.agent == "codex" else ("input", "cache_read", "cache_write", "output")
+    vals = [(r.tokens or {}).get(k) for k in keys]
+    return None if any(v is None for v in vals) else sum(vals)
+
+
+def _mean_all(xs: list[float | None]) -> float | None:
+    """どれか 1 つでも分からなければ None（分かる分だけの平均は、失敗した試行を外して安く見せてしまう）。"""
+    return mean(xs) if xs and all(x is not None for x in xs) else None
+
+
 def summarize(records: list[TrialRecord], k: int) -> dict[str, Any]:
     by_pt: dict[tuple[str, str], list[TrialRecord]] = defaultdict(list)
     for r in records:
@@ -185,6 +198,11 @@ def summarize(records: list[TrialRecord], k: int) -> dict[str, Any]:
             "mean_score": _mean(r.score for r in valid),
             "pass_at_1_cmp": (cc / nc) if nc else None, "pass_hat_k_cmp": pass_hat_k(nc, cc, k),
             "mean_score_cmp": _mean(r.cmp_score for r in cmp),
+            # 効率: エージェントの費用だけ（判定の費用は評価のための費用なので含めない）
+            "mean_cost_usd": _mean_all([r.cost_usd for r in valid]),
+            "mean_tokens": _mean_all([_trial_tokens(r) for r in valid]),
+            # 開始時の文脈は成否によらない値なので、測れた試行だけで平均する（異常終了の 1 回で全体を不明にしない）
+            "mean_context_tokens": _mean(r.meta.get("context_tokens") for r in valid),
         }
 
     profiles: dict[str, dict[str, Any]] = {}
@@ -219,6 +237,7 @@ def summarize(records: list[TrialRecord], k: int) -> dict[str, Any]:
             "cost_per_pass_usd": (total_cost / len(passed)) if (cost_known and passed) else None,
             "mean_duration_ms": _mean(r.duration_ms for r in valid),
             "mean_turns": _mean(r.num_turns for r in valid),
+            "mean_context_tokens": _mean(r.meta.get("context_tokens") for r in valid),
             "tokens": {key: sum((r.tokens or {}).get(key) or 0 for r in valid)
                        for key in ("input", "output", "cache_read", "cache_write")},
             "failure_tags": dict(tags.most_common()),
@@ -255,6 +274,8 @@ def deltas(summary: dict[str, Any], baseline: str) -> dict[str, dict[str, Any]]:
         pa, pb = summary["profiles"][pid], summary["profiles"][baseline]
         row["cost_per_pass_usd"] = (pa["cost_per_pass_usd"] - pb["cost_per_pass_usd"]
                                     if pa["cost_per_pass_usd"] is not None and pb["cost_per_pass_usd"] is not None else None)
+        ctx = [d for t in common if (d := _diff(tv[t], base[t], "mean_context_tokens")) is not None]
+        row["context_tokens"] = mean(ctx) if ctx else None  # 開始時の文脈の差 = 配布物が毎回足す固定費（共通タスクだけ）
         row["per_task"] = {t: {m: _diff(tv[t], base[t], m + sfx) for m in ("pass_at_1", "pass_hat_k")} for t in common}
         o = paired_outcomes(tv, base, "pass_at_1" + sfx)
         row["outcomes"] = {"improved": len(o["improved"]), "regressed": len(o["regressed"]), "tied": o["tied"], "sign_p": o["sign_p"]}
@@ -334,20 +355,19 @@ def gate(current: dict[str, Any], previous: dict[str, Any], metric: str, margin:
 
 
 def _per_trial_tokens(p: dict[str, Any]) -> float | None:
-    """有効試行 1 回あたりの入力側トークン（input + キャッシュ読み書き）。常時読み込まれる指示が増えるとここが増える。"""
+    """有効試行 1 回あたりの入力側トークン（Claude は input + キャッシュ読み書き、Codex はキャッシュが input の内数なので input）。
+    常時読み込まれる指示が増えるとここが増える。"""
     t = p.get("tokens") or {}
     if not p.get("valid"):
         return None
-    total = sum((t.get(k) or 0) for k in ("input", "cache_read", "cache_write"))
+    keys = ("input",) if p.get("agent") == "codex" else ("input", "cache_read", "cache_write")
+    total = sum((t.get(k) or 0) for k in keys)
     return total / p["valid"] if total else None
 
 
-def promote(summary: dict[str, Any], records: list[TrialRecord], candidate: str, incumbent: str, metric: str, alpha: float,
-            min_improvement: float, max_regressions: int, min_tasks: int, comparisons: int,
-            require_split: str | None = "holdout", extra_hard: Iterable[str] = ()) -> dict[str, Any]:
-    """候補を現行と同じ実行の中で比べ、昇格してよいかを 3 値で返す（モジュール冒頭の規則）。
-
-    comparisons: この holdout で評価済みの候補の数 m（holdout_comparisons。最低 1）。有意水準は α / m に補正する。"""
+def _promote_problems(summary: dict[str, Any], candidate: str, incumbent: str, require_split: str | None,
+                      extra_hard: Iterable[str]) -> tuple[list[str], bool]:
+    """昇格判定に共通の「比べられない」理由と、配布物がないと通らない判定を外した値で比べるか（現行が配布物なしのとき）。"""
     problems: list[str] = []
     meta = summary.get("meta", {})
     tasks_all = summary.get("tasks", {})
@@ -371,7 +391,23 @@ def promote(summary: dict[str, Any], records: list[TrialRecord], candidate: str,
     if hits:
         problems.append(f"{candidate}: 安全違反の失敗分類 {hits} があります")
     # 現行が配布物なしなら、配布物がないと通らない判定を両側とも外した値で比べる（deltas と同じ扱い）
-    cmp = bool((mp.get(incumbent) or {}).get("install_empty"))
+    return problems, bool((mp.get(incumbent) or {}).get("install_empty"))
+
+
+def _context_delta(ct: dict[str, dict[str, Any]], it: dict[str, dict[str, Any]]) -> float | None:
+    """開始時の文脈の差（共通タスクの平均。配布物が毎回足す固定費の増減）。"""
+    d = [x for t in ct if t in it and (x := _diff(ct[t], it[t], "mean_context_tokens")) is not None]
+    return mean(d) if d else None
+
+
+def promote(summary: dict[str, Any], records: list[TrialRecord], candidate: str, incumbent: str, metric: str, alpha: float,
+            min_improvement: float, max_regressions: int, min_tasks: int, comparisons: int,
+            require_split: str | None = "holdout", extra_hard: Iterable[str] = ()) -> dict[str, Any]:
+    """候補を現行と同じ実行の中で比べ、昇格してよいかを 3 値で返す（モジュール冒頭の規則）。
+
+    comparisons: この holdout で評価済みの候補の数 m（holdout_comparisons。最低 1）。有意水準は α / m に補正する。"""
+    problems, cmp = _promote_problems(summary, candidate, incumbent, require_split, extra_hard)
+    tasks_all = summary.get("tasks", {})
     m = metric + ("_cmp" if cmp else "")
     ct, it = tasks_all.get(candidate, {}), tasks_all.get(incumbent, {})
     diffs = [d for t in sorted(ct) if t in it and (d := _diff(ct[t], it[t], m)) is not None]
@@ -396,8 +432,8 @@ def promote(summary: dict[str, Any], records: list[TrialRecord], candidate: str,
         decision = "promote"
     pc, pi = summary.get("profiles", {}).get(candidate, {}), summary.get("profiles", {}).get(incumbent, {})
     tok_c, tok_i = _per_trial_tokens(pc), _per_trial_tokens(pi)
-    return {"decision": decision, "candidate": candidate, "incumbent": incumbent, "metric": metric, "comparable_metric": cmp,
-            "n_tasks": ci.n_tasks, "estimate": ci.estimate, "ci": [ci.low, ci.high] if ci.low is not None else None,
+    return {"objective": "success", "decision": decision, "candidate": candidate, "incumbent": incumbent, "metric": metric,
+            "comparable_metric": cmp, "n_tasks": ci.n_tasks, "estimate": ci.estimate, "ci": [ci.low, ci.high] if ci.low is not None else None,
             "improved": o["improved"], "regressed": o["regressed"], "tied": o["tied"], "sign_p": o["sign_p"],
             "alpha": alpha, "comparisons": mm, "alpha_adjusted": alpha_adj, "min_improvement": min_improvement,
             "max_regressions": max_regressions, "min_tasks": min_tasks, "problems": problems,
@@ -405,4 +441,90 @@ def promote(summary: dict[str, Any], records: list[TrialRecord], candidate: str,
             "noise": split_half_noise(records, incumbent, comparable=cmp),
             "cost_per_pass_delta_usd": (pc["cost_per_pass_usd"] - pi["cost_per_pass_usd"]
                                         if pc.get("cost_per_pass_usd") is not None and pi.get("cost_per_pass_usd") is not None else None),
-            "input_tokens_per_trial": {"candidate": tok_c, "incumbent": tok_i}}
+            "input_tokens_per_trial": {"candidate": tok_c, "incumbent": tok_i}, "context_tokens_delta": _context_delta(ct, it)}
+
+
+EFFICIENCY_METRICS = {"cost_usd": "mean_cost_usd", "tokens": "mean_tokens"}
+
+
+def promote_efficiency(summary: dict[str, Any], records: list[TrialRecord], candidate: str, incumbent: str, metric: str,
+                       alpha: float, margin: float, max_regressions: int, min_tasks: int, comparisons: int,
+                       require_split: str | None = "holdout", extra_hard: Iterable[str] = (),
+                       efficiency_metric: str = "cost_usd", anchor: str | None = None) -> dict[str, Any]:
+    """効率の昇格判定: 成功率が現行より許容幅（margin）以上は悪化せず、タスクごとの費用がはっきり下がった候補だけを昇格する。
+    - 見送り: 比べられない（共通の理由・回帰予算超過・エージェントや費用の出どころが違う）、または費用の推定が下がっていない
+    - 昇格: 比べたタスクが min_tasks 以上、成功率の差の区間（信頼度 1 − 2α/m。下端が片側 α/m）の下端 ≥ −margin、
+            タスクごとの費用比 log(候補/現行) の区間（同じ信頼度）の上端 < 0、費用の符号検定 p ≤ α/m かつ安くなったタスクが多い、
+            キャッシュの試行・片側だけ値のあるタスク・費用の分からないタスクがない、anchor を指定したらそれにも成功率で劣らない
+    - 判定不能: それ以外
+    費用はエージェントの分だけ（判定の費用は含めない）。費用比を使うのは、高いタスク数件に結果を左右させないため。"""
+    if efficiency_metric not in EFFICIENCY_METRICS:
+        raise ValueError(f"efficiency_metric は {sorted(EFFICIENCY_METRICS)} のどれか")
+    if not 0 < alpha < 0.5:
+        raise ValueError("alpha は 0 より大きく 0.5 未満（片側の区間を信頼度 1 − 2α/m で作るため）")
+    problems, cmp = _promote_problems(summary, candidate, incumbent, require_split, extra_hard)
+    tasks_all = summary.get("tasks", {})
+    by = lambda pid, attr: sorted({str(getattr(r, attr)) for r in records if r.profile_id == pid})
+    if by(candidate, "agent") != by(incumbent, "agent"):
+        problems.append(f"候補と現行でエージェントが違います（{by(candidate, 'agent')} / {by(incumbent, 'agent')}）。費用は同じエージェントどうしで比べます")
+    elif efficiency_metric == "cost_usd" and by(candidate, "cost_source") != by(incumbent, "cost_source"):
+        problems.append(f"候補と現行で費用の出どころ（cost_source）が違います（{by(candidate, 'cost_source')} / "
+                        f"{by(incumbent, 'cost_source')}）。--efficiency-metric tokens で比べてください")
+    m = metric + ("_cmp" if cmp else "")
+    ct, it = tasks_all.get(candidate, {}), tasks_all.get(incumbent, {})
+    mm = max(1, int(comparisons))
+    alpha_adj = alpha / mm
+    conf = 1 - 2 * alpha_adj
+    o = paired_outcomes(ct, it, m)
+    if len(o["regressed"]) > max_regressions:
+        problems.append(f"悪化したタスクが {len(o['regressed'])} 件で、回帰予算 {max_regressions} 件を超えています: {o['regressed'][:5]}")
+    s_ci = paired_bootstrap([d for t in sorted(ct) if t in it and (d := _diff(ct[t], it[t], m)) is not None], confidence=conf)
+    cached = {pid: sum(1 for r in records if r.profile_id == pid and r.from_cache) for pid in (candidate, incumbent)}
+    a_ci, a_one_sided = None, []
+    if anchor is not None:
+        at = tasks_all.get(anchor)
+        if anchor in (candidate, incumbent):
+            problems.append("--anchor には候補・現行とは別のプロファイルを指定します")
+        elif at is None:
+            problems.append(f"{anchor}: 基準（--anchor）のプロファイルがこの実行の結果にありません")
+        else:
+            # 基準が配布物なしなら、配布物がないと通らない判定を外した値で比べる。基準にないタスクは悪化を隠しうるので片側扱い
+            am = metric + ("_cmp" if cmp or (summary.get("meta", {}).get("profiles", {}).get(anchor) or {}).get("install_empty") else "")
+            a_one_sided = sorted(t for t in set(ct) | set(at) if ((ct.get(t) or {}).get(am) is None) != ((at.get(t) or {}).get(am) is None))
+            a_ci = paired_bootstrap([d for t in sorted(ct) if t in at and (d := _diff(ct[t], at[t], am)) is not None], confidence=conf)
+            cached[anchor] = sum(1 for r in records if r.profile_id == anchor and r.from_cache)
+    key = EFFICIENCY_METRICS[efficiency_metric]
+    both = sorted(set(ct) & set(it))
+    unknown = [t for t in both if not (ct[t].get(key) or 0) > 0 or not (it[t].get(key) or 0) > 0]
+    logs = {t: math.log(ct[t][key] / it[t][key]) for t in both if t not in unknown}
+    c_ci = paired_bootstrap([logs[t] for t in sorted(logs)], confidence=conf)
+    cheaper = [t for t in sorted(logs) if logs[t] < -1e-9]
+    costlier = [t for t in sorted(logs) if logs[t] > 1e-9]
+    cost_p = sign_test(len(cheaper), len(costlier))
+    one_sided = sorted(t for t in set(ct) | set(it) if ((ct.get(t) or {}).get(m) is None) != ((it.get(t) or {}).get(m) is None))
+    hint = ("費用の分からないタスクばかりです。--efficiency-metric tokens で比べてください" if both and len(unknown) == len(both)
+            and efficiency_metric == "cost_usd" else "")
+    if problems or (c_ci.estimate is not None and c_ci.estimate >= 0):
+        decision = "reject"
+    elif (min(s_ci.n_tasks, c_ci.n_tasks) < min_tasks or s_ci.low is None or s_ci.low < -margin
+          or c_ci.high is None or c_ci.high >= 0 or cost_p > alpha_adj or len(cheaper) <= len(costlier)
+          or any(cached.values()) or one_sided or unknown
+          or (a_ci is not None and (a_ci.n_tasks < min_tasks or a_ci.low is None or a_ci.low < -margin or a_one_sided))):
+        decision = "inconclusive"
+    else:
+        decision = "promote"
+    return {"objective": "efficiency", "decision": decision, "candidate": candidate, "incumbent": incumbent, "metric": metric,
+            "comparable_metric": cmp, "efficiency_metric": efficiency_metric, "margin": margin, "confidence": conf,
+            "n_tasks": s_ci.n_tasks, "success_estimate": s_ci.estimate,
+            "success_ci": [s_ci.low, s_ci.high] if s_ci.low is not None else None,
+            "improved": o["improved"], "regressed": o["regressed"], "tied": o["tied"],
+            "cost_tasks": c_ci.n_tasks, "log_cost_ratio": c_ci.estimate,
+            "log_cost_ratio_ci": [c_ci.low, c_ci.high] if c_ci.low is not None else None,
+            "relative_saving": (1 - math.exp(c_ci.estimate)) if c_ci.estimate is not None else None,
+            "cheaper": cheaper, "costlier": costlier, "cost_sign_p": cost_p, "unknown_cost_tasks": unknown, "hint": hint,
+            "anchor": anchor, "anchor_estimate": a_ci.estimate if a_ci else None,
+            "anchor_ci": [a_ci.low, a_ci.high] if a_ci and a_ci.low is not None else None,
+            "anchor_n_tasks": a_ci.n_tasks if a_ci else None, "anchor_one_sided_tasks": a_one_sided,
+            "alpha": alpha, "comparisons": mm, "alpha_adjusted": alpha_adj, "max_regressions": max_regressions,
+            "min_tasks": min_tasks, "problems": problems, "cached_trials": cached, "one_sided_tasks": one_sided,
+            "context_tokens_delta": _context_delta(ct, it)}

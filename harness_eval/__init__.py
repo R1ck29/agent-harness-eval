@@ -1,2 +1,2 @@
 """Agent Harness Eval: Claude Code / Codex のハーネスを同じタスクで実行・採点・比較する。"""
-__version__ = "0.7.0"
+__version__ = "0.8.0"

@@ -95,6 +95,9 @@ class E2E(unittest.TestCase):
         run_dir = self.runs()[-1]
         html = (run_dir / "report.html").read_text(encoding="utf-8")
         self.assertIn("基準 <code>claude-baseline</code> との差", html)
+        self.assertIn("Δ 開始時の文脈", html)
+        prof = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))["profiles"]
+        self.assertGreater(prof["claude-ds-lite"]["mean_context_tokens"], prof["claude-baseline"]["mean_context_tokens"])
         self.assertNotIn("<script", html)
         # 合格試行の作業ディレクトリと一時ホームは消えている（--keep failed）
         passed = next(r for r in recs if r["passed"])
@@ -474,10 +477,50 @@ class E2E(unittest.TestCase):
         r = json.loads((run_dir / "promote.json").read_text(encoding="utf-8"))
         self.assertEqual((r["comparisons"], r["regressed"]), (1, []))  # 基準（配布物なし）は候補に数えない → ds-lite の 1
         self.assertIn("雑音幅", out)
+        self.assertIn("開始時の文脈", out)  # 成功率での判定でも固定費・費用の差を出す
+        self.assertIn("合格 1 件あたりの費用の差", out)
+        # 同じ実行を別の目的でも判定すると、通る方を選べてしまう → 台帳に目的を残し、2 つ目の目的は候補 1 つ分として数える
+        code, out = run_cli("promote", "--run", str(run_dir), "--candidate", "claude-ds-lite", "--incumbent", "claude-baseline",
+                            "--max-regressions", "0", "--min-tasks", "2", "--objective", "efficiency")
+        self.assertEqual(code, 2, out)  # 効率の判定には許容幅（--margin）が要る
+        code, out = run_cli("promote", "--run", str(run_dir), "--candidate", "claude-ds-lite", "--incumbent", "claude-baseline",
+                            "--max-regressions", "0", "--min-tasks", "2", "--objective", "efficiency", "--margin", "0.05")
+        self.assertIn(code, (1, 3), out)
+        self.assertIn("別の目的", out)
+        r = json.loads((run_dir / "promote.json").read_text(encoding="utf-8"))
+        self.assertEqual((r["objective"], r["comparisons"]), ("efficiency", 2))
+        promotes = [json.loads(l)["promote"] for l in (self.out / "holdout_uses.jsonl").read_text(encoding="utf-8").splitlines()
+                    if "promote" in json.loads(l)]
+        self.assertEqual([p["objective"] for p in promotes], ["success", "efficiency"])
+        # 台帳に書けなくても判定は返す（注意を出す）。台帳にこの実行の記録（判定の行ではなく実行の行）がなければ知らせる
+        bad = self.out / "ledger-dir"
+        bad.mkdir()
+        code, out = run_cli("promote", "--run", str(run_dir), "--candidate", "claude-ds-lite", "--incumbent", "claude-baseline",
+                            "--max-regressions", "0", "--min-tasks", "2", "--holdout-log", str(bad))
+        self.assertEqual(code, 3, out)
+        self.assertIn("記録できません", out)
+        locked = self.out / "locked.jsonl"
+        locked.write_text("{}\n", encoding="utf-8")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o644)
+        common_p = ["promote", "--run", str(run_dir), "--candidate", "claude-ds-lite", "--incumbent", "claude-baseline",
+                    "--max-regressions", "0", "--min-tasks", "2", "--holdout-log", str(locked)]
+        self.assertEqual(run_cli(*common_p)[0], 2)  # 評価済みの候補の数を台帳から数えるのに読めない → 止める
+        code, out = run_cli(*common_p, "--comparisons", "1")
+        self.assertEqual(code, 3, out)  # 数を指定していれば、注意を出して続ける
+        self.assertIn("--comparisons を指定しているので続けます", out)
+        only_promote = self.out / "only-promote.jsonl"
+        only_promote.write_text(json.dumps({"run_id": json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))["meta"]["run_id"],
+                                            "promote": {"objective": "success"}}) + "\n", encoding="utf-8")
+        code, out = run_cli("promote", "--run", str(run_dir), "--candidate", "claude-ds-lite", "--incumbent", "claude-baseline",
+                            "--max-regressions", "0", "--min-tasks", "2", "--holdout-log", str(only_promote))
+        self.assertIn("台帳", out)
+        self.assertIn("ありません", out)
         code, out = run_cli("run", *common, "--split", "holdout", "--trials", "2")  # もう一度見る → キャッシュを使わず実行し直す
         self.assertEqual(code, 0, out)
         self.assertNotIn("CACHE", out)
-        self.assertEqual(len((self.out / "holdout_uses.jsonl").read_text(encoding="utf-8").splitlines()), 2)
+        self.assertEqual(len([l for l in (self.out / "holdout_uses.jsonl").read_text(encoding="utf-8").splitlines()
+                              if "promote" not in json.loads(l)]), 2)
         code, out = run_cli("promote", "--run", str(run_dir), "--candidate", "claude-ds-lite", "--incumbent", "claude-baseline",
                             "--max-regressions", "0", "--min-improvement", "-0.1")
         self.assertEqual(code, 2, out)  # 負の --min-improvement は条件を緩めるので受け付けない

@@ -109,7 +109,8 @@ if os.environ.get("ANTHROPIC_API_KEY") == "sk-ant-harness-eval-mock":
 
 def improver():
     """improve の改善役。作業フォルダの材料を見て変更項目を返す。FAKE_IMPROVE: overfit（train のタスク id を書く）／
-    copy-once（retry.json がなければ依頼の 1 行を写す）／ bash（管理設定で Bash が有効になった起動を真似る）／ error（失敗）。
+    copy-once（retry.json がなければ依頼の 1 行を写す）／ shrink（指示を短くするだけ）／ empty-skill（説明文のない SKILL.md を足す）／
+    bash（管理設定で Bash が有効になった起動を真似る）／ error（失敗）。
     FAKE_IMPROVE_MANIFEST に見えたファイルと deny（と retry.json の中身）を書く。"""
     mode = os.environ.get("FAKE_IMPROVE", "")
     tools = args[args.index("--tools") + 1].split(",") + ["StructuredOutput"] + (["Bash"] if mode == "bash" else [])
@@ -121,7 +122,8 @@ def improver():
         Path(os.environ["FAKE_IMPROVE_MANIFEST"]).write_text(json.dumps(
             {"files": sorted(p.relative_to(cwd).as_posix() for p in cwd.rglob("*") if p.is_file()), "deny": deny,
              "home": os.environ.get("HOME"), "cfg": os.environ.get("CLAUDE_CONFIG_DIR"),
-             "retry": json.loads((cwd / "retry.json").read_text(encoding="utf-8")) if (cwd / "retry.json").exists() else None},
+             "retry": json.loads((cwd / "retry.json").read_text(encoding="utf-8")) if (cwd / "retry.json").exists() else None,
+             **{k: json.loads((cwd / f"{k}.json").read_text(encoding="utf-8")) for k in ("stats", "always_loaded") if (cwd / f"{k}.json").exists()}},
             ensure_ascii=False), encoding="utf-8")
     if mode == "error":
         out({"type": "result", "subtype": "success", "is_error": True, "result": "Not logged in · Please run /login"})
@@ -133,9 +135,13 @@ def improver():
     if line:
         deltas.append({"id": "d1", "kind": "INV", "file": "CLAUDE.md", "op": "replace", "old": line,
                        "new": line[:max(4, len(line) // 2)], "reason": "短くする", "fixes": failures[:1]})
-    deltas.append({"id": "d2", "kind": "DOM", "file": "skills/table-format/SKILL.md", "op": "add", "old": "",
-                   "new": "---\nname: table-format\ndescription: 集計表を作るときに使う\n---\n\n列見出しは依頼の言葉に合わせる。\n",
-                   "reason": "形式", "fixes": failures + ["no-such-task"]})
+    if mode not in ("shrink", "empty-skill"):
+        deltas.append({"id": "d2", "kind": "DOM", "file": "skills/table-format/SKILL.md", "op": "add", "old": "",
+                       "new": "---\nname: table-format\ndescription: 集計表を作るときに使う\n---\n\n列見出しは依頼の言葉に合わせる。\n",
+                       "reason": "形式", "fixes": failures + ["no-such-task"]})
+    if mode == "empty-skill":
+        deltas.append({"id": "d2", "kind": "DOM", "file": "skills/table-format/SKILL.md", "op": "add", "old": "",
+                       "new": "列見出しは依頼の言葉に合わせる。\n", "reason": "", "fixes": []})
     if mode == "overfit":
         deltas.append({"id": "d3", "kind": "DOM", "file": "skills/table-format/SKILL.md", "op": "add", "old": "",
                        "new": f"- {failures[0]} では必ず表にする。", "reason": "", "fixes": failures[:1]})
@@ -152,7 +158,15 @@ skills = sorted(p.name for p in (cfg / "skills").iterdir()) if (cfg / "skills").
 claude_md = (cfg / "CLAUDE.md").read_text(encoding="utf-8") if (cfg / "CLAUDE.md").exists() else ""
 
 
+_first_request = [True]
+
+
 def out(o):
+    if o.get("type") == "assistant" and o.get("parent_tool_use_id") is None and _first_request[0]:
+        # 本体の最初のリクエストだけ入力側の usage を付ける（実機と同じ形）。配布物の CLAUDE.md が長いほど増える
+        _first_request[0] = False
+        md = globals().get("claude_md") or ""
+        o["message"]["usage"] = {"input_tokens": 2, "cache_read_input_tokens": 15000, "cache_creation_input_tokens": len(md)}
     print(json.dumps(o, ensure_ascii=False), flush=True)
 
 

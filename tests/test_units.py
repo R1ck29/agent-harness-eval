@@ -143,6 +143,22 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(r.meta["cli_version"], "2.1.304")
         self.assertIn("word-count", r.meta["loaded_skills"])
         self.assertEqual(r.tokens["cache_read"], 173614)
+        self.assertEqual(r.meta["context_tokens"], 2 + 31109 + 16008)  # 最初のメッセージ（同じ id が 3 行続く）の入力側
+
+    def test_context_tokens_first_main_thread_request(self):
+        """開始時の文脈 = 本体の最初のリクエストの入力側（input + キャッシュ読み書き）。サブエージェントの分は数えない。"""
+        a = ClaudeAdapter(executable=["x"])
+        msg = lambda parent, mid, i, r, w: json.dumps({"type": "assistant", "parent_tool_use_id": parent, "message": {
+            "id": mid, "content": [], "usage": {"input_tokens": i, "cache_read_input_tokens": r, "cache_creation_input_tokens": w}}})
+        res = json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "result": "ok"})
+        r = a.parse([msg("toolu_1", "m0", 9, 9000, 900), msg(None, "m1", 1, 100, 10), msg(None, "m2", 5, 500, 50), res])
+        self.assertEqual(r.meta["context_tokens"], 111)
+        # すべて 0・数値でない usage は測れなかったものとして、次の本体のメッセージを使う
+        self.assertEqual(a.parse([msg(None, "e0", 0, 0, 0), msg(None, "e1", "x", 1, 1), msg(None, "m1", 1, 100, 10), res]).meta["context_tokens"], 111)
+        self.assertNotIn("context_tokens", a.parse([json.dumps({"type": "assistant", "parent_tool_use_id": None,
+                                                                "message": {"content": []}}), res]).meta)
+        codex = CodexAdapter(executable=["x"]).parse(DATA.joinpath("codex_failed_real.jsonl").read_text().splitlines())
+        self.assertNotIn("context_tokens", codex.meta)  # Codex は 1 回の実行の合計しか報告しない
 
     def test_claude_errors(self):
         a = ClaudeAdapter(executable=["x"])
@@ -258,6 +274,37 @@ class MetricTests(unittest.TestCase):
         # llm グレーダーを使うタスクがなければ、LLM 判定の有無が違っても比較できる
         self.assertEqual(g({**s, "meta": meta(False, "h1", False)}, {**s, "meta": meta(True, "h1", False)}), [])
         self.assertTrue(any("p/a" in x and "比較できません" in x for x in g({**s, "meta": meta(True, "h2")}, {**s, "meta": meta(True, "h1")})))
+
+    def test_efficiency_fields(self):
+        """タスクごとの費用・トークン・開始時の文脈（判定の費用は含めない。1 試行でも不明なら None）。"""
+        tok = {"input": 2, "cache_read": 10, "cache_write": 5, "output": 3}
+        rs = [rec(profile_id="h", task_id="a", trial=i, passed=True, score=1.0, cost_usd=0.1 * (i + 1), judge_cost_usd=0.5,
+                  tokens=tok, meta={"context_tokens": 1000 + i}) for i in range(2)]
+        rs.append(rec(profile_id="h", task_id="b", passed=False, score=0.0, cost_usd=None, tokens={}, meta={}))  # timeout など
+        rs.append(rec(profile_id="c", agent="codex", task_id="a", passed=True, score=1.0, cost_usd=None,
+                      tokens={"input": 100, "cache_read": 80, "cache_write": 0, "output": 10}))
+        s = summarize(rs, 1)
+        a, b = s["tasks"]["h"]["a"], s["tasks"]["h"]["b"]
+        self.assertAlmostEqual(a["mean_cost_usd"], 0.15)
+        self.assertEqual((a["mean_tokens"], a["mean_context_tokens"]), (20, 1000.5))
+        self.assertEqual((b["mean_cost_usd"], b["mean_tokens"], b["mean_context_tokens"]), (None, None, None))
+        self.assertEqual(s["tasks"]["c"]["a"]["mean_tokens"], 110)  # Codex のキャッシュは input の内数
+        # 同じタスクに費用・トークンの分からない試行が 1 つでもあれば、分かる分だけの平均にしない（失敗を外して安く見せない）
+        mixed = summarize([rec(task_id="m", trial=0, passed=True, score=1.0, cost_usd=0.2, tokens=tok, meta={"context_tokens": 900}),
+                           rec(task_id="m", trial=1, passed=False, score=0.0, cost_usd=None, tokens={}, meta={})], 1)["tasks"]["p"]["m"]
+        self.assertEqual((mixed["mean_cost_usd"], mixed["mean_tokens"], mixed["mean_context_tokens"]), (None, None, 900))
+        self.assertEqual(s["profiles"]["h"]["mean_context_tokens"], 1000.5)  # 成否によらない値なので測れた試行だけで平均
+        self.assertIsNone(s["profiles"]["c"]["mean_context_tokens"])
+        from harness_eval.metrics import _per_trial_tokens
+        self.assertEqual(_per_trial_tokens(s["profiles"]["c"]), 100)  # 入力側に Codex のキャッシュを二重に数えない
+        self.assertEqual(_per_trial_tokens({**s["profiles"]["h"], "valid": 2, "tokens": {"input": 4, "cache_read": 20, "cache_write": 10}}), 17)
+
+    def test_context_delta_over_common_tasks(self):
+        rs = [rec(profile_id=p, task_id=t, passed=True, score=1.0, meta={"context_tokens": c})
+              for p, t, c in (("base", "a", 15000), ("base", "b", 15200), ("h", "a", 17000), ("h", "b", 17400), ("h", "x", 99999))]
+        d = deltas(summarize(rs, 1), "base")["h"]
+        self.assertEqual(d["context_tokens"], 2100)  # x は基準にないので数えない
+        self.assertIsNone(deltas(summarize([r for r in rs if r.task_id == "x" or r.profile_id == "base"], 1), "base")["h"]["context_tokens"])
 
     def test_unknown_cost_not_zero_filled(self):
         s = summarize([rec(passed=True, score=1.0, cost_usd=None)], 1)

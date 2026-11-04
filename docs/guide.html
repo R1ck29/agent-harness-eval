@@ -508,7 +508,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <p><b>中断（Ctrl-C）</b>：未開始の試行は取り消し、実行中のエージェントは子プロセスごと止めます（トークンを使い続けません）。その実行の集計とレポートは作られませんが、<code>trials.jsonl</code> には完了済みの試行が残ります。完了した試行はキャッシュ済みなので、同じコマンドを再実行すると続きから進みます（中断で止めた試行は <code>interrupted</code> としてキャッシュせず、やり直します）。</p>
 
 <h2 id="loop">11. 自己改善ループでの使い方</h2>
-<p>配布物の変更案（候補）は改善役（<code>improve</code>）が train の失敗から作り、<code>gate</code>・<code>promote</code> が<b>採用してよいかを決める関門</b>を受け持ちます。同じタスクで改善案を作って同じタスクで採点すると、そのタスクだけに効く近道も「改善」に見えるので、タスクを 3 つに分けて使います。改善するのは全員に配る配布物で、各利用者の <code>~/.claude/CLAUDE.md</code> などは対象にしません。</p>
+<p>配布物の変更案（候補）は改善役（<code>improve</code>）が train の失敗から作り、<code>gate</code>・<code>promote</code> が<b>採用してよいかを決める関門</b>を受け持ちます。同じタスクで改善案を作って同じタスクで採点すると、そのタスクだけに効く近道も「改善」に見えるので、タスクを 3 つに分けて使います。改善するのは全員に配る配布物で、各利用者の <code>~/.claude/CLAUDE.md</code> など手元で育つもの（自動メモリ・WikiSkill のスキル）は対象にしません（2 つの層の分け方は <a href="design.html#loop">設計記録 10 章</a>）。</p>
 <figure>
 <div class="scroll"><svg viewBox="0 0 900 250" role="img" aria-label="train の失敗を改善役（improve）が読み候補を作る。候補は dev で回帰予算つきの gate を通り、holdout で現行と同じ実行の中で promote により比べられる。昇格した候補は人が確認してから配布する。holdout は改善役に見せない">
 <defs><marker id="m11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head"/></marker></defs>
@@ -638,6 +638,20 @@ python -m harness_eval run --tasks my-tasks/tasks --split dev --profiles sv-01/s
 <li>符号検定はタスクを単位に数えるので、試行回数を増やしても件数は増えません。悪化 0 のとき、改善したタスクが 6 件で p = 0.031（α = 0.05・m = 1 で有意）、3 件では p = 0.25 です。試行回数は各タスクの値を安定させるために使います（3 試行以上を推奨）。</li>
 <li>参考として、現行の<b>雑音幅</b>（同じ配布物の試行を 2 分割した差から換算した 95% 範囲。各タスク 2 試行以上が必要）、1 試行あたりの入力側トークン（常時読み込まれる指示が増えると増える）、合格あたりコストの差も出します。判定には使いません。</li>
 <li>結果は <code>&lt;実行ID&gt;/promote.json</code> に残ります。<b>昇格は「配布してよい」ではなく「人が確認する価値がある」という意味</b>です。</li>
+</ul>
+<h3 id="efficiency">トークンを減らす（効率）</h3>
+<p>成功率を落とさずに、毎回読み込まれる量と迷いを減らす候補を作り、採否を決めます。材料は自分の train の実行だけで、他の利用者のデータは要りません。</p>
+<pre><code>python -m harness_eval improve --goal efficiency --run "$OUT/&lt;train の実行ID&gt;" --profile prof/current.yaml --tasks my-tasks/tasks \
+    --holdout-out "$HOLDOUT" --out cand-02
+python -m harness_eval run --tasks my-tasks/tasks --split holdout --profiles prof/current.yaml cand-02/holdout/candidate.yaml \
+    --trials 3 --out "$HOLDOUT"
+python -m harness_eval promote --run "$HOLDOUT/&lt;実行ID&gt;" --candidate candidate --incumbent current \
+    --objective efficiency --margin 0.05 --max-regressions 0</code></pre>
+<ul>
+<li><b>開始時の文脈</b>（レポートの列、summary.json の <code>mean_context_tokens</code>）は、最初のリクエストの入力トークンです。システムプロンプト・ツール・常に読み込まれる指示（CLAUDE.md・rules/・スキルとサブエージェントの説明文）・依頼が入り、配布物なしの基準との差が配布物の固定費です。<code>paths:</code> で範囲を絞ったルール、作業中に読まれる下位フォルダの CLAUDE.md、後から読み込まれるツール、スキルの本文は入りません。Claude Code だけで測ります。</li>
+<li><b>昇格の条件</b>：成功率の差の区間の下端が −<code>--margin</code> 以上（片側 α/m）で、タスクごとの費用比の区間の上端が 0 未満、安くなったタスクが高くなったタスクより多く、その符号検定も有意なとき。費用はエージェントの分だけで、サブスクリプションでは API 単価で換算した推定です。</li>
+<li><b>目的は holdout の実行前に決める</b>：同じ実行を成功率と効率の両方で判定すると、評価済みの候補を 1 つ多く数えます。効率の昇格を重ねると成功率が少しずつ下がりうるので、成功率で最後に昇格した配布物を <code>--anchor</code> に入れて同じ実行で比べます。</li>
+<li><b>小さな削減は判定できない</b>：数十文字の削減は文脈全体の 1% 未満で、費用の差は試行ごとのばらつきに埋もれます（実測は <a href="design.html#risks">設計記録 11 章</a>）。大きく削れる配布物と、20 件以上の holdout で使います。</li>
 </ul>
 <p>オプションと improve.json の項目は <a href="reference.html#commands">リファレンス 7 章</a>、それぞれの仕組みを入れた理由・残る課題は <a href="design.html#loop">設計記録 10 章</a> にあります。</p>
 
