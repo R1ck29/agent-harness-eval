@@ -20,20 +20,20 @@ promote-efficiency 2, improve-efficiency 3 and docs 3 with user-granted extra at
 
 ## Previous: real-model verification of v0.6.0 and follow-ups — 2026-11-01 → 11-02
 
-PR R1ck29/agent-harness-eval#1 (v0.6.0) merged into main (62ffd9e) on the user's "Merge it". Real runs used a
+PR R1ck29/agent-harness-eval#1 (v0.6.0) merged into main (5bb3c52) on the user's "Merge it". Real runs used a
 setup-token subscription token from the user's Keychain, passed only through the environment (company users use
 `ANTHROPIC_API_KEY` instead; same `inherit_env` mechanism, not exercised for real here).
 
 ### Found and fixed (each reviewed independently, pushed to main)
 
-- bf87c0f: trials inherited the desktop app's session variables (CLAUDE_EFFORT, CLAUDE_CODE_SIMPLE, auth refresh,
+- c809230: trials inherited the desktop app's session variables (CLAUDE_EFFORT, CLAUDE_CODE_SIMPLE, auth refresh,
   messaging socket…). INHERITED_UNSET extended (names confirmed in the CLI binary), doctor lists any other CLAUDE*
   variable reaching trials, four auth/connection variables added to ROUTE_VARS.
-- 8a15bee: the improver added a stray `SKIN.md` ("x") — pre-check now rejects skill files Claude Code never reads.
-- 5238d1b: `--retries` (default 1) returns pre-check reasons to the improver; train strings only in the workdir
+- bcf3b50: the improver added a stray `SKIN.md` ("x") — pre-check now rejects skill files Claude Code never reads.
+- 3403668: `--retries` (default 1) returns pre-check reasons to the improver; train strings only in the workdir
   `retry.json`; `attempts` in improve.json. README / sample profiles document API-key auth. Graph: 4 nodes PASS.
-- a8bc6a0: rejected proposals' old/new/reason and notes are not written to improve.json. Graph: 1 node PASS.
-- 2f1da2f: README shows `HARNESS_EVAL_REAL_CLI=1` (the one skipped test; with it 144/144 pass).
+- 37f2e60: rejected proposals' old/new/reason and notes are not written to improve.json. Graph: 1 node PASS.
+- f3bd256: README shows `HARNESS_EVAL_REAL_CLI=1` (the one skipped test; with it 144/144 pass).
 
 ### Real-model results (claude-sonnet-5-5, CLI 2.1.295; scratch copies of the samples with `split: train`)
 
@@ -165,14 +165,14 @@ works). Next: after `claude setup-token`, run `improve` once on a real train run
 
 - Shared claude.ai session https://claude.ai/share/e1c96de7-ae94-4a70-b16a-3597830e6af8 (2026-10-18〜29): Harness²
   study, OSS survey "チーム向けClaude Codeハーネスの自己改善：OSS調査と推奨設計", and a cloud Claude Code session that built
-  v0.5.0 on 059e103 and handed it over as `0001-feat-v0.5.0-…patch` (119,904 bytes) + `agent-harness-eval-0.5.0.zip`.
+  v0.5.0 on 2ff3102 and handed it over as `0001-feat-v0.5.0-…patch` (119,904 bytes) + `agent-harness-eval-0.5.0.zip`.
   Neither file was on this Mac (not in ~/Downloads, not found by Spotlight).
 - The patch was rebuilt from the share's snapshot API (`/api/chat_snapshots/<id>?render_all_tools=true`, every tool
   input of the session): the session's Edit/Write inputs were applied as data, its python heredocs were evaluated by
   an AST interpreter that only allows string replacement on repo files (no transcript code was executed), and its
-  four `sed -i` lines were re-implemented by hand. Every replacement asserted its match. Result on 059e103: 87 tests
+  four `sed -i` lines were re-implemented by hand. Every replacement asserted its match. Result on 2ff3102: 87 tests
   OK, ruff clean, and a patch of 119,907 bytes — the 3-byte difference is the author line (`Claude <noreply@…>` in
-  the original). Code and tests applied to main (edfd49e did not touch them); docs were merged by hand into the
+  the original). Code and tests applied to main (b10cea7 did not touch them); docs were merged by hand into the
   README / guide / reference / design split of 2026-10-29.
 
 ### Decision (from the session; user chose "design + evaluation-side foundation", 2026-10-29)
@@ -203,7 +203,7 @@ rejected alternatives: best-of-N control, built-in `improve`, credential-sealed 
 - [x] Verify: 89 tests on Python 3.10 / 3.11 / 3.12 / 3.13, ruff clean, coverage 91%, no broken anchors, no new
       36-char passage shared by two documents, guide §11 figure rendered
 - [x] Independent review (fresh reviewer, no build context); fixes; re-review PASS (see Review of the port)
-- [x] Commit and push (user approved 2026-10-31, efb35a3); GitHub's Download ZIP of main (237,811 bytes) unzips to
+- [x] Commit and push (user approved 2026-10-31, c2a8292); GitHub's Download ZIP of main (237,811 bytes) unzips to
       agent-harness-eval-main/, reports 0.5.0, passes the unit tests and `validate --selftest` from the unzipped copy
 - Distribution (user, 2026-10-31): the internal environment gets the code through GitHub's "Download ZIP", so the
   separate `git archive` zip (dist/agent-harness-eval.zip) and its README command were dropped.
@@ -261,7 +261,7 @@ rejected alternatives: best-of-N control, built-in `improve`, credential-sealed 
 
 ### Handoff (for the next session)
 
-State: v0.5.0 is on GitHub main (efb35a3). Not run against real CLIs
+State: v0.5.0 is on GitHub main (c2a8292). Not run against real CLIs
 (no `doctor --live`, no real holdout run); Windows still unverified.
 
 Decisions (user, 2026-10-31): collect as many content-free signals as possible, and fictionalized `harvest` tasks
@@ -382,7 +382,7 @@ Not adopted (the reasons go in docs/design.html):
 
 ### Steps
 
-- [x] Baseline snapshot for rollback (user chose git init + commit: `d2ff1db`)
+- [x] Baseline snapshot for rollback (user chose git init + commit: `395ac68`)
 - [x] Import the v0.3.0 tree; remove Phase 0 code; merged pyproject and lock; tests green as-is
 - [x] (1)(2) stats in `metrics.py` plus summarize / deltas / gate / report integration, tests first
 - [x] (3) counterbalanced scheduler, tests first
