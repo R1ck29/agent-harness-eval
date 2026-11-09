@@ -15,6 +15,8 @@ Claude Code と Codex の「ハーネス」（CLAUDE.md / AGENTS.md・Skills・S
 - 採点はコード判定が基本（独自スクリプトも可）。LLM 判定は補助
 - 依存は Python 3.10+ と PyYAML だけ。各 CLI（`claude -p` / `codex exec --json`）を直接呼ぶ
 
+用語の意味は末尾の [用語](#用語)、全体の関係は [図解ガイド「全体像」](docs/guide.html#overview) を参照してください。
+
 ## ドキュメント
 
 | 知りたいこと | 文書 |
@@ -27,67 +29,181 @@ Claude Code と Codex の「ハーネス」（CLAUDE.md / AGENTS.md・Skills・S
 
 ## 導入
 
-```bash
-git clone https://github.com/R1ck29/agent-harness-eval.git
-```
+### ① Python と依存パッケージ
+
+Python **3.10 以上**を用意します。リポジトリは `git clone https://github.com/R1ck29/agent-harness-eval.git`
+または **Code → Download ZIP** で取得します。
+Git は clone する場合だけ必要です。展開したフォルダに移動してから、仮想環境を作ります。
+
+macOS / Linux（Bash）:
 
 ```bash
-cd agent-harness-eval
-pip install -r requirements.txt
+cd agent-harness-eval  # ZIP の場合は展開したフォルダ名
+python3 --version     # 3.10 以上であること
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Windows（PowerShell）:
+
+```powershell
+cd agent-harness-eval  # ZIP の場合は展開したフォルダ名
+python --version      # 3.10 以上であること
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+**インストール前に**、管理者に `<社内 Artifactory・認証の設定手順（管理者に確認）>` を確認し、
+PyPI ミラーと認証を設定してください。下はプレースホルダーです。実際の URL に置き換えます（両シェル共通）。
+
+```bash
+python -m pip config --site set global.index-url "<社内 Artifactory の PyPI ミラー URL（管理者に確認）>"
+python -m pip install -r requirements.txt
 python -m harness_eval --version
 ```
 
-- 利用先では GitHub のリポジトリページの **Code → Download ZIP** で取得した zip を展開し（フォルダ名は `agent-harness-eval-main`。上の `cd` はこのフォルダへ）、PyYAML は Artifactory 経由で入れます。
-- `pip install .` すると `harness-eval` コマンドとしても使えます（以降の `python -m harness_eval` と同じ）。
-- 評価するエージェントの CLI が PATH にあること（`claude --version` / `codex --version`）。PATH にない場合はプロファイルの `executable:` で指定します。
+一度だけ指定するなら `python -m pip install --index-url "<社内 Artifactory の PyPI ミラー URL（管理者に確認）>" -r requirements.txt`。
+最後に `0.8.0` が表示され、終了コード 0 なら導入完了です。
+`python -m pip install .` で `harness-eval` コマンドとしても使えます（`python -m harness_eval` と同じ）。
+
+### ② エージェント CLI
+
+この手順には [Claude Code](https://code.claude.com/docs/en/setup) が必要です。
+[Codex](https://developers.openai.com/codex/cli/) は Codex も評価する場合だけ用意します。
+起動フラグと出力形式の**確認済み版（最低版ではありません）**は Claude Code **2.1.304** / Codex **0.163.0** です。
+`claude --version` / `codex --version` で確認します。PATH にない場合はプロファイルの `executable:` で指定します。
+
+### ③ 実行前の認証
+
+`<社内アカウント・認証情報・モデル利用権限の申請ページ（管理者に確認）>` で、利用先と権限を準備してください。
+試行は一時ホームで動くため、普段の macOS キーチェーンのログインは届きません。
+以下のいずれかを選び、**実行する同じ端末**で設定します（例の値は置き換える）。
+
+| 方式 | Bash | PowerShell | 両方の `examples/profiles/claude-*.yaml` に追記 |
+|---|---|---|---|
+| API キー | `export ANTHROPIC_API_KEY="<API キー>"` | `$env:ANTHROPIC_API_KEY="<API キー>"` | `inherit_env: [ANTHROPIC_API_KEY]`（`billing` は既定の `api`） |
+| Bedrock | `export CLAUDE_CODE_USE_BEDROCK=1` / `export AWS_REGION=ap-northeast-1` | `$env:CLAUDE_CODE_USE_BEDROCK="1"` / `$env:AWS_REGION="ap-northeast-1"` | `inherit_env: [CLAUDE_CODE_USE_BEDROCK, AWS_REGION]` |
+| サブスクリプション | `claude setup-token` → `export CLAUDE_CODE_OAUTH_TOKEN="<トークン>"` | `claude setup-token` → `$env:CLAUDE_CODE_OAUTH_TOKEN="<トークン>"` | `inherit_env: [CLAUDE_CODE_OAUTH_TOKEN]` と `billing: subscription` |
+
+Bedrock は先に `<社内 AWS 認証・Bedrock モデル利用設定ページ（管理者に確認）>` に従い、AWS 認証とモデル利用権限を準備します。
+表の `/` はコマンドの区切りです。秘密の値は YAML に書かず、変数名だけ `inherit_env` に書きます。
+固定の Bedrock 設定を `env:` に書く例は `claude-baseline.yaml` のコメント、経路を変える他の変数の宣言は
+[認証リファレンス](docs/reference.html#auth) を参照してください。
 
 ## 5 分で試す（同梱サンプル）
 
-- **結果の置き場所（`--out`）はリポジトリとホームの外**にします。上のフォルダに `CLAUDE.md` や `.claude/` があると、
-  エージェントがそれを読んで比較が壊れるため、`run` が止まります（[図解ガイド 5 章](docs/guide.html#isolation)）。
-- **認証**：試行は一時ホームで動くので、普段のログイン（macOS のキーチェーン）は届きません。`examples/profiles/claude-*.yaml` の 2 つに、
-  API キーを環境変数に設定しているなら `inherit_env: [ANTHROPIC_API_KEY]`（名前だけ。値は書かない。`billing` は既定の `api`）、Bedrock なら `env:`、
-  サブスクリプションなら `claude setup-token` のトークンを `inherit_env` で書き足します（書き方は `claude-baseline.yaml` のコメントと
-  [リファレンス 5 章](docs/reference.html#auth)）。
-- **Windows（PowerShell）**：1 行目を `$OUT="C:\harness-eval"` にし、行末の `\` を `` ` `` に置き換えます。
+### 出力先
+
+**書き込み可能で、リポジトリ・ホームの外**のフォルダを用意します。Linux の `/srv/harness-eval` は、
+必要なら管理者に作成と書き込み権限の設定を依頼してください。
+`--out` とその上に指示ファイルや設定フォルダがあると停止します。OS の一時フォルダは Codex が拒否するため避けます
+（[隔離と制限](docs/guide.html#isolation)）。
 
 ```bash
-OUT=/Users/Shared/harness-eval
+OUT=/Users/Shared/harness-eval  # macOS
+# Linux では上の代わりに:
+# OUT=/srv/harness-eval
+mkdir -p "$OUT"
+```
 
-# ① 定義の検証（費用 0）。--selftest で採点が正解例で通り、何もしなければ落ちることも確かめる
+```powershell
+$OUT="C:\harness-eval"
+New-Item -ItemType Directory -Force $OUT
+```
+
+以下のコマンドは両シェルで同じです（ワイルドカードは引用符ごと使います）。
+ハーネスの設定・タスク・採点スクリプトは利用者の権限でローカル実行されるため、信頼できるものだけを評価してください。
+
+### ① 定義の検証（モデル呼び出しなし）
+
+```bash
 python -m harness_eval validate --tasks examples/tasks --profiles examples/profiles --selftest
+```
 
-# ② 環境の確認：CLI の版と環境変数（費用 0）→ 隔離した状態で認証と配布物の読み込み（最小の呼び出し 1 回ずつ）
-python -m harness_eval doctor --profiles examples/profiles/claude-*.yaml --out "$OUT"
-python -m harness_eval doctor --profiles examples/profiles/claude-*.yaml --out "$OUT" --live
+`OK: タスク 6 件、プロファイル 4 件` と、正解例のある 4 タスクの `selftest <タスクID>: OK`、終了コード 0 が目印です。
+同梱サンプルでは Codex のスキル検出が推定であるという `警告:` が 2 件出ます。警告と selftest の失敗は別です。
 
-# ③ 見積もり：呼び出し回数・キャッシュで省ける回数・概算費用（費用 0）
-python -m harness_eval plan --tasks examples/tasks --profiles examples/profiles/claude-*.yaml --tag smoke --out "$OUT"
+### ② 環境の確認
 
-# ④ スモーク評価（1 試行・LLM 判定なし）。配布物を変えるたびにこれを回す
-python -m harness_eval run --tasks examples/tasks --profiles examples/profiles/claude-*.yaml \
-    --tag smoke --no-llm --baseline claude-baseline --out "$OUT"
+```bash
+python -m harness_eval doctor --profiles "examples/profiles/claude-*.yaml" --out "$OUT"
+```
 
-# ⑤ フル評価（3 試行・LLM 判定あり・費用上限つき）。リリース前・モデル移行時だけ
-python -m harness_eval run --tasks examples/tasks --profiles examples/profiles/claude-*.yaml \
-    --trials 3 --baseline claude-baseline --max-cost-usd 5 --out "$OUT"
+`harness-eval 0.8.0 / Python … / PyYAML …`、各プロファイルの CLI 版と `経路:` が出て、終了コード 0 なら静的確認は成功です。
+`注意:` は内容を確認し、`NG:` や CLI の `見つかりません` は解消してから進みます。
+静的確認だけでは認証の成功までは分かりません。
 
-# ⑥ リリース判定：配布物を変えたら ⑤ と同じオプションでもう一度 run し、変更前と変更後の実行 ID を比べる
-#    （同梱サンプルは 6 タスクで、判定に必要な 10 タスクに届かないため結果は「判定不能」。手順の確認用）
+**次の `--live` は設定先のモデルを呼び、料金が発生し得ます**（各プロファイル 1 回）。
+
+```bash
+python -m harness_eval doctor --profiles "examples/profiles/claude-*.yaml" --out "$OUT" --live
+```
+
+両プロファイルで `最小試行: OK`、終了コード 0 が目印です。`NG` は解消してから進みます。
+
+### ③ スモーク評価と同じ条件で見積もる（モデル呼び出しなし）
+
+```bash
+python -m harness_eval plan --tasks examples/tasks --profiles "examples/profiles/claude-*.yaml" --tag smoke --no-llm --baseline claude-baseline --out "$OUT"
+```
+
+`組み合わせ 8 × 試行 1 = 8 試行`（4 タスク × 2 プロファイル）、`LLM 判定: なし`、終了コード 0 が目印です。
+初回の例は `概算費用: $0.0000（履歴がなく見積もれない呼び出し 8 回）`。
+費用はキャッシュ内の過去の費用から概算し、キャッシュで省ける試行は除きます。
+履歴がないときの $0 や見積もれない呼び出しは、**不明・不完全という意味で、無料ではありません**。
+
+### ④ スモーク評価（1 試行）
+
+**`run` はタスク入力を設定先のモデルに送り、料金が発生し得ます。`--no-llm` は LLM 判定だけを無効にします。**
+合成データを使ってください。一時ホームは設定の隔離であり、外のファイルへのアクセスを禁止する sandbox ではありません。
+
+```bash
+python -m harness_eval run --tasks examples/tasks --profiles "examples/profiles/claude-*.yaml" --tag smoke --no-llm --baseline claude-baseline --out "$OUT"
+```
+
+終了コード 0 と `レポート:` の出力を確認します。レポートの「有効/全」・除外された試行・予算停止を確認してからスコアを読みます。
+
+### ⑤ フル評価（3 試行・LLM 判定あり）
+
+リリース前・モデル移行時には次を使います。`--max-cost-usd 5` は**この run が追跡できる費用だけ**の上限で、
+先の doctor・スモークの費用は含みません。プロバイダー側の厳密な支出制限ではなく、並列実行では超過し得ます。
+`pricing` のない Codex など不明な費用は上限計算に入りません（[費用の制限](docs/guide.html#cost)）。
+
+```bash
+python -m harness_eval run --tasks examples/tasks --profiles "examples/profiles/claude-*.yaml" --trials 3 --baseline claude-baseline --max-cost-usd 5 --out "$OUT"
+```
+
+④ と同じく、終了コード 0・`レポート:` と、有効な試行の件数を確認します。
+`improve` もモデルを呼び、料金が発生し得ます（[自己改善ループ](docs/guide.html#loop)）。
+
+### ⑥ 実行IDを使ってリリース判定
+
+各 run が出す `レポート: …/<実行ID>/report.html` の親フォルダ名が実行IDです。
+`ls "$OUT"`（Bash）/ `Get-ChildItem $OUT`（PowerShell）でも探せます。
+配布物を変えたら ⑤ と同じオプションでもう一度 run し、変更前後の ID を指定します。
+
+```bash
 python -m harness_eval gate --current "$OUT/<変更後の実行ID>" --previous "$OUT/<変更前の実行ID>" --margin 0.05
 ```
 
-結果は `$OUT/<実行ID>/report.html` に出ます。判定の決まり方は [図解ガイド 7 章](docs/guide.html#metrics)、
-配布物の変更案を holdout で採否判定する使い方は [図解ガイド 11 章](docs/guide.html#loop) にあります。
+同梱サンプルは 6 タスクで、判定に必要な 10 タスクに届かないため「判定不能」（終了コード 3）になります。
+通過は 0、不通過は 1 です（[指標とリリース判定](docs/guide.html#metrics)）。
 
-自分の仕事に近いタスクで評価するなら、自分のセッション履歴から架空化したタスクの下書きを作ります（`harvest`、[図解ガイド 9 章](docs/guide.html#harvest)）。
+### 自分の履歴からタスクを作る
+
+**`harvest` は、秘匿化・架空化する前の元のセッション履歴の依頼文を Claude（設定したプロバイダー）に送り、料金が発生し得ます。**
+その送信先に送ってよい履歴だけを使ってください。まず `--dry-run` で件数だけ確認します
+（[harvest の仕組み](docs/guide.html#harvest)）。
 
 ```bash
-python -m harness_eval harvest --out my-tasks --limit 10 --ledger "$OUT/spend.jsonl"   # 下書きの書き出し先が my-tasks。件数だけ見るなら --dry-run
+python -m harness_eval harvest --out my-tasks --limit 10 --profile examples/profiles/claude-baseline.yaml --ledger "$OUT/spend.jsonl" --dry-run
+python -m harness_eval harvest --out my-tasks --limit 10 --profile examples/profiles/claude-baseline.yaml --ledger "$OUT/spend.jsonl"
 ```
 
-下書き（`my-tasks/tasks/`）を人が確認して直したら、`validate --tasks my-tasks/tasks --profiles … --selftest` で採点を確かめ、
-`run --tasks my-tasks/tasks …` で使います。
+dry-run は `（--dry-run: 書き換え・書き出しはしていません。依頼の本文は表示しません）` と終了コード 0 を確認します。
+生成した下書き（`my-tasks/tasks/`）と **`checks/` のスクリプトを先にレビュー**してください。
+`validate --selftest` でスクリプトが利用者の権限でローカル実行されます。
+確認・修正後に `validate --tasks my-tasks/tasks --profiles … --selftest` → `run --tasks my-tasks/tasks …` で使います。
 
 **同梱サンプル**（履歴がないときに `harvest` が書き出す標準タスクも兼ねる）: 合成の売上 CSV（`examples/fixtures`）を使う 6 タスクと、
 小さな配布物 `examples/harnesses/ds-lite`（CLAUDE.md の出力形式ルール・「曖昧なら確認」ルール＋月別集計スキル）。
@@ -103,14 +219,46 @@ python -m harness_eval harvest --out my-tasks --limit 10 --ledger "$OUT/spend.js
 
 ## 開発
 
+[uv の導入手順](https://docs.astral.sh/uv/getting-started/installation/) に従って uv を用意します。
+依存の取得先は社内ミラーに設定してください（uv のインデックス設定は pip とは別です）。
+
 ```bash
-python -m unittest discover -s tests        # 偽の claude / codex CLI を使うのでトークンは使わない
-HARNESS_EVAL_REAL_CLI=1 python -m unittest discover -s tests   # 加えて、インストール済みの claude で改善役の読み取り制限を確かめる（費用 0。付けないと 1 件スキップ）
-uv run pytest --cov                         # pytest・カバレッジ 80% 以上・ruff は pyproject.toml の dev グループ
+uv sync --group dev
+uv run pytest --cov                         # カバレッジ 80% 以上
+uv run ruff check .
+python -m unittest discover -s tests        # 偽 CLI を使い、トークンは使わない
 ```
 
-`tests/fake_agents/` は実機で観測した出力形式を再現する偽 CLI、`tests/data/` は実機の出力（Claude Code の stream-json、
-Codex の失敗時 JSONL、採点スクリプトの回帰用の実出力）です。
+実機の読み取り制限も確かめる場合（費用 0。指定しないと 1 件スキップ）:
+
+```bash
+HARNESS_EVAL_REAL_CLI=1 python -m unittest discover -s tests
+```
+
+```powershell
+$env:HARNESS_EVAL_REAL_CLI="1"
+python -m unittest discover -s tests
+Remove-Item Env:HARNESS_EVAL_REAL_CLI
+```
+
+`tests/fake_agents/` は実機で観測した出力形式を再現する偽 CLI、`tests/data/` は実機の出力を元にしたフィクスチャです
+（Claude Code の stream-json は識別子・パス・拡張一覧を匿名化）。
+
+## 用語
+
+| 用語 | 意味 |
+|---|---|
+| プロファイル | エージェント・モデル・展開する設定をまとめた YAML |
+| ハーネス / 配布物 | 評価する設定一式。一時ホームに展開する |
+| Skills | 必要に応じて読み込む手順（`SKILL.md`） |
+| Subagents | 仕事の一部を任せるサブエージェント |
+| Hooks | CLI のイベントに応じて実行する処理 |
+| MCP | 外部ツールやデータにつなぐ仕組み |
+| holdout | 改善には使わず、変更案の評価に使うタスク |
+| pass^k | k 回続けて合格する確率 |
+| 実行ID | 1 回の run の結果フォルダ名 |
+
+全体の関係は [図解ガイド「全体像」](docs/guide.html#overview) を参照してください。
 
 ## ライセンス
 
