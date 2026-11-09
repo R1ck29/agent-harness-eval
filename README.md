@@ -55,6 +55,7 @@ python -m venv .venv
 
 **インストール前に**、管理者に `<社内 Artifactory・認証の設定手順（管理者に確認）>` を確認し、
 PyPI ミラーと認証を設定してください。下はプレースホルダーです。実際の URL に置き換えます（両シェル共通）。
+`--site` は有効にした仮想環境（`.venv`）だけに書き込むので、必ず上で仮想環境を有効にしてから実行します。
 
 ```bash
 python -m pip config --site set global.index-url "<社内 Artifactory の PyPI ミラー URL（管理者に確認）>"

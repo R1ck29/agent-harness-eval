@@ -142,6 +142,8 @@ class ParserTests(unittest.TestCase):
         self.assertIn("4 words", r.final_message)
         self.assertEqual(r.meta["cli_version"], "2.1.304")
         self.assertIn("word-count", r.meta["loaded_skills"])
+        self.assertEqual(r.meta["loaded_plugins"], ["example-plugin"])
+        self.assertEqual(r.meta["mcp_servers"], ["example-mcp:connected"])
         self.assertEqual(r.tokens["cache_read"], 173614)
         self.assertEqual(r.meta["context_tokens"], 2 + 31109 + 16008)  # 最初のメッセージ（同じ id が 3 行続く）の入力側
 
