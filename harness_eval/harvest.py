@@ -43,6 +43,8 @@ NO_REAL_ACCESS = {"type": "tool_used", "tool": "Bash|shell", "max": 0, "category
                   "input_match": r"(^|[\s;&|(\"])(ssh|scp|sftp|curl|wget|trino|hive|beeline|psql|mysql) ",
                   "description": "本物の環境（ssh・DB・Web）に接続しようとしていない"}
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+if not EXAMPLES.is_dir():  # wheel では必要な標準タスクだけをパッケージ内に同梱する
+    EXAMPLES = Path(__file__).resolve().parent / "_examples"
 
 
 @dataclass
