@@ -14,7 +14,15 @@ dependencies = ["PyYAML>=6.0"]
 harness-eval = "harness_eval.cli:main"
 
 [tool.setuptools]
-packages = ["harness_eval"]
+packages = ["harness_eval", "harness_eval._examples"]
+
+[tool.setuptools.package-dir]
+"harness_eval._examples" = "examples"
+
+[tool.setuptools.package-data]
+"harness_eval._examples" = [
+  "tasks/*.yaml", "fixtures/*/*", "checks/*.py", "references/*", "references/*/*",
+]
 
 [dependency-groups]
 dev = [
