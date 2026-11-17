@@ -474,6 +474,19 @@ def trust_warnings(agent: str, stderr: str) -> list[str]
 | CI | `.github/workflows/test.yml`（push・pull_request、ubuntu/macos/windows × 3.10/3.13、uv、pytest、ruff は 1 セル、アクションは SHA 固定） | `.github/` |
 | 版 | 0.9.0、`CHANGELOG.md` | `pyproject.toml`、`harness_eval/__init__.py`、`uv.lock`、README |
 
+### 9.1 実装の結果と検証（2026-11-17）
+
+- 新しいモジュール `harness_eval/effective.py`（信頼の付与・期待／観測・照合・記録）。`runner._execute_in` は install の後に信頼を付け、
+  Codex は起動前に観測し、試行の後に `effective` を書く。`doctor --live` は読み込まれなかった部品を NG として出す
+- 偽の CLI（`tests/fake_agents/`）に、§2 の実測の挙動（init のユーザー・プロジェクトの部品、未信頼の警告、`debug prompt-input`・`mcp list --json`、
+  プロジェクトの `.codex/config.toml` の信頼、利用上限の文面）を足し、`tests/test_effective.py`（23 件）で確かめた
+- CI を足したところ、**Windows で一度も動かしていなかった既存のテストが 6 件失敗**した。うち 1 件は本物の不具合
+  （`harvest._safe_rel` が Windows で `/etc/x` を作業ディレクトリ内と誤認。修正済み）、残りはテストの書き方（改行の変換・ドライブの書式・
+  パスの埋め込み・chmod）。修正後、ubuntu・macOS・Windows × 3.10・3.13 の 6 セルすべて成功
+- 実機の CLI での確認は §2 のプローブまで（Claude Code は未ログイン、Codex は利用上限のため、モデルを呼ぶ試行は行っていない）。
+  モデルを呼ぶ確認（`allowed-tools` の付与が `-p` で効くこと、信頼の付与で `permissions.allow` が実際に効くこと）は、認証のある環境で
+  `doctor --live` と同梱の例で行う（フェーズ 4 の最初の作業）
+
 ## 10. 後続のフェーズ（別の担当が実装する。各フェーズは独立した PR）
 
 共通の約束: 既存のテストを弱めない・消さない。偽の CLI（`tests/fake_agents/`）で再現できない挙動は、実機の出力をテストデータとして `tests/data/` に置く。
