@@ -21,7 +21,7 @@ import tempfile
 import unicodedata
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Callable, Iterable
 
 import yaml
@@ -358,7 +358,11 @@ def _safe_rel(p: str) -> bool:
     """作業ディレクトリ内の普通のファイルだけ許す。.claude/・.mcp.json・CLAUDE.md などは、エージェントの設定として
     読み込まれ比較を壊したりコマンドを実行させたりしうるので置かせない。"""
     pp = Path(p)
-    return (bool(p) and not pp.is_absolute() and ":" not in p and ".." not in pp.parts
+    # どの OS でも、根から始まるパス（/etc/x・\\x・C:\x）と、どちらの区切りでも .. を含むパスは拒む
+    # （Windows では /etc/x が is_absolute() にならず、ドライブの根からの絶対パスとして作業ディレクトリの外に書かれるため）
+    win = PureWindowsPath(p)
+    return (bool(p) and not pp.is_absolute() and not win.root and not win.drive and ":" not in p
+            and ".." not in pp.parts and ".." not in win.parts
             and not any(part.startswith(".") for part in pp.parts) and pp.name.lower() not in _AGENT_FILES)
 
 

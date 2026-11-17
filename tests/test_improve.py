@@ -63,16 +63,18 @@ class DenyRuleTests(unittest.TestCase):
     def test_absolute_rule_form(self):
         p = Path(tempfile.mkdtemp()).resolve()
         rules = deny_rules([p])
-        posix = p.as_posix()
-        self.assertEqual(rules, [f"Read(/{posix}/**)", f"Read(/{posix})"])
-        self.assertTrue(rules[0].startswith("Read(//"))  # 先頭の // が「ファイルシステムの根からの絶対パス」の印
+        self.assertEqual(rules, [r for pair in zip(rule(p, "/**"), rule(p), strict=True) for r in pair])
+        if os.name != "nt":
+            self.assertEqual(rules, [f"Read(/{p.as_posix()}/**)", f"Read(/{p.as_posix()})"])
+        self.assertTrue(all(r.startswith("Read(//") for r in rules))  # 先頭の // が「ファイルシステムの根からの絶対パス」の印
 
     def test_file_rule_and_duplicates(self):
         d = Path(tempfile.mkdtemp()).resolve()
         f = d / "a.txt"
         f.write_text("x")
         rules = deny_rules([f, d, d / "a.txt"])
-        self.assertEqual(rules.count(f"Read(/{f.as_posix()})"), 1)
+        for r in rule(f):
+            self.assertEqual(rules.count(r), 1)
 
     @unittest.skipIf(os.name == "nt", "POSIX only")
     def test_backslash_path_is_unusable(self):
@@ -113,9 +115,18 @@ class ReadIsolationCheckTests(unittest.TestCase):
 
 
 def write(p: Path, text: str) -> Path:
+    """書いたとおりの改行で書く（Windows の write_text は \n を \r\n に変え、文字数を数えるテストが OS で変わるため）。"""
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(text, encoding="utf-8")
+    with p.open("w", encoding="utf-8", newline="") as f:
+        f.write(text)
     return p
+
+
+def rule(path: Path, suffix: str = "") -> list[str]:
+    """deny_rules が作るはずの形（// + 根からのパス）。Windows のドライブは /C:/… と /c/… の 2 つ（mockapi._rule_path）。"""
+    posix = path.as_posix()
+    forms = ["/" + posix, "/" + posix[0].lower() + posix[2:]] if posix[1:3] == ":/" else [posix]
+    return [f"Read(/{f}{suffix})" for f in forms]
 
 
 SKILL = "---\nname: monthly\ndescription: 月別の集計に使う\n---\n\n# 手順\n\n1. scripts/m.py を実行する\n"

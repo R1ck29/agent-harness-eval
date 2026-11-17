@@ -500,9 +500,12 @@ class E2E(unittest.TestCase):
         self.assertEqual(code, 3, out)
         self.assertIn("記録できません", out)
         locked = self.out / "locked.jsonl"
-        locked.write_text("{}\n", encoding="utf-8")
-        locked.chmod(0)
-        self.addCleanup(locked.chmod, 0o644)
+        if os.name == "nt":  # Windows では chmod で読めなくできないので、UTF-8 として読めない中身で「読めない台帳」を作る（同じ経路で止まる）
+            locked.write_bytes(b"\xff\xfe\x00{}\n")
+        else:
+            locked.write_text("{}\n", encoding="utf-8")
+            locked.chmod(0)
+            self.addCleanup(locked.chmod, 0o644)
         common_p = ["promote", "--run", str(run_dir), "--candidate", "claude-ds-lite", "--incumbent", "claude-baseline",
                     "--max-regressions", "0", "--min-tasks", "2", "--holdout-log", str(locked)]
         self.assertEqual(run_cli(*common_p)[0], 2)  # 評価済みの候補の数を台帳から数えるのに読めない → 止める

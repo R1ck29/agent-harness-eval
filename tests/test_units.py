@@ -653,9 +653,9 @@ install:
 
     def test_timeout_kills_child_tree(self):
         marker = self.tmp / "child_alive"
-        code = ("import subprocess,sys,time;"
-                f"subprocess.Popen([sys.executable,'-c','import time,pathlib;time.sleep(3);pathlib.Path(r\"{marker}\").write_text(\"1\")']);"
-                "time.sleep(30)")
+        # パスは repr で埋め込む（Windows の C:\Users… を文字列に直接書くと \U がエスケープとして解釈され、子が起動前に落ちる）
+        grandchild = f"import time,pathlib;time.sleep(3);pathlib.Path({str(marker)!r}).write_text('1')"
+        code = f"import subprocess,sys,time;subprocess.Popen([sys.executable,'-c',{grandchild!r}]);time.sleep(30)"
         t0 = time.monotonic()
         pr = run_process([sys.executable, "-c", code], self.tmp, dict(os.environ), None,
                          self.tmp / "o", self.tmp / "e", timeout_s=1)
@@ -738,7 +738,8 @@ class HarvestTests(unittest.TestCase):
     def test_paths_are_restricted(self):
         """設定ファイル（.claude/・.mcp.json・CLAUDE.md・AGENTS.md）や作業ディレクトリの外には置かせない。"""
         from harness_eval.harvest import _safe_rel
-        for p in (".claude/settings.json", ".mcp.json", "CLAUDE.md", "sub/AGENTS.md", "AGENTS.override.md", "../x", "/etc/x"):
+        for p in (".claude/settings.json", ".mcp.json", "CLAUDE.md", "sub/AGENTS.md", "AGENTS.override.md", "../x", "/etc/x",
+                  "\\etc\\x", "C:\\x", "C:x", "..\\x", "a\\..\\..\\x"):
             self.assertFalse(_safe_rel(p), p)
         self.assertTrue(_safe_rel("data/orders.csv"))
 
