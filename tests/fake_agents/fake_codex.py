@@ -11,9 +11,40 @@ args = sys.argv[1:]
 if args == ["--version"]:
     print("codex-cli 9.9.9")
     sys.exit(0)
+home = Path(os.environ["CODEX_HOME"])
+
+
+def _trusted():
+    """実機（0.169.0）と同じく、CODEX_HOME/config.toml の [projects."<cwd>"] trust_level = "trusted" で信頼済み。"""
+    cfg = home / "config.toml"
+    return cfg.is_file() and f"[projects.{json.dumps(str(Path.cwd().resolve()))}]" in cfg.read_text(encoding="utf-8")
+
+
+def _skill_lines():
+    roots = [home / "skills", Path(os.environ["HOME"]) / ".agents" / "skills", Path.cwd() / ".agents" / "skills"]
+    if os.environ.get("FAKE_DROP_SKILLS"):
+        roots = []
+    return [f"- {p.parent.name}: d (file: r{i}/{p.parent.name}/SKILL.md)" for i, r in enumerate(roots) if r.is_dir()
+            for p in sorted(r.glob("*/SKILL.md"))]
+
+
+if args[:2] == ["debug", "prompt-input"]:  # 費用 0 の観測（0.169.0 の形を簡略化）
+    docs = [f.read_text(encoding="utf-8") for f in (home / "AGENTS.md", Path.cwd() / "AGENTS.md") if f.is_file()]
+    items = [{"type": "message", "role": "developer", "content": [{"type": "input_text", "text":
+              "<skills_instructions>\n## Skills\n" + "\n".join(_skill_lines()) + "\n</skills_instructions>"}]}]
+    if docs:
+        items.append({"type": "message", "role": "user", "content": [{"type": "input_text", "text":
+                      f"# AGENTS.md instructions for {Path.cwd()}\n\n<INSTRUCTIONS>\n" + "\n".join(docs) + "\n</INSTRUCTIONS>"}]})
+    print(json.dumps(items, ensure_ascii=False))
+    sys.exit(0)
+if args[:3] == ["mcp", "list", "--json"]:
+    import re
+    files = [home / "config.toml"] + ([Path.cwd() / ".codex" / "config.toml"] if _trusted() else [])
+    names = [n for f in files if f.is_file() for n in re.findall(r"^\[mcp_servers\.([A-Za-z0-9_-]+)\]", f.read_text(encoding="utf-8"), re.M)]
+    print(json.dumps([{"name": n, "enabled": True} for n in names]))
+    sys.exit(0)
 assert args[:2] == ["exec", "--json"] and args[-1] == "-", args
 prompt = sys.stdin.read()
-home = Path(os.environ["CODEX_HOME"])
 log = os.environ.get("FAKE_ARGV_LOG")
 if log:
     with open(log, "a", encoding="utf-8") as f:
@@ -34,6 +65,12 @@ if "--dangerously-bypass-hook-trust" in args:  # 実機（0.163.0）はこの通
              "`--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation."}})
 out({"type": "turn.started"})
 usage = {"input_tokens": 2000, "cached_input_tokens": 1500, "output_tokens": 100, "reasoning_output_tokens": 20}
+if "FAKE_USAGE_LIMIT" in prompt:  # 0.169.0 の実測の文面
+    msg = ("You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage "
+           "to purchase more credits or try again at Nov 19th, 2026 9:03 AM.")
+    out({"type": "error", "message": msg})
+    out({"type": "turn.failed", "error": {"message": msg}})
+    sys.exit(1)
 if "17 × 23" in prompt:
     out({"type": "item.completed", "item": {"id": "i0", "type": "agent_message", "text": "391"}})
 elif "先月の売上" in prompt:
