@@ -290,3 +290,186 @@ YAML（現行の形式）を正とし、SkillsBench／skilljack の `task.md` �
 
 `harness_eval/adapters.py` の CLI 固有の処理を、複製して同梱する `agent_cli` へ移す（§7）。このリポジトリに残すのは、プロファイル・タスクから
 `agent_cli` の呼び出し引数を作る薄い層と、`ParsedRun` への変換だけ。
+
+## 7. agent_cli に求めるもの
+
+`agent_cli` は wikiskill と agent-harness-eval が共有する、Claude Code／Codex の CLI を扱うライブラリ。**標準ライブラリだけ**で書き、
+各リポジトリに**複製して同梱**する（`harness_eval/_vendor/agent_cli/`。インストールの依存は増やさない）。このリポジトリが必要とするものを、
+入力・出力・不変条件の形で列挙する。名前は案で、wikiskill 側の設計書と突き合わせて確定する。
+
+### 7.1 全体の約束
+
+- 純粋な関数とデータクラスで構成する。**プロセスの起動・タイムアウト・プロセスツリーの停止・一時ホームの作成は呼び出し側**（このリポジトリの `isolation.py`）が持つ。
+  `agent_cli` は「何を起動するか」と「出力をどう読むか」だけを持つ（評価ツールは試行の隔離と費用の記録を自分で制御する必要があるため）
+- 例外: `probe_version`・`observe_loaded` のように CLI を短く起動する関数は、`runner: Callable[[list[str], dict[str, str], Path], tuple[int, str, str]]`
+  （argv・env・cwd → 終了コード・stdout・stderr）を引数で受け取る（テストで偽の CLI に差し替えるため）
+- 未知のイベント・未知のキーは無視する（版上げで壊れない）。解析できない行は数えて警告にする
+- 実測した版を `VERIFIED = {"claude_code": "2.1.325", "codex": "0.169.0"}` のように持ち、フラグの選択は**版の範囲**で決める（§7.2）
+- Python 3.10 以上（`tomllib` は 3.11 からなので TOML は使わない／最小限の正規表現で読む）
+
+### 7.2 版の検出とコマンドの組み立て
+
+```python
+@dataclass(frozen=True)
+class CliVersion:
+    agent: str                 # "claude_code" | "codex"
+    raw: str | None            # `--version` の 1 行目
+    parsed: tuple[int, int, int] | None
+
+def probe_version(agent: str, exe: list[str], runner) -> CliVersion
+def older_than_verified(v: CliVersion) -> bool | None
+
+@dataclass(frozen=True)
+class RunSpec:                 # エージェント非依存の「何をさせるか」
+    workdir: Path
+    model: str | None = None
+    max_turns: int | None = None             # Claude Code のみ
+    max_budget_usd: float | None = None      # Claude Code のみ
+    allow_tools: tuple[str, ...] = ()        # Claude Code: --allowedTools
+    deny_tools: tuple[str, ...] = ()         # Claude Code: --disallowedTools
+    permission_mode: str | None = None
+    sandbox: str | None = None               # Codex: -s
+    settings: dict | None = None             # Claude Code: --settings（JSON）
+    include_hook_events: bool = False
+    bypass_hook_trust: bool = True           # Codex: --dangerously-bypass-hook-trust（版にあれば）
+    ephemeral: bool = True                   # Claude Code: --no-session-persistence / Codex: --ephemeral
+    reasoning_effort: str | None = None      # Codex: -c model_reasoning_effort=...（記録用にも使う）
+    extra_args: tuple[str, ...] = ()
+
+def build_command(agent: str, exe: list[str], spec: RunSpec, version: CliVersion) -> list[str]
+def build_judge_command(agent: str, exe: list[str], model: str | None, version: CliVersion) -> list[str]
+```
+
+- プロンプトは**常に標準入力**（Windows の引数長と引用符の問題を避ける。両 CLI で確認済み）
+- 版にないフラグは付けない（例: Codex 0.163 未満の `--dangerously-bypass-hook-trust`）。付けなかったフラグは `build_command` の戻り値と別に
+  `dropped_flags: list[str]` として返す（有効設定の記録に入れる）。形: `CommandPlan(argv: list[str], dropped_flags: list[str])`
+- このリポジトリで使うフラグ（現行の `adapters.py:92-101`, `:226-234`）はすべて表現できること
+
+### 7.3 ストリームの解析
+
+```python
+@dataclass
+class ToolCall: name: str; input: Any; is_error: bool | None = None; from_subagent: bool = False
+
+@dataclass
+class StreamResult:
+    final_message: str | None
+    tool_calls: list[ToolCall]
+    skill_calls: list[str];  skill_detection: str        # "exact" | "heuristic"
+    subagent_calls: list[str]
+    hook_calls: list[dict] | None                         # [{name, exit_code, outcome}]。記録がなければ None
+    loaded: Loaded | None                                 # init で分かった読み込み（§7.6）
+    usage: Usage
+    num_turns: int | None; duration_ms: int | None
+    error: CliError | None                                # §7.5
+    meta: dict                                            # thread_id, terminal_reason, api_retries, network_stalled など
+    warnings: list[str]
+
+def parse_stream(agent: str, lines: Iterable[str]) -> StreamResult
+def parse_judge(agent: str, stdout: str) -> tuple[str | None, float | None, CliError | None]
+```
+
+- Claude Code: `system/init`・`system/hook_response`・`system/api_retry`・`assistant`（`parent_tool_use_id` でサブエージェントを区別、`Skill`・`Agent`／`Task` のツール）・
+  `user`（`tool_result.is_error`）・`result`。現行 `adapters.py:107-200` の挙動をそのまま移す（テストデータ `tests/data/claude_stream_real.jsonl`）
+- Codex: `thread.started`・`item.completed`（`agent_message`・`command_execution`・`file_change`・`mcp_tool_call`・`collab_tool_call`・`web_search`・`error`）・
+  `turn.completed`・`turn.failed`・`error`（再接続）。初期版の `item_type` も読む。現行 `adapters.py:239-310`（`tests/data/codex_failed_real.jsonl`）
+- `--dangerously-bypass-hook-trust` の既知の通知（`item.completed` の `error`）は警告にしない
+
+### 7.4 使用量・費用・上限の抽出
+
+```python
+@dataclass
+class Usage:
+    input: int | None; output: int | None; cache_read: int | None; cache_write: int | None
+    reasoning_output: int | None = None
+    cost_usd: float | None = None; cost_source: str | None = None   # "client_estimate" | None
+    context_tokens: int | None = None   # 本体の最初のリクエストの入力側の合計（キャッシュの状態によらない）
+    input_includes_cache: bool = False  # Codex: cached は input の内数（OpenAI の定義）
+```
+
+- 費用は CLI が出すときだけ（Claude Code の `total_cost_usd`）。Codex の単価換算はこのリポジトリ（`pricing`）で行う（ライブラリに単価表を持たせない）
+- 上限の情報（§7.5 の `reset_hint`）を取り出す
+
+### 7.5 エラーの分類
+
+```python
+@dataclass(frozen=True)
+class CliError:
+    kind: str            # 下の表
+    message: str         # 500 文字まで
+    http_status: int | None = None
+    reset_hint: str | None = None   # 「try again at …」「resets …」の部分（原文のまま。解釈しない）
+    retryable: bool = False
+
+def classify_error(agent: str, *, result_event: dict | None, message: str | None, stderr: str | None) -> CliError | None
+```
+
+| kind | 意味 | 例・根拠 | このリポジトリの扱い |
+|---|---|---|---|
+| `rate_limit` | 短期のレート制限 | HTTP 429、`rate limit`、`too many requests` | 除外・再試行 |
+| `overloaded` | 混雑 | HTTP 529、`overloaded` | 除外・再試行 |
+| `usage_limit` | プラン・残高の上限（長い待ちが必要） | Codex 0.169: `You’ve hit your usage limit. … try again at …`（実測）。`credit balance is too low`、`insufficient_quota`、`hit your limit` | 除外・**再試行しない** |
+| `auth` | 認証 | 401・403、`Not logged in`、`invalid api key` | 除外 |
+| `api_error` | その他の API エラー（400 など） | `api_error_status ≥ 400` | 除外 |
+| `max_turns` / `budget_exceeded` | CLI 側の上限 | `error_max_turns`・`error_max_budget_usd` | 失敗として数える |
+| `agent_crash` | 結果イベントがない | — | 失敗（stderr で上を判定できれば上） |
+| `agent_error` | 上のどれでもない | — | 失敗 |
+
+- 分類の正規表現は 1 か所に置き、実測した文面をテストデータとして同梱する（`tests/data/` 相当）
+
+### 7.6 読み込みの観測と信頼の付与（このリポジトリで最も重要）
+
+```python
+@dataclass
+class Loaded:
+    source: str                         # "init" | "prompt_input"
+    skills: list[str]; agents: list[str]; mcp_servers: list[str]; plugins: list[str]
+    instructions_text: str | None       # Codex: AGENTS.md の本文（照合用）。Claude Code は None
+
+def observe_loaded(agent: str, exe: list[str], env: dict[str, str], cwd: Path, runner, version: CliVersion) -> Loaded | None
+    # Codex: `codex debug prompt-input x` と `codex mcp list --json`（費用 0）。Claude Code: None（init で分かる）
+def parse_prompt_input(text: str) -> Loaded | None
+def trust_files(agent: str, config_dir: Path, workdir: Path) -> list[tuple[Path, str]]
+    # 書くべきファイルと内容（既存の内容と統合した結果）。書き込みは呼び出し側
+def discovery_locations(agent: str) -> dict[str, list[str]]
+    # §6.2 の表（{config_dir}・{home}・{workdir} のプレースホルダ付き）
+def trust_warnings(agent: str, stderr: str) -> list[str]
+    # 「this workspace has not been trusted」などの行
+```
+
+- 探索場所・信頼の書式は CLI の版で変わりうるので、`agent_cli` 側で版ごとに持つ（実測した版を注記）
+- wikiskill も「育てたスキルが実際に読み込まれるか」の確認に同じ関数を使える
+
+### 7.7 このリポジトリ側に残すもの
+
+プロファイル・タスクから `RunSpec` を作る、`StreamResult` を `ParsedRun`／`TrialRecord` に写す、`pricing` による費用の換算、期待する部品の抽出
+（`install` の結果を見る。§6.2）、照合と記録、プロセスの実行と隔離。
+
+## 8. 移行計画（既存のタスク・結果）
+
+0.9.0 は後方互換なので、**変換は不要**。
+
+| 対象 | 0.9.0 での扱い |
+|---|---|
+| タスクの YAML | そのまま読む（キーの追加なし） |
+| プロファイルの YAML | そのまま読む。新しいキー `trust_workdir`（既定 `true`）は任意 |
+| 過去の `trials.jsonl`・`summary.json` | そのまま `report`・`gate --previous`・`promote` に使える。`TrialRecord.from_dict` は未知のキーを無視し、ないキーは既定値になる（`effective` は `None`）。新しい指標（`trigger`・`pass_at_k`・`harness_load`）は過去の結果では `None`／空 |
+| キャッシュ（`.harness-eval-cache/`） | `CACHE_SCHEMA` を 6 に上げ、ツール版もキーに入るので、過去のキャッシュは使われない（全試行を取り直す。中身を消す必要はない） |
+| `gate --previous`（0.8.0 の結果） | 比べられる。ただし**プロジェクト単位の配布物を持つプロファイル**は 0.9.0 で測定値が変わるので、gate は前回の結果に有効設定の記録がないとき注意を出す。基準の結果を 0.9.0 で取り直してから gate する |
+| holdout の利用台帳 | 形式は変えない |
+
+後続のフェーズで形式を変える場合（例: タスクの `schema` キーの導入）は、そのフェーズで 1.0.0 にし、`docs/MIGRATION.md`（日本語）と
+`harness-eval migrate` を同時に入れる（§10 の各フェーズに条件を書く）。
+
+## 9. 今回（0.9.0）の実装範囲
+
+| 項目 | 内容 | 場所 |
+|---|---|---|
+| 信頼の付与 | `trust_workdir`（既定 `true`）。Claude Code: `.claude.json` の統合、Codex: `config.toml` への追記 | `harness_eval/effective.py`、`spec.py`、`runner.py` |
+| 有効設定の記録 | `effective_config.json`・`TrialRecord.effective`（§6.2） | `effective.py`、`record.py`、`runner.py` |
+| Codex の読み込みの観測 | `codex debug prompt-input` と `codex mcp list --json` | `adapters.py`（`CodexAdapter.observe_cmds`・`parse_prompt_input`）、`effective.py` |
+| 利用上限の除外 | `usage_limit`（除外・再試行しない・`reset_hint`） | `adapters.py`、`record.py` |
+| 指標 | `pass_at_k`、`pass_at_1_ci`、`trigger`（呼び出し率・誤発火率・Wilson 区間）、`harness_load` | `metrics.py`、`graders.py`（`target`・`trigger`） |
+| 表示 | レポートの列と警告、run の終了時の警告、gate の注意 | `report.py`、`cli.py` |
+| CI | `.github/workflows/test.yml`（push・pull_request、ubuntu/macos/windows × 3.10/3.13、uv、pytest、ruff は 1 セル、アクションは SHA 固定） | `.github/` |
+| 版 | 0.9.0、`CHANGELOG.md` | `pyproject.toml`、`harness_eval/__init__.py`、`uv.lock`、README |
