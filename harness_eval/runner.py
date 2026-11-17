@@ -26,17 +26,18 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
-from .adapters import classify_stderr, get_adapter
+from . import effective
+from .adapters import classify_stderr, get_adapter, reset_hint
 from .graders import JudgeConfig, JudgeUnavailable, grade_all
 from .graders import JUDGE_PROMPT
-from .isolation import (ancestor_instructions, build_env, copy_credentials, fill, kill_running, make_trial_paths, placeholders,
-                        route_signature, run_install, run_process, snapshot)
+from .isolation import (INHERITED_UNSET, ancestor_instructions, build_env, copy_credentials, fill, kill_running, make_trial_paths,
+                        placeholders, route_signature, route_variables, run_install, run_process, snapshot)
 from .metrics import summarize
 from .record import EXCLUDED_ERRORS, TrialRecord
 from .spec import NO_SPLIT, Profile, SpecError, Task, split_mixing
 
 NOT_RUN_ERRORS = {"budget_stop"}
-CACHE_SCHEMA = "5"  # 試行レコードの形式を変えたら上げる（古いキャッシュを使わないため）
+CACHE_SCHEMA = "6"  # 試行レコードの形式を変えたら上げる（古いキャッシュを使わないため）
 
 
 @dataclass
@@ -383,20 +384,28 @@ class Runner:
                     shutil.copytree(task.fixture, tp.workdir, dirs_exist_ok=True)
                 else:
                     shutil.copy2(task.fixture, tp.workdir / task.fixture.name)
+            fixture_snap = snapshot(tp.workdir)
             env = build_env(profile, tp, adapter.config_env)
             if profile.copy_credentials:
                 copy_credentials(profile.agent, tp)
             run_install(profile, tp, env)
+            # install の後に信頼を付ける（install が置いた .claude.json・config.toml と統合する）
+            trust = effective.seed_trust(profile.agent, tp.config_dir, tp.workdir) if profile.trust_workdir else []
         except Exception as e:
             rec.error = {"type": "harness_error", "message": str(e)[:1000]}
             rec.valid = False
             return rec
         before = snapshot(tp.workdir)
+        expected = effective.expected_parts(profile.agent, tp.home, tp.config_dir, tp.workdir, trusted=bool(trust))
+        installed = effective.installed_files(tp.home, tp.workdir, fixture_snap, before)
         ph = placeholders(tp, profile)
-        cmd = adapter.build_cmd(task, profile, tp.workdir, [fill(a, ph) for a in profile.extra_args])
+        extra = [fill(a, ph) for a in profile.extra_args]
+        cmd = adapter.build_cmd(task, profile, tp.workdir, extra)
         if self.interrupted.is_set():  # 準備（install など）の間に Ctrl-C された → エージェントを起動しない
             rec.valid, rec.error = False, {"type": "interrupted", "message": "Ctrl-C で中断"}
             return rec
+        # Codex は起動前に費用 0 のコマンドで読み込みを観測する（Claude Code は出力の system/init で分かる）
+        observed = effective.observe_codex(adapter.exe, env, tp.workdir, extra) if profile.agent == "codex" else None
         pr = run_process(cmd, tp.workdir, env, task.prompt, tp.stdout, tp.stderr, task.timeout_s)
         rec.wall_ms = pr.wall_ms
         out_lines = tp.stdout.read_text(encoding="utf-8", errors="replace").splitlines() if tp.stdout.exists() else []
@@ -424,6 +433,18 @@ class Runner:
         rec.meta, rec.warnings, rec.skill_detection = parsed.meta, parsed.warnings, parsed.skill_detection
         if etype:
             rec.error = {"type": etype, "message": (emsg or "")[:1000]}
+            if etype == "usage_limit" and reset_hint(emsg or stderr):
+                rec.error["reset_hint"] = str(reset_hint(emsg or stderr))
+        if profile.agent == "claude_code":
+            observed = effective.observed_from_init(parsed.meta)
+        chosen, undeclared = route_variables(profile, dict(os.environ))
+        rec.effective = effective.record(
+            agent=profile.agent, cli_version=self.versions.get(profile.id), argv=cmd, isolate_home=profile.isolate_home,
+            config_env=adapter.config_env, env_set=list(profile.env), env_unset=INHERITED_UNSET + profile.env_unset,
+            route_vars=chosen + undeclared, trust_paths=trust, trust_enabled=profile.trust_workdir, installed=installed,
+            expected=expected, observed=observed, stderr=stderr,
+            misplaced_notes=effective.misplaced(profile.agent, tp.home, tp.config_dir, profile.isolate_home))
+        (tp.root / "effective_config.json").write_text(json.dumps(rec.effective, ensure_ascii=False, indent=2), encoding="utf-8")
         rec.valid = etype not in EXCLUDED_ERRORS
         if rec.valid:
             judge = JudgeConfig(enabled=self.opt.llm, run=self._judge_runner() if self.opt.llm else None)
@@ -549,6 +570,7 @@ class Runner:
                              "split": t.split, "family": t.family}
                       for t in {t.id: t for t, _ in self.pairs}.values()},
             "spent_usd_this_run": self.spent,
+            "effective_config_schema": effective.SCHEMA,  # 試行ごとの有効設定の記録と作業ディレクトリの信頼（0.9.0〜）
             "ancestor_instructions": ancestor_instructions(self.run_dir.parent),
             "not_run": sum(1 for r in records if (r.error or {}).get("type") in NOT_RUN_ERRORS),
         }

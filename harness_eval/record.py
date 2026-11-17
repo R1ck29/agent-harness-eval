@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 # 集計から除外する異常終了（評価対象の失敗ではなく、環境起因）
-EXCLUDED_ERRORS = {"rate_limit", "overloaded", "auth", "api_error", "network", "launch_failed", "harness_error", "judge_error",
+EXCLUDED_ERRORS = {"rate_limit", "overloaded", "usage_limit", "auth", "api_error", "network", "launch_failed", "harness_error", "judge_error",
                    "not_graded", "interrupted"}
 # 失敗として数える異常終了
 
@@ -83,6 +83,8 @@ class TrialRecord:
     from_cache: bool = False
     trial_dir: str | None = None
     started_at: str | None = None
+    # 有効設定（信頼の付与・置いたファイル・期待／観測した部品・読み込まれなかった部品）。0.8.0 以前の結果では None
+    effective: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
