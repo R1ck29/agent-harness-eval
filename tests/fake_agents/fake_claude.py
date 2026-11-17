@@ -326,4 +326,7 @@ if "sales.csv" in prompt:
     result("summary.md を作成しました")
     sys.exit(0)
 
+if "Reply with exactly: OK" in prompt:  # doctor --live の最小試行
+    result("OK", cost=0.001, turns=1)
+    sys.exit(0)
 result("何もしませんでした")

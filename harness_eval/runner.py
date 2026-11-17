@@ -30,7 +30,7 @@ from . import effective
 from .adapters import classify_stderr, get_adapter, reset_hint
 from .graders import JudgeConfig, JudgeUnavailable, grade_all
 from .graders import JUDGE_PROMPT
-from .isolation import (INHERITED_UNSET, ancestor_instructions, build_env, copy_credentials, fill, kill_running, make_trial_paths,
+from .isolation import (ancestor_instructions, build_env, copy_credentials, fill, kill_running, make_trial_paths,
                         placeholders, route_signature, route_variables, run_install, run_process, snapshot)
 from .metrics import summarize
 from .record import EXCLUDED_ERRORS, TrialRecord
@@ -440,7 +440,7 @@ class Runner:
         chosen, undeclared = route_variables(profile, dict(os.environ))
         rec.effective = effective.record(
             agent=profile.agent, cli_version=self.versions.get(profile.id), argv=cmd, isolate_home=profile.isolate_home,
-            config_env=adapter.config_env, env_set=list(profile.env), env_unset=INHERITED_UNSET + profile.env_unset,
+            config_env=adapter.config_env, env_set=list(profile.env), env_unset=list(profile.env_unset),  # 既定で外す変数は版ごとに固定
             route_vars=chosen + undeclared, trust_paths=trust, trust_enabled=profile.trust_workdir, installed=installed,
             expected=expected, observed=observed, stderr=stderr,
             misplaced_notes=effective.misplaced(profile.agent, tp.home, tp.config_dir, profile.isolate_home))

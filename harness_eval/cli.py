@@ -406,6 +406,13 @@ def cmd_doctor(a) -> int:
             items = r.meta.get(key)
             if items is not None:
                 print(f"  読み込まれた{label} ({len(items)}): {', '.join(items)[:600]}")
+        miss = (r.effective or {}).get("missing") or {}
+        for kind, names in miss.items():
+            if names:
+                ok = False
+                print(f"  NG: 置いたのに読み込まれなかった {kind}: {', '.join(names)}（置き場所・frontmatter を確認。試行の effective_config.json）")
+        for note in (r.effective or {}).get("misplaced") or []:
+            print(f"  注意: {note}")
     shutil.rmtree(run_dir, ignore_errors=True)
     return 0 if ok else 1
 

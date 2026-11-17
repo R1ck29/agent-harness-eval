@@ -354,6 +354,19 @@ class EffectiveE2E(unittest.TestCase):
         self.assertIn("利用上限", out)
         self.assertEqual(summary["profiles"]["codex-baseline"]["excluded_reasons"], {"usage_limit": 1})
 
+    def test_doctor_live_reports_not_loaded_parts(self):
+        prof = str(self.ex / "profiles" / "claude-ds-lite.yaml")
+        code, out = run_cli("doctor", "--profiles", prof, "--out", str(self.out), "--live")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("読み込まれなかった", out)
+        os.environ["FAKE_DROP_SKILLS"] = "1"
+        try:
+            code, out = run_cli("doctor", "--profiles", prof, "--out", str(self.out), "--live")
+        finally:
+            os.environ.pop("FAKE_DROP_SKILLS")
+        self.assertEqual(code, 1, out)
+        self.assertIn("NG: 置いたのに読み込まれなかった skills: csv-monthly-summary", out)
+
 
 if __name__ == "__main__":
     unittest.main()
