@@ -473,3 +473,82 @@ def trust_warnings(agent: str, stderr: str) -> list[str]
 | 表示 | レポートの列と警告、run の終了時の警告、gate の注意 | `report.py`、`cli.py` |
 | CI | `.github/workflows/test.yml`（push・pull_request、ubuntu/macos/windows × 3.10/3.13、uv、pytest、ruff は 1 セル、アクションは SHA 固定） | `.github/` |
 | 版 | 0.9.0、`CHANGELOG.md` | `pyproject.toml`、`harness_eval/__init__.py`、`uv.lock`、README |
+
+## 10. 後続のフェーズ（別の担当が実装する。各フェーズは独立した PR）
+
+共通の約束: 既存のテストを弱めない・消さない。偽の CLI（`tests/fake_agents/`）で再現できない挙動は、実機の出力をテストデータとして `tests/data/` に置く。
+版の規則（後方互換なら minor、壊すなら major + `docs/MIGRATION.md` + 変換コマンド）と CHANGELOG の「アップグレード方法」を守る。
+
+### フェーズ 2: `agent_cli` の同梱とアダプタの置き換え（1.0.0 にはしない）
+
+- 前提: wikiskill 側の設計書と §7 を突き合わせて `agent_cli` の API を確定し、上流（共有の場所）で実装・テストされていること
+- 手順:
+  1. `harness_eval/_vendor/agent_cli/` に複製（`__init__.py` に上流のコミットと複製日を書く。手で直さない。直すときは上流を直して複製し直す）
+  2. `harness_eval/adapters.py` を薄い層にする: `ClaudeAdapter.build_cmd` → `RunSpec` を作って `agent_cli.build_command`、`parse` → `agent_cli.parse_stream` の結果を `ParsedRun` に写す、
+     `_classify_message`・`_status_type`・`classify_stderr` → `agent_cli.classify_error`、`CodexAdapter.observe_cmds`・`parse_prompt_input` → `agent_cli.observe_loaded`、
+     `effective.seed_trust` の書式 → `agent_cli.trust_files`
+  3. `VERIFIED_VERSIONS`・`older_than_verified` は `agent_cli` のものを使う
+  4. `pyproject.toml` の `packages` に `harness_eval._vendor`, `harness_eval._vendor.agent_cli` を足す（依存は増やさない）
+- 受け入れ条件: 既存のテストがすべて通る（特に `tests/test_units.py` の解析・分類のテスト、`tests/data/*.jsonl`）。起動コマンドが 0.9.0 と同じ（偽の CLI の `FAKE_ARGV_LOG` で比較するテストを追加）
+- 形式の変更なし → minor（0.10.0）
+
+### フェーズ 3: SkillsBench／skilljack 形式のタスクの取り込み（`harness-eval import`）
+
+- 新しいモジュール `harness_eval/importer.py`、CLI `harness-eval import --format {skilljack,skillsbench} <入力フォルダ> --out <出力フォルダ> [--agent claude_code|codex ...]`
+- 出力: `<out>/tasks/<id>.yaml`、`<out>/fixtures/<id>/`（作業フォルダの種）、`<out>/checks/<id>/`（検証スクリプト）、`<out>/profiles/<id>-with-skill-<agent>.yaml`
+  と `<out>/profiles/baseline-<agent>.yaml`（スキルの有無のペア）、`<out>/IMPORT_REPORT.md`（変換できなかった項目）
+- 対応（skilljack `task.md`。README の記述に基づく。実装時に上流のスキーマで確認する）:
+
+| 入力 | 出力 |
+|---|---|
+| `task.md` の frontmatter `id`（なければフォルダ名） | `id` |
+| `task.md` の本文 | `prompt` |
+| `environment/workspace/` | `fixture` |
+| `environment/skills/<名前>/` | プロファイルの `install: [{copy: ..., to: "{config_dir}/skills/<名前>"}]`（Codex は `{home}/.agents/skills/<名前>`） |
+| `expected_skill` + `expect_skill_invocation: true`（既定） | `skill_used: {skill: <名前>, min: 1}`（陽性） |
+| `expect_skill_invocation: false`（anti-trigger） | `skill_used: {skill: <名前>, max: 0, category: skill_misfire}`（否定の対照）。陽性のタスクと `paired_negative` で結ぶ |
+| `checks:` の `files_exist` 等 | `file_exists`・`file_contains`・`regex` に対応するものだけ。対応しないものは `IMPORT_REPORT.md` |
+| `verifier/<script>` | `command` グレーダー: `{python} {task_dir}/../checks/_reward.py <verifier>`。`_reward.py`（同梱）が `SKILLJACK_OUTPUT_FILE`（最終応答）・`SKILLJACK_TRAJECTORY_FILE`（ツール呼び出しの JSON）・`SKILLJACK_TASK_DIR`・`SKILLJACK_REWARD_FILE` を用意して検証スクリプトを実行し、報酬 ≥ 1.0（なければ終了コード 0）で終了コード 0 |
+| `oracle/solve.*` | `harness-eval validate --oracle`（新オプション）で、作業フォルダに解答を当てて採点が全合格になるか確かめる |
+| SkillsBench（Harbor）`instruction.md`・`environment/`・`tests/test.sh`（`/logs/verifier/reward.txt`） | `prompt`・`fixture`・`command`（`bash` があるときだけ。Windows では `IMPORT_REPORT.md` に「実行不可」）。`environment/Dockerfile` は対応しない（報告だけ） |
+
+- `command` グレーダーは今は合否だけ。報酬が 0〜1 の小数の場合は、`reason` に報酬を残し、合否は報酬 ≥ 1.0 とする（スコアの部分点はフェーズ 5 の検討事項）
+- 取り込みは**書き出すだけ**で、既存の YAML の読み込みは変えない → minor
+- テスト: `tests/data/import/skilljack-min/`（陽性・anti-trigger・verifier・oracle を 1 つずつ）を変換し、`validate` が警告なしで通り、偽の CLI で `run` できる
+
+### フェーズ 4: 読み込みの検査を関門に入れる・費用 0 の doctor・警告
+
+- `gate`／`promote` に `--require-harness-load`（既定は無効）: 候補のプロファイルに `harness_load.with_missing > 0` があれば `fail`（gate）／`reject`（promote）。
+  理由に「読み込まれなかった部品」を出す
+- `doctor`（`--live` なし）に費用 0 の読み込み確認を足す: プロファイルごとに一時の試行フォルダを作って `install` と信頼の付与を行い、
+  Claude Code は未ログインでも出る `system/init`（`--max-turns 1`、標準入力 `x`。§2.1）を、Codex は prompt-input を読んで、
+  `effective.expected` と照合して表示する。**注意:** Claude Code はログイン済みだと API を 1 回呼ぶので、`ANTHROPIC_API_KEY=invalid` のような無効な認証を
+  わざと渡す方式は**採らない**（口座の経路を変えるため）。代わりに `--max-budget-usd 0.0001` で 1 回目の応答前に止まるかを実測で確かめ、だめなら `--live` 側にだけ入れる
+- `validate` の警告: (1) `install` の先が `{home}/.claude.json`（Claude Code。§2.2 で読まれないと実測）、(2) 配布物の `settings.json` が `sandbox.enabled: true` で、
+  タスクの `allow_tools` に `Bash` がない（2.1.325 から確認＝`-p` では拒否）、(3) `trust_workdir: false` でプロジェクト単位の設定ファイルを置いている
+- Windows: 信頼の付与のキー（Claude Code の `projects` のパスの書式、Codex の `[projects."C:\\..."]`）を実機で確かめ、`effective.seed_trust` を直す。CI の windows セルで単体テストは動くが、実機の確認は手で行い結果をこの文書の §2 に追記する
+- Claude Code の常時指示（CLAUDE.md）の観測: `InstructionsLoaded` の hook を `--settings` 経由で足すと配布物の hooks と混ざるため、**採らない**。
+  代わりに `context_tokens` の基準との差（既存の `deltas.context_tokens`）で間接的に見る
+- 形式の追加だけ → minor
+
+### フェーズ 5: 指標の発展（任意）
+
+- 呼び出し率・誤発火率の**基準との差と区間**（タスク単位のブートストラップ）と、promote の目的に `--objective trigger`（誤発火率を上げずに呼び出し率を上げる）
+- 試行ごとのトークン・時間の上限（agent-skill-eval の budget guard: `warn`／`fail`／`stop-suite`）をタスクの `limits` に `max_tokens` として追加
+- `command` グレーダーの部分点（報酬 0〜1 をスコアに反映）。スコアの定義が変わるので、比較用の値と gate への影響を設計してから
+
+## 11. 参考資料・プローブ
+
+- OSS: https://github.com/olaservo/skilljack-evals ・ https://github.com/tardigrde/agent-skill-eval ・ https://github.com/UiPath/coder_eval ・ https://github.com/cskwork/skill-ab-eval
+- Claude Code の公式文書（2026-11 時点の写し）: headless（`-p` は信頼の確認を出さない）、permissions「Project allow rules and workspace trust」「What runs before you trust a folder」、
+  skills「Pre-approve tools for a skill」、settings。変更履歴 2.1.325（サンドボックスの Bash の確認、scheduled tasks と `/loop` のスキルの確認）
+- `codex exec --help`（0.169.0）: `--trust`・`--ignore-user-config`・`--dangerously-bypass-hook-trust`
+- 実測のプローブ（このリポジトリには含めない。手順を残す）:
+  - Claude Code: 一時ホームに `{config_dir}/skills`（`allowed-tools`・`hooks` 付きを含む）・`agents`・`.claude.json`（MCP）・`{home}/.claude.json`（MCP）、
+    作業ディレクトリに `.claude/{skills,agents,settings.json}`・`.mcp.json`・`CLAUDE.md` を置き、`CLAUDECODE` などホストの変数を外して
+    `claude -p --output-format stream-json --verbose --model haiku --max-turns 2 --no-session-persistence` を未ログインで実行し、`system/init` と標準エラーを見る。
+    MCP サーバーは起動されると印のファイルを作る Python の 1 行にする。信頼は `{config_dir}/.claude.json` の `projects[<path>].hasTrustDialogAccepted`。
+    親の git リポジトリの場合は試行フォルダの親で `git init`
+  - Codex: 一時の `CODEX_HOME` に `auth.json` を複製し、`AGENTS.md`・`skills/`・`config.toml`（`[mcp_servers.*]`）、`{home}/.agents/skills`、
+    作業ディレクトリに `AGENTS.md`・`.agents/skills`・`.codex/config.toml`（`developer_instructions` と MCP）を置き、`codex debug prompt-input hello`・
+    `codex mcp list --json`・`codex exec --json --skip-git-repo-check --ephemeral -C <wd> -s workspace-write -c model_reasoning_effort="low" -` を実行する
