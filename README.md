@@ -24,6 +24,8 @@ Claude Code と Codex の「ハーネス」（CLAUDE.md / AGENTS.md・Skills・S
 | 仕組み（図解）: 使う順番・実行の流れ・隔離・採点・指標・費用・harvest・出力・自己改善ループ（`improve`・`promote`） | 図解ガイド — [Web](https://r1ck29.github.io/agent-harness-eval/guide.html) / [`docs/guide.html`](docs/guide.html) |
 | タスク・プロファイルの書き方、グレーダー、認証、コマンドのオプション | リファレンス — [Web](https://r1ck29.github.io/agent-harness-eval/reference.html) / [`docs/reference.html`](docs/reference.html) |
 | なぜこの作りか、既存ツールとの比較、確かめた CLI の挙動、残るリスク | 設計記録 — [Web](https://r1ck29.github.io/agent-harness-eval/design.html) / [`docs/design.html`](docs/design.html) |
+| 再設計（試行がハーネスを確実に読み込むための対策・有効設定の記録・発火の指標・後続の計画） | [`docs/design/REDESIGN.md`](docs/design/REDESIGN.md) |
+| 版ごとの変更とアップグレード方法 | [`CHANGELOG.md`](CHANGELOG.md) |
 
 どれも 1 ファイルの HTML で、外部と通信しません。clone や zip で手元にあるファイルをブラウザで開いても読めます。
 
@@ -64,7 +66,7 @@ python -m harness_eval --version
 ```
 
 一度だけ指定するなら `python -m pip install --index-url "<社内 Artifactory の PyPI ミラー URL（管理者に確認）>" -r requirements.txt`。
-最後に `0.8.0` が表示され、終了コード 0 なら導入完了です。
+最後に `0.9.0` が表示され、終了コード 0 なら導入完了です。
 `python -m pip install .` で `harness-eval` コマンドとしても使えます（`python -m harness_eval` と同じ）。
 
 ### ② エージェント CLI
@@ -130,7 +132,7 @@ python -m harness_eval validate --tasks examples/tasks --profiles examples/profi
 python -m harness_eval doctor --profiles "examples/profiles/claude-*.yaml" --out "$OUT"
 ```
 
-`harness-eval 0.8.0 / Python … / PyYAML …`、各プロファイルの CLI 版と `経路:` が出て、終了コード 0 なら静的確認は成功です。
+`harness-eval 0.9.0 / Python … / PyYAML …`、各プロファイルの CLI 版と `経路:` が出て、終了コード 0 なら静的確認は成功です。
 `注意:` は内容を確認し、`NG:` や CLI の `見つかりません` は解消してから進みます。
 静的確認だけでは認証の成功までは分かりません。
 

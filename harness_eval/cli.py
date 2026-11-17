@@ -149,6 +149,15 @@ def _print_summary(summary) -> None:
         f = lambda x: "  —  " if x is None else f"{x * 100:4.0f}%"
         c = "不明" if s["total_cost_usd"] is None else f"${s['total_cost_usd']:.4f}"
         print(f"{pid:22} {f(s['pass_hat_k'])}  {f(s['pass_at_1'])}  {s['valid']:>3}/{s['trials']:<3}  {c}")
+    for pid, s in summary["profiles"].items():
+        hl = s.get("harness_load") or {}
+        if hl.get("with_missing"):
+            miss = "; ".join(f"{kind}: {', '.join(names)}" for kind, names in hl["missing"].items())
+            print(f"注意: {pid} は {hl['with_missing']}/{hl['checked']} 試行で、置いた部品が読み込まれていません（{miss}）。"
+                  "置き場所・frontmatter を確かめてください（試行フォルダの effective_config.json）", file=sys.stderr)
+        if (s.get("excluded_reasons") or {}).get("usage_limit"):
+            print(f"注意: {pid} の {s['excluded_reasons']['usage_limit']} 試行が利用上限（プラン・残高）で失敗し、集計から除外しました。"
+                  "上限が戻ってから同じコマンドで再実行すると、成功した試行はキャッシュから再利用されます", file=sys.stderr)
 
 
 def cmd_report(a) -> int:
@@ -174,6 +183,10 @@ def cmd_gate(a) -> int:
     if a.max_regressions is not None and a.max_regressions < 0:
         raise SpecError("--max-regressions は 0 以上")
     r = gate(cur, prev, a.metric, a.margin, a.min_tasks, a.hard_category or (), a.max_regressions)
+    if cur.get("meta", {}).get("effective_config_schema") and not prev.get("meta", {}).get("effective_config_schema"):
+        print("注意: 前回の結果は 0.8.0 以前のもので、作業ディレクトリの信頼を付けずに測っています。プロジェクト単位"
+              "（作業ディレクトリの .claude/・.codex/）に配布物を置くプロファイルは測定値が変わるため、前回の結果を 0.9.0 で取り直してから比べてください",
+              file=sys.stderr)
     label = {"pass": "通過", "fail": "不通過", "inconclusive": "判定不能（データ不足）"}[r["decision"]]
     print(f"ゲート{label}: {a.metric} の前回との差（95% 区間）を非劣性マージン {a.margin:g} で判定")
     for pid, v in r["profiles"].items():
@@ -393,6 +406,13 @@ def cmd_doctor(a) -> int:
             items = r.meta.get(key)
             if items is not None:
                 print(f"  読み込まれた{label} ({len(items)}): {', '.join(items)[:600]}")
+        miss = (r.effective or {}).get("missing") or {}
+        for kind, names in miss.items():
+            if names:
+                ok = False
+                print(f"  NG: 置いたのに読み込まれなかった {kind}: {', '.join(names)}（置き場所・frontmatter を確認。試行の effective_config.json）")
+        for note in (r.effective or {}).get("misplaced") or []:
+            print(f"  注意: {note}")
     shutil.rmtree(run_dir, ignore_errors=True)
     return 0 if ok else 1
 

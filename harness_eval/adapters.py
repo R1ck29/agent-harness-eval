@@ -2,7 +2,9 @@
 
 - Claude Code: `claude -p ... --output-format stream-json --verbose`
   （stream-json は --verbose 必須。v2.1.304 で確認）
-- Codex: `codex exec --json ... -`（プロンプトは標準入力。0.163.0 で確認）
+- Codex: `codex exec --json ... -`（プロンプトは標準入力。0.163.0 で確認。0.169.0 でもフラグとイベントの形が同じことを確認）
+- 読み込みの観測（docs/design/REDESIGN.md §2）: Claude Code は system/init（未ログインでも API の前に出る。2.1.325）、
+  Codex は `codex debug prompt-input` と `codex mcp list --json`（費用 0。0.169.0）
 
 パーサは未知のイベントを無視する（CLI の版上げでイベントが増えても壊れないように）。
 """
@@ -46,8 +48,23 @@ def _jsonl(lines: Iterable[str], warnings: list[str]) -> Iterable[dict[str, Any]
         warnings.append(f"JSON として読めない行: {bad} 行")
 
 
+# プラン・残高の上限（長い待ちが必要なので再試行しない）。Codex 0.169.0 の実測:
+# "You’ve hit your usage limit. Upgrade to Pro (...) or try again at Nov 19th, 2026 9:03 AM."
+_USAGE_LIMIT = re.compile(r"usage limit|hit your (?:\w+ )?limit|insufficient_quota|exceeded your current quota|credit balance is too low"
+                          r"|out of (?:extra )?usage|quota exceeded")
+_RESET_HINT = re.compile(r"(?:try again (?:at|in|after)|resets?(?: at| in| on)?)\s+(.{1,80}?)(?:\.(?:\s|$)|$|\n)", re.IGNORECASE)
+
+
+def reset_hint(msg: str) -> str | None:
+    """上限のメッセージにある「いつ戻るか」の部分（原文のまま。解釈しない）。"""
+    m = _RESET_HINT.search(msg or "")
+    return m.group(1).strip() if m else None
+
+
 def _classify_message(msg: str) -> str:
     m = msg.lower()
+    if _USAGE_LIMIT.search(m):
+        return "usage_limit"
     if re.search(r"rate.?limit|\b429\b|too many requests", m):
         return "rate_limit"
     if re.search(r"overloaded|\b529\b", m):
@@ -55,6 +72,14 @@ def _classify_message(msg: str) -> str:
     if re.search(r"\b401\b|\b403\b|unauthori[sz]ed|not logged in|invalid api key|authentication|login required|credential", m):
         return "auth"
     return "agent_error"
+
+
+def _classify(status: Any, msg: str) -> str:
+    """HTTP ステータスとメッセージから分類する。利用上限は 429 でも返るので、文面で分かればそちらを優先する（再試行しないため）。"""
+    by_msg = _classify_message(msg)
+    if by_msg == "usage_limit":
+        return by_msg
+    return _status_type(status) or by_msg
 
 
 def _status_type(status: Any) -> str | None:
@@ -141,6 +166,7 @@ class ClaudeAdapter(_Adapter):
                     "loaded_skills": e.get("skills") or [],
                     "loaded_plugins": [p.get("name") for p in (e.get("plugins") or []) if isinstance(p, dict)],
                     "mcp_servers": [f"{m.get('name')}:{m.get('status')}" for m in (e.get("mcp_servers") or []) if isinstance(m, dict)],
+                    "mcp_server_names": [str(m.get("name")) for m in (e.get("mcp_servers") or []) if isinstance(m, dict)],
                     "loaded_agents": e.get("agents") or [],
                 })
             elif t == "system" and st == "hook_response":  # --include-hook-events（2.1.306 で実測）
@@ -205,10 +231,10 @@ class ClaudeAdapter(_Adapter):
             r.error_type, r.error_message = "budget_exceeded", "max_budget_usd に到達"
         elif st and st != "success":
             msg = "; ".join(map(str, result.get("errors") or [])) or str(st)
-            r.error_type, r.error_message = _status_type(status) or _classify_message(msg), msg[:500]
+            r.error_type, r.error_message = _classify(status, msg), msg[:500]
         elif result.get("is_error"):
             msg = str(result.get("result") or "is_error=true")
-            r.error_type, r.error_message = _status_type(status) or _classify_message(msg), msg[:500]
+            r.error_type, r.error_message = _classify(status, msg), msg[:500]
         return r
 
 
@@ -226,8 +252,9 @@ class CodexAdapter(_Adapter):
     def build_cmd(self, task: Task, profile: Profile, workdir: Path, extra_args: list[str] | None = None) -> list[str]:
         cmd = self.exe + ["exec", "--json", "--skip-git-repo-check", "--ephemeral",
                           "-C", str(workdir), "-s", profile.codex_sandbox,
-                          # 一時ホームの hooks は未信頼のため、これがないと警告なしで実行されない（0.163.0 で実測）。
-                          # 普段は一度信頼すれば実行されるので、その状態を再現する
+                          # 一時ホームの hooks は未信頼のため、これがないと警告なしで実行されない（0.163.0 で実測。0.169.0 にもある）。
+                          # 普段は一度信頼すれば実行されるので、その状態を再現する。プロジェクトの .codex/config.toml の信頼は
+                          # effective.seed_trust が一時の config.toml に書く（--trust は旧版になく、実行中に設定を書き換えるため使わない）
                           "--dangerously-bypass-hook-trust"]
         if profile.model:
             cmd += ["-m", profile.model]

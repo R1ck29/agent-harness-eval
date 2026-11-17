@@ -224,8 +224,36 @@ if "--include-hook-events" in args and settings.exists() and "SessionStart" in s
     out({"type": "system", "subtype": "hook_started", "hook_id": "h1", "hook_name": "SessionStart:startup", "hook_event": "SessionStart"})
     out({"type": "system", "subtype": "hook_response", "hook_id": "h1", "hook_name": "SessionStart:startup",
          "hook_event": "SessionStart", "output": "", "stdout": "", "stderr": "", "exit_code": 0, "outcome": "success"})
+
+
+def _names(d, pattern):
+    return sorted(p.parent.name if p.name == "SKILL.md" else p.stem for p in d.glob(pattern)) if d.is_dir() else []
+
+
+def _mcp(f):
+    try:
+        return list(json.loads(f.read_text(encoding="utf-8")).get("mcpServers") or {})
+    except (OSError, ValueError):
+        return []
+
+
+# 実機（2.1.325）と同じく、ユーザー（CLAUDE_CONFIG_DIR）とプロジェクト（作業ディレクトリの .claude/）の両方を init に並べる。
+# MCP は {config_dir}/.claude.json と .mcp.json から（{home}/.claude.json は読まない）。FAKE_DROP_SKILLS なら置いたスキルを出さない
+proj = Path.cwd() / ".claude"
+init_skills = [] if os.environ.get("FAKE_DROP_SKILLS") else skills + _names(proj / "skills", "*/SKILL.md")
+mcp = [{"name": n, "status": "pending"} for n in _mcp(cfg / ".claude.json") + _mcp(Path.cwd() / ".mcp.json")]
 out({"type": "system", "subtype": "init", "claude_code_version": "9.9.9", "model": "fake-model",
-     "skills": skills + ["bundled-skill"], "plugins": [], "mcp_servers": [], "agents": []})
+     "skills": init_skills + ["bundled-skill"], "plugins": [], "mcp_servers": mcp,
+     "agents": ["general-purpose"] + _names(cfg / "agents", "*.md") + _names(proj / "agents", "*.md")})
+# 未信頼のフォルダではプロジェクトの permissions.allow を捨てて標準エラーに 1 行出す（2.1.325 の実測の文面）
+trusted = False
+try:
+    trusted = bool(json.loads((cfg / ".claude.json").read_text(encoding="utf-8"))["projects"][Path.cwd().resolve().as_posix()]
+                   ["hasTrustDialogAccepted"])
+except (OSError, ValueError, KeyError, TypeError):
+    pass
+if (proj / "settings.json").is_file() and not trusted:
+    print("Ignoring 1 permissions.allow entry from .claude/settings.json: this workspace has not been trusted.", file=sys.stderr)
 
 if "FAKE_TIMEOUT" in prompt:
     time.sleep(60)
@@ -298,4 +326,7 @@ if "sales.csv" in prompt:
     result("summary.md を作成しました")
     sys.exit(0)
 
+if "Reply with exactly: OK" in prompt:  # doctor --live の最小試行
+    result("OK", cost=0.001, turns=1)
+    sys.exit(0)
 result("何もしませんでした")

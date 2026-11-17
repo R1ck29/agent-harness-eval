@@ -68,7 +68,7 @@ LIMIT_KEYS = {"max_turns", "timeout_s", "max_budget_usd"}
 PROFILE_KEYS = {"id", "description", "agent", "model", "executable", "isolate_home",
                 "install", "env", "env_unset", "extra_args", "permission_mode",
                 "codex_sandbox", "pricing", "hash_paths", "copy_credentials",
-                "isolation_settings", "billing", "inherit_env"}
+                "isolation_settings", "billing", "inherit_env", "trust_workdir"}
 BILLINGS = ("api", "subscription")  # api: 呼び出しごとに課金（Bedrock・API キー）／ subscription: 定額（呼び出しごとの請求なし）
 # 認証の経路・接続先・請求先・モデルの実体を変える環境変数（各 CLI の実行ファイルに名前が含まれることを確認したものだけ）。
 # 試行は親の環境変数を引き継ぐため、これを親から黙って引き継ぐと、意図しない経路・口座・モデルで実行される。
@@ -118,6 +118,17 @@ class Grader:
         if self.type not in ("skill_used", "subagent_used", "hook_used") or self.negate:
             return False
         return int(self.params.get("min", 1 if "max" not in self.params else 0)) >= 1
+
+    @property
+    def trigger_direction(self) -> str | None:
+        """skill_used の向き。positive: 使うべき（1 回以上を要求）／negative: 使うべきでない（否定の対照。max: 0 など）／None: どちらでもない。"""
+        if self.type != "skill_used":
+            return None
+        lo = int(self.params.get("min", 1 if "max" not in self.params else 0))
+        requires, forbids = lo >= 1, self.params.get("max") == 0
+        if self.negate:  # NOT（1 回以上）= 使わない、NOT（0 回）= 使う
+            requires, forbids = forbids, requires
+        return "positive" if requires else "negative" if forbids else None
 
     def label(self) -> str:
         if self.description:
@@ -193,6 +204,9 @@ class Profile:
     billing: str = "api"
     inherit_env: list[str] = field(default_factory=list)  # 親の環境の値を使う経路の変数（名前だけ）
     isolation_settings: bool = True
+    # 隔離した設定の中で作業ディレクトリを信頼済みにする（未信頼だとプロジェクト単位の設定の一部が黙って捨てられる。
+    # docs/design/REDESIGN.md §2）。false にすると未信頼のフォルダでの挙動を測る
+    trust_workdir: bool = True
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -382,7 +396,8 @@ def load_profile(path: Path) -> Profile:
         permission_mode=d.get("permission_mode"), codex_sandbox=sandbox, pricing=pricing,
         hash_paths=_str_list(path, "hash_paths", d.get("hash_paths")),
         copy_credentials=bool(d.get("copy_credentials", False)),
-        isolation_settings=bool(d.get("isolation_settings", True)), billing=billing, inherit_env=inherit, raw=d,
+        isolation_settings=bool(d.get("isolation_settings", True)), billing=billing, inherit_env=inherit,
+        trust_workdir=bool(d.get("trust_workdir", True)), raw=d,
     )
 
 

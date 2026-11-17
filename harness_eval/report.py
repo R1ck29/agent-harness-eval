@@ -55,6 +55,44 @@ def _ci(ci: list[float] | None) -> str:
     return "" if not ci else f"<br><span class='mut'>[{ci[0] * 100:+.0f}, {ci[1] * 100:+.0f}]</span>"
 
 
+def _rate(x: float | None, ci: list[float] | None, n: int) -> str:
+    if x is None:
+        return "<span class='mut'>—</span>"
+    band = f"<br><span class='mut'>[{ci[0] * 100:.0f}, {ci[1] * 100:.0f}]</span>" if ci else ""
+    return f"{x * 100:.0f}% <span class='mut'>(n={n})</span>{band}"
+
+
+def _trigger_and_load(P: dict[str, Any], k: int) -> list[str]:
+    """pass@k・pass@1 の区間・スキルの呼び出し率／誤発火率・読み込みの検査（0.9.0〜。古い結果では — になる）。"""
+    out = [f"<h2>反復・スキルの発火・読み込み</h2><div class='wrap'><table><tr><th>プロファイル</th><th class='n'>pass@{k}</th>"
+           "<th class='n'>pass@1 の 95% 区間</th><th class='n'>呼び出し率</th><th class='n'>誤発火率</th><th>検出</th><th>読み込まれなかった部品</th></tr>"]
+    warn = []
+    for pid, s in P.items():
+        t = s.get("trigger") or {}
+        hl = s.get("harness_load") or {}
+        ci = s.get("pass_at_1_ci")
+        band = "—" if not ci else f"[{ci[0] * 100:.0f}, {ci[1] * 100:.0f}]"
+        if hl.get("with_missing"):
+            miss = "; ".join(f"{kind}: {', '.join(f'{n}×{c}' for n, c in names.items())}" for kind, names in hl["missing"].items())
+            load = f"<span class='ng'>{hl['with_missing']}/{hl['checked']} 試行</span> {_e(miss)}"
+            warn.append(pid)
+        else:
+            load = f"<span class='mut'>なし（{hl['checked']} 試行を照合）</span>" if hl.get("checked") else "<span class='mut'>照合なし</span>"
+        out.append(f"<tr><td>{_e(pid)}</td><td class='n'>{_pct(s.get('pass_at_k'))}</td><td class='n'>{band}</td>"
+                   f"<td class='n'>{_rate(t.get('invocation_rate'), t.get('invocation_rate_ci'), t.get('positive', 0))}</td>"
+                   f"<td class='n'>{_rate(t.get('false_trigger_rate'), t.get('false_trigger_rate_ci'), t.get('negative', 0))}</td>"
+                   f"<td>{_e(t.get('detection') or '—')}</td><td>{load}</td></tr>")
+    out.append(f"</table></div><div class='mut'>pass@{k} = k 回のうち少なくとも 1 回合格する確率（不偏推定のタスク平均）。"
+               "呼び出し率 = スキルを使うべき判定（skill_used で 1 回以上）の試行でそのスキルを呼んだ割合、誤発火率 = 使うべきでない判定"
+               "（否定の対照。skill_used の max: 0）の試行で呼んだ割合。どちらも合否と切り離して数え、括弧は Wilson の 95% 区間。"
+               "検出 heuristic は Codex の推定（SKILL.md を読むコマンド）。読み込まれなかった部品 = 置いたのに CLI が読み込まなかったスキル・"
+               "サブエージェント・MCP・常時指示（試行ごとの effective_config.json）。</div>")
+    if warn:
+        out.append(f"<div class='warn'>注意: {_e(', '.join(warn))} は、置いた部品の一部が CLI に読み込まれていない試行があります。"
+                   "置き場所・frontmatter を確かめてください（この差は「ハーネスの効果」ではありません）。</div>")
+    return out
+
+
 def render(summary: dict[str, Any], records: list[TrialRecord], baseline: str | None = None) -> str:
     meta = summary.get("meta", {})
     k = summary["k"]
@@ -89,6 +127,8 @@ def render(summary: dict[str, Any], records: list[TrialRecord], baseline: str | 
                "除外 = レート制限・認証失敗など環境起因の異常終了で、集計に含めていません。"
                "開始時の文脈 = 最初のリクエストの入力トークン（システムプロンプト・ツール・常に読み込まれる指示・依頼）の平均。"
                "Claude Code だけで測り、測れた試行だけで平均します（1 試行も測れなければ —）。</div>")
+
+    out += _trigger_and_load(P, k)
 
     if baseline and baseline in P:
         d = deltas(summary, baseline)
