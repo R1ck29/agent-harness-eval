@@ -138,3 +138,155 @@ cli.py: validate / plan / run / report / gate / promote / doctor / harvest / imp
 | `{home}/.claude.json` に置いた MCP は | **読み込まれない**（`{config_dir}/.claude.json` に置く） |
 | 0.8.0 は読み込まれなかったことに気づけるか | Claude Code はスキル・MCP・プラグインの一覧を `meta` に残すが、**期待と照合しない**。Codex は何も残さない |
 | 0.8.0 は利用上限を除外できるか | **できない**（失敗として数える） |
+
+## 3. 課題（証拠付き）
+
+| # | 課題 | 証拠 | 影響 |
+|---|---|---|---|
+| P1 | プロジェクト単位の配布物が未信頼で一部捨てられ、記録にも残らない | §2.2・§2.3 の実測 | 候補が「効かない」と誤判定される。gate・promote が誤った採否を出す |
+| P2 | 読み込まれた部品を期待と照合しない | `adapters.py:121-129`（記録だけ）、`metrics.py:219`（一覧の和集合を出すだけ） | 配布物の置き場所の誤り・frontmatter の誤り・CLI の仕様変更で読み込まれなくても、「ハーネスの効果なし」に見える |
+| P3 | Codex の読み込みを観測していない | `adapters.py:226`（起動だけ）。スキルは呼び出しの推定だけ（`adapters.py:217`） | 同上（Codex は特に気づけない） |
+| P4 | 試行の有効設定（何を置き、何で起動し、何が読まれたか）が試行単位に残らない | `record.py`（`meta` にばらばら）、`summary.json` の `meta.profiles` はプロファイル単位 | 「codex が 97%」がどの設定の結果か後から確かめられない（agent-skill-eval の `run_meta.json` が解く問題） |
+| P5 | 利用上限が失敗として数えられる | §2.3、`adapters.py:49` | 上限に当たった実行の pass@1 が下がり、gate が fail する |
+| P6 | スキルの呼び出し率・誤発火率がない | `paired_negative` は `validate` の警告にしか使っていない（`spec.py` `lint`）。`metrics.py` に該当の指標なし | 「スキルが発火しない」という最も多い失敗（agent-skill-eval・skilljack の指摘）を数字で追えない |
+| P7 | pass@k（少なくとも 1 回）と、プロファイル全体の pass@1 の区間がない | `metrics.py:161`（pass^k だけ）、区間は Δ にだけ付く | 試行回数の少ない実行で、絶対値の不確かさが分からない |
+| P8 | アダプタが CLI の版ごとの差を吸収する層を持たない | `VERIFIED_VERSIONS` は警告だけ（`adapters.py:320`）。フラグは決め打ち | CLI の版上げ（両 CLI とも月に数回）に追従しにくい。wikiskill と同じ処理を二重に保守している |
+| P9 | タスクの形式が独自で、OSS のタスク集（SkillsBench 形式）を使えない | `spec.py` の YAML のみ | 既存のタスク集を評価に流用できない |
+| P10 | テストの CI がない | `.github/` がない | マージの前に壊れたことに気づけない |
+
+## 4. OSS の評価ツールとの比較
+
+| 観点 | このツール 0.8.0 | skilljack-evals | agent-skill-eval | coder_eval | skill-ab-eval |
+|---|---|---|---|---|---|
+| タスク形式 | YAML 1 ファイル + fixture フォルダ | `evals/<id>/task.md`（frontmatter + 本文のプロンプト）+ `environment/{workspace,skills}` + `verifier/`・`oracle/`（SkillsBench 形式） | `evals/evals.json`（ケースの配列）+ `files/` | 宣言的な YAML（依存を固定） | ケースごとの A/B セル |
+| 実行 | 本物の CLI、試行ごとの一時ホーム | 本物の CLI（全権限）、作業フォルダは使い捨て。エージェントは隔離しない | 本物の CLI（native）または Harbor（Docker） | サンドボックス | セルごとに新しい文脈 |
+| 基準との比較 | 基準プロファイルとの Δ（比較用の値、タスク単位のブートストラップ区間、符号検定） | Skill Lift（スキルあり − なし、タスクごと・マクロ平均） | with / without の差、比較用ベースライン JSON、ブートストラップ区間 | A/B の実験層 | lift と判定 |
+| 発火の指標 | `skill_used` グレーダー（合否の一部） | **Skill Invocation Rate**（合否と切り離す）、**anti-trigger タスク**（`expect_skill_invocation: false`） | **trigger split**（陽性と**否定の対照**を分けて報告、不明は「発火せず」と数えない） | **`skill_triggered`** 基準 | — |
+| 反復の指標 | pass@1・pass^k | Resolution Rate（95% 二項区間）・Pass@k | **pass@k と pass^k**（Wilson 区間） | 重み付きスコアと閾値 | — |
+| 有効設定の記録 | `meta`（CLI 版・読み込んだ部品）と summary の profiles | キャッシュキー | **`run_meta.json`**（モデル・推論の強さ・接続先・CLI 版・ツール版） | テレメトリ | — |
+| 予算 | 試行・実行・口座ごとの月 | — | **試行ごとのトークン・費用・時間の上限**（warn / fail / stop-suite） | — | — |
+| CI の関門 | gate（非劣性マージン・最小タスク数・回帰予算）・promote（holdout・多重比較） | 解決率と lift の閾値（lift は fail closed） | ベースラインとの比較 | CI でビルドを止める | — |
+| 信頼・承認の扱い | 0.8.0: Codex hooks だけ（`--dangerously-bypass-hook-trust`） | `--dangerously-skip-permissions` 等ですべて許可 | — | サンドボックス | — |
+
+**取り入れるもの:** 発火の指標を合否から切り離す（skilljack・agent-skill-eval）、否定の対照を別に報告し「不明」を「発火せず」と数えない（agent-skill-eval）、
+pass@k と Wilson 区間（agent-skill-eval）、試行ごとの有効設定の記録（agent-skill-eval の `run_meta.json` を試行単位に）、SkillsBench 形式のタスクの取り込み（skilljack）。
+
+**取り入れないもの:** 「すべて許可」で起動すること（skilljack）は、利用者の普段の権限と違う条件で測ることになり、`allow_tools`・`deny_tools` の評価もできなくなる。
+このツールは「普段の利用者が信頼済みのフォルダで使う状態」を再現し、権限はタスクで明示する方針を保つ。合否を LLM 判定と切り離す skilljack の方針は、
+このツールでは LLM 判定をコード判定がすべて通ったときだけ使う形で既に近い。
+
+**このツールが勝っている点（保つ）:** タスク単位のペアの区間（試行を独立に数えない）、比較用の値（`harness_only` を除いた Δ）、holdout と多重比較の補正、
+経路の変数の検出（意図しない口座・モデルで実行しない）、祖先の指示の検出、口座ごとの月の予算。
+
+## 5. 選択肢と判断
+
+| 論点 | 選択肢 | 判断と理由 |
+|---|---|---|
+| 作り直しの範囲 | (a) 全面的に書き直す (b) 測定の正しさに関わる部分と不足する指標だけ作り替える | **(b)**。§4 のとおり統計と関門は OSS より厳密。書き直しは既存の利用者の結果・タスク・キャッシュを壊し、利点がない |
+| プロジェクト単位の配布物の信頼 | (a) 何もしない（未信頼のまま測る） (b) 一時の設定に信頼を書く (c) Codex `--trust` / Claude Code に相当するフラグ | **(b)**。(a) は利用者の普段の状態（自分のリポジトリは信頼済み）と違う。(c) は Codex 0.169 にしかなく、Claude Code にはフラグがない。(b) は両 CLI で実測で確認でき、版に依存しない。プロファイルの `trust_workdir: false` で (a) も選べる（未信頼のリポジトリでの挙動を測りたい場合） |
+| 信頼を付ける範囲（Claude Code） | 作業ディレクトリだけ／git のルートを探す／作業ディレクトリとすべての祖先 | **作業ディレクトリとすべての祖先**。信頼は git のルート単位（実測）。git を実行してルートを探すより単純で確実。祖先の指示ファイルは既存の検査（`ancestor_instructions`）で実行を止めるので、祖先を信頼しても余計なものは読み込まれない |
+| 読み込みの観測（Codex） | (a) 何もしない (b) 試行の前に `codex debug prompt-input` と `codex mcp list --json` を同じ環境で実行 (c) 試行の出力から推定 | **(b)**。費用 0・約 2 秒。モデルに渡す入力そのものなので確実。旧版などで失敗したら「観測できない」と記録するだけ |
+| 読み込まれなかったときの扱い | (a) 試行を無効にする (b) 記録して集計・レポートで知らせる | **(b)**。配布物の誤り（frontmatter の不備など）で読み込まれないのは「配布物の失敗」として測るべきで、環境起因と自動では区別できない。gate で止める選択肢はフェーズ 4 で加える |
+| 指標の追加 | 呼び出し率・誤発火率・pass@k・区間 | **すべて加える（追加のみ）**。既存の指標・Δ の定義は変えない（gate・promote の互換性） |
+| タスクの形式 | (a) SkillsBench 形式に乗り換える (b) YAML を保ち、取り込み（変換）を作る | **(b)**。YAML の過程グレーダー（`tool_used` 等）・`split`・`family`・`paired_negative` は SkillsBench 形式にない。取り込みは変換して YAML を書き出す（フェーズ 3） |
+| アダプタ | (a) このリポジトリで保守を続ける (b) 共有ライブラリ `agent_cli` を複製して同梱 | **(b)**（フェーズ 2）。wikiskill と同じ処理（版ごとのコマンド・ストリームの解析・上限の抽出）を 1 か所で実測し直せる。依存は増やさない |
+| 版 | 0.9.0（後方互換）／1.0.0（破壊的） | **0.9.0**。キー・引数・形式は追加だけ。測定値の変わるプロファイル（プロジェクト単位の配布物）は CHANGELOG で取り直しを案内する |
+
+## 6. 目標アーキテクチャ
+
+```
+                         ┌──────── agent_cli（複製して同梱。CLI ごとの差をすべて持つ）────────┐
+                         │ probe_version / build_command / parse_stream / classify_error /      │
+                         │ extract_usage / seed_trust / observe_loaded                          │
+                         └──────────────────────────────▲───────────────────────────────────────┘
+tasks (YAML ← import: SkillsBench/skilljack)            │
+profiles (YAML) ─ spec ─ runner ── trial ─ isolation ───┤
+                                    │       effective（期待・観測・差・記録）
+                                    ├─ graders（成果物・過程・LLM）
+                                    └─ record（TrialRecord + effective）
+                         metrics（pass@1/pass^k/pass@k・区間・lift・呼び出し率・誤発火率・読み込みの検査）
+                         → gate / promote / report
+```
+
+### 6.1 試行の流れ（0.9.0）
+
+1. フィクスチャの複製 → 環境変数 → 認証ファイルの複製 → `install`（0.8.0 と同じ）
+2. **信頼の付与**（`trust_workdir: true` のとき）: Claude Code は `{config_dir}/.claude.json` の `projects[<パス>].hasTrustDialogAccepted = true` を
+   作業ディレクトリとすべての祖先に（既存の内容に統合）。Codex は `{config_dir}/config.toml` の末尾に `[projects."<workdir>"] trust_level = "trusted"`
+   （同じ表が既にあれば書かない）。Windows では区切りを `/` にした形も書く（未実測。§10 フェーズ 4 で確認）
+3. **期待する部品の抽出**: 置いたファイルから、CLI の探索場所にあるスキル・サブエージェント・MCP・常時指示を集める（§6.2）
+4. **観測**（Codex のみ起動前）: `codex debug prompt-input` と `codex mcp list --json` を試行と同じ環境・作業ディレクトリで実行
+5. 起動 → 解析（0.8.0 と同じ）。Claude Code の観測は `system/init`
+6. **照合と記録**: 期待 − 観測 = 読み込まれなかった部品。標準エラーの信頼の警告も拾う。`effective_config.json` とレコードの `effective` に書く
+7. 異常終了の分類（`usage_limit` を追加）→ 採点 → 後始末
+
+### 6.2 有効設定の記録（`effective_config.json`・`TrialRecord.effective`）
+
+試行フォルダ（`<run>/trials/<task>/<profile>/<n>/effective_config.json`）と、`trials.jsonl` の各レコードの `effective` に同じものを書く。
+値は**秘密を含めない**（環境変数は名前だけ、認証ファイルは記録しない）。
+
+```json
+{
+  "schema": 1,
+  "agent": "claude_code",
+  "cli_version": "2.1.325 (Claude Code)",
+  "argv": ["claude", "-p", "--output-format", "stream-json", "..."],
+  "isolate_home": true,
+  "config_env": "CLAUDE_CONFIG_DIR",
+  "env_set": ["CLAUDE_CODE_USE_BEDROCK"],
+  "env_unset": ["CLAUDECODE", "..."],
+  "trust": {"enabled": true, "paths": ["<workdir>", "<祖先>", "..."]},
+  "installed": {"home/.claude/skills/x/SKILL.md": "<sha256 先頭 16 桁>", "workdir/.mcp.json": "..."},
+  "expected": {"skills": ["x"], "agents": [], "mcp_servers": [], "instructions": ["home/.claude/CLAUDE.md"]},
+  "observed": {"source": "init", "skills": ["x", "..."], "agents": ["..."], "mcp_servers": ["..."], "instructions": null},
+  "missing": {"skills": [], "agents": [], "mcp_servers": [], "instructions": []},
+  "misplaced": ["home/.claude.json: CLAUDE_CONFIG_DIR を設定すると読まれません（{config_dir}/.claude.json に置く）"],
+  "warnings": ["Ignoring 1 permissions.allow entry ..."]
+}
+```
+
+- `installed`: 一時ホームのすべてのファイル（認証ファイル `.credentials.json`・`auth.json` を除く）と、作業ディレクトリで `install` が足した・変えたファイル
+  （フィクスチャを除く）。パスは試行フォルダからの相対（`/` 区切り）
+- `expected`（CLI ごとの探索場所。§2 の実測に合わせる）
+
+| 種類 | Claude Code | Codex |
+|---|---|---|
+| skills | `{config_dir}/skills/*/SKILL.md`、`{workdir}/.claude/skills/*/SKILL.md` | `{config_dir}/skills/*/SKILL.md`、`{home}/.agents/skills/*/SKILL.md`、`{workdir}/.agents/skills/*/SKILL.md` |
+| agents | `{config_dir}/agents/*.md`、`{workdir}/.claude/agents/*.md` | （対象外） |
+| mcp_servers | `{config_dir}/.claude.json` と `{workdir}/.mcp.json` の `mcpServers` のキー | `{config_dir}/config.toml` と（信頼時）`{workdir}/.codex/config.toml` の `[mcp_servers.<名前>]` |
+| instructions | `{config_dir}/CLAUDE.md`、`{workdir}/CLAUDE.md`、`{workdir}/.claude/CLAUDE.md`（観測手段がないので照合しない） | `{config_dir}/AGENTS.md`（または `AGENTS.override.md`）、`{workdir}/AGENTS.md`（prompt-input に本文があるかで照合） |
+
+  スキルの名前は frontmatter の `name:`、なければフォルダ名。サブエージェントは frontmatter の `name:`、なければファイル名。
+- `observed`: Claude Code は `system/init`（`skills`・`agents`・`mcp_servers[].name`）。Codex は prompt-input のスキル一覧と `mcp list` の名前、
+  常時指示は prompt-input に各ファイルの先頭の非空行が含まれるか。観測できなければ `source: null` で、`missing` は計算しない（空ではなく `null`）
+- `missing` が空でない試行は、集計の `harness_load`（§6.3）とレポートの警告に出す。試行の有効・無効は変えない
+
+### 6.3 指標層
+
+既存の定義（pass@1・pass^k・比較用の値・Δ・gate・promote）は**変えない**。次を追加する。
+
+| 指標 | 定義 | 区間 | 置き場所 |
+|---|---|---|---|
+| `pass_at_k`（タスク） | 有効試行 n・合格 c のとき `1 − C(n−c, k) / C(n, k)`（不偏推定。Chen et al. 2021）。n < k は None | — | `summary.tasks[p][t]` |
+| `pass_at_k`（プロファイル） | タスク平均 | — | `summary.profiles[p]` |
+| `pass_at_1_ci` | タスクごとの pass@1 を復元抽出したブートストラップ 95% 区間（試行を独立に数えない。Δ と同じ方法） | 2 タスク以上 | `summary.profiles[p]` |
+| `trigger.invocation_rate` | **陽性**（`skill_used` で `negate` なし・`min ≥ 1`）の判定を持つ有効試行のうち、対象のスキルを呼んだ割合（判定ごとに 1 件。合否とは独立） | Wilson 95% | `summary.profiles[p].trigger` |
+| `trigger.false_trigger_rate` | **否定の対照**（`skill_used` で `max: 0`、または `negate: true`）の判定を持つ有効試行のうち、対象のスキルを呼んだ割合 | Wilson 95% | 同上 |
+| `trigger.detection` | `exact`（Claude Code の Skill ツール）／`heuristic`（Codex の SKILL.md 読み込みの推定）。混在すれば `mixed` | — | 同上 |
+| スキルの効果（lift） | 既存の `deltas(summary, baseline)` の `pass_at_1`（比較用の値）とその 95% 区間 | 既存 | `report` の表記を「lift」と併記 |
+| `harness_load` | `{checked, with_missing, missing: {skills: {名前: 試行数}, ...}}`。観測できた試行だけ数える | — | `summary.profiles[p]` |
+
+- 呼び出し率は「タスクの判定」単位で数える（1 試行に陽性の判定が 2 つあれば 2 件）。判定の対象（スキル名）と向きは、グレーダーの結果に
+  `target`・`trigger`（`positive`／`negative`）として残す（`grader_results` への追加）
+- 否定の対照の発火は、合否とは別に数える（タスクの合否は既存の `skill_used max: 0` の判定がそのまま担う）
+- Codex で `skill_detection: heuristic` の試行も数えるが、`detection` で区別して表示する。「不明」を「呼ばなかった」と数えない原則（agent-skill-eval）に合わせ、
+  将来 Codex の観測が厳密になったら `exact` に変わる
+
+### 6.4 タスク形式と取り込み（フェーズ 3）
+
+YAML（現行の形式）を正とし、SkillsBench／skilljack の `task.md` 形式を**変換して取り込む**。変換の対応は §10 フェーズ 3。
+
+### 6.5 アダプタ層（フェーズ 2）
+
+`harness_eval/adapters.py` の CLI 固有の処理を、複製して同梱する `agent_cli` へ移す（§7）。このリポジトリに残すのは、プロファイル・タスクから
+`agent_cli` の呼び出し引数を作る薄い層と、`ParsedRun` への変換だけ。
