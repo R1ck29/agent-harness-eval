@@ -119,6 +119,17 @@ class Grader:
             return False
         return int(self.params.get("min", 1 if "max" not in self.params else 0)) >= 1
 
+    @property
+    def trigger_direction(self) -> str | None:
+        """skill_used の向き。positive: 使うべき（1 回以上を要求）／negative: 使うべきでない（否定の対照。max: 0 など）／None: どちらでもない。"""
+        if self.type != "skill_used":
+            return None
+        lo = int(self.params.get("min", 1 if "max" not in self.params else 0))
+        requires, forbids = lo >= 1, self.params.get("max") == 0
+        if self.negate:  # NOT（1 回以上）= 使わない、NOT（0 回）= 使う
+            requires, forbids = forbids, requires
+        return "positive" if requires else "negative" if forbids else None
+
     def label(self) -> str:
         if self.description:
             return self.description

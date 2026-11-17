@@ -156,6 +156,8 @@ def grade_all(graders: list[Grader], rec: TrialRecord, workdir: Path, judge: Jud
             continue
         base = {"label": g.label(), "type": g.type, "kind": g.kind, "weight": g.weight, "category": g.category,
                 "harness_only": g.requires_harness}
+        if g.type == "skill_used":  # 呼び出し率・誤発火率の集計に使う（metrics.trigger_stats）
+            base.update(target=str(g.params["skill"]), trigger=g.trigger_direction)
         if g.type == "hook_used" and rec.hook_calls is None:  # Codex の --json には hooks の実行記録が出ない（0.163.0 で実測）
             results.append({**base, "status": "not_run", "reason": "hooks の実行記録がないため判定できません（Codex）"})
             continue

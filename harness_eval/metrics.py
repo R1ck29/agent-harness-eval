@@ -3,6 +3,13 @@
 - 試行スコア   = 合格したグレーダーの重み付き割合（not_run は分母から除外）
 - 試行の合格   = スコア 1.0 かつ 失敗扱いの異常終了なし
 - pass@1       = タスク内の有効試行のうち合格した割合（全体はタスク平均）
+- pass@k       = タスク内で k 回のうち少なくとも 1 回合格する確率。有効試行 n 回・合格 c 回のとき 1 − C(n−c,k)/C(n,k)
+                 （不偏推定。Chen et al. 2021）。n < k のタスクは算出しない。全体はタスク平均
+- pass@1 の区間 = タスクごとの pass@1 を復元抽出したブートストラップ 95% 区間（試行を独立に数えない）
+- 呼び出し率   = 使うべき（skill_used で 1 回以上を要求）判定を持つ有効試行のうち、対象のスキルを呼んだ割合。合否と切り離して数える
+- 誤発火率     = 使うべきでない（skill_used の max: 0 など。否定の対照）判定を持つ有効試行のうち、対象のスキルを呼んだ割合。
+                 どちらも Wilson の 95% 区間を付ける。Codex の検出は推定（detection: heuristic）
+- 読み込みの検査（harness_load）= 置いた部品のうち CLI が読み込まなかったものがある試行の数（有効設定の記録から）
 - pass^k       = タスク内で k 回連続で合格する確率。有効試行 n 回・合格 c 回のとき C(c,k)/C(n,k)。
                  n = k なら「k 試行すべて合格なら 1、そうでなければ 0」と同じ。n < k のタスクは算出しない。
 - 比較用（*_cmp）= 配布物がないと通らない判定（skill_used / subagent_used / hook_used で 1 回以上を要求）を
@@ -158,6 +165,65 @@ def holdout_comparisons(rows: list[dict[str, Any]], tasks: dict[str, str], incum
     return len(seen)
 
 
+def pass_at_k(n: int, c: int, k: int) -> float | None:
+    """k 回のうち少なくとも 1 回合格する確率の不偏推定（n 回中 c 回合格）。n < k なら None。"""
+    if k <= 0 or n < k:
+        return None
+    return 1.0 if n - c < k else 1 - comb(n - c, k) / comb(n, k)
+
+
+def wilson(c: int, n: int, z: float = 1.959964) -> list[float] | None:
+    """二項の割合 c/n の Wilson スコア区間（95%）。n = 0 なら None。"""
+    if n <= 0:
+        return None
+    p = c / n
+    den = 1 + z * z / n
+    mid = (p + z * z / (2 * n)) / den
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den
+    return [max(0.0, mid - half), min(1.0, mid + half)]
+
+
+def trigger_stats(records: list[TrialRecord]) -> dict[str, Any]:
+    """スキルの呼び出し率（使うべき判定）と誤発火率（否定の対照）。判定ごとに 1 件として数え、合否とは独立。
+    判定の向きと対象は grader_results の trigger・target（0.9.0〜。それ以前の結果は数えない）。"""
+    pos_n = pos_c = neg_n = neg_c = 0
+    detections = set()
+    for r in records:
+        if not r.valid:
+            continue
+        for g in r.grader_results or []:
+            if not isinstance(g, dict) or g.get("type") != "skill_used" or g.get("trigger") not in ("positive", "negative"):
+                continue
+            target = str(g.get("target"))
+            called = any(s == target or s.endswith(":" + target) for s in r.skill_calls)
+            detections.add(r.skill_detection)
+            if g["trigger"] == "positive":
+                pos_n, pos_c = pos_n + 1, pos_c + called
+            else:
+                neg_n, neg_c = neg_n + 1, neg_c + called
+    return {"positive": pos_n, "invoked": pos_c, "invocation_rate": pos_c / pos_n if pos_n else None,
+            "invocation_rate_ci": wilson(pos_c, pos_n),
+            "negative": neg_n, "false_triggers": neg_c, "false_trigger_rate": neg_c / neg_n if neg_n else None,
+            "false_trigger_rate_ci": wilson(neg_c, neg_n),
+            "detection": None if not detections else detections.pop() if len(detections) == 1 else "mixed"}
+
+
+def harness_load(records: list[TrialRecord]) -> dict[str, Any]:
+    """有効設定の記録から、置いた部品が読み込まれなかった試行を数える（観測できた試行だけ）。"""
+    checked = with_missing = 0
+    missing: dict[str, Counter] = defaultdict(Counter)
+    for r in records:
+        m = (r.effective or {}).get("missing")
+        if not isinstance(m, dict):
+            continue
+        checked += 1
+        if any(m.values()):
+            with_missing += 1
+        for kind, names in m.items():
+            missing[kind].update(names or [])
+    return {"checked": checked, "with_missing": with_missing, "missing": {k: dict(v) for k, v in missing.items() if v}}
+
+
 def pass_hat_k(n: int, c: int, k: int) -> float | None:
     if k <= 0 or n < k:
         return None
@@ -194,7 +260,7 @@ def summarize(records: list[TrialRecord], k: int) -> dict[str, Any]:
         nc, cc = len(cmp), sum(bool(r.cmp_passed) for r in cmp)
         tasks.setdefault(pid, {})[tid] = {
             "trials": len(rs), "valid": n, "passed": c, "excluded": len(rs) - n,
-            "pass_at_1": (c / n) if n else None, "pass_hat_k": pass_hat_k(n, c, k),
+            "pass_at_1": (c / n) if n else None, "pass_hat_k": pass_hat_k(n, c, k), "pass_at_k": pass_at_k(n, c, k),
             "mean_score": _mean(r.score for r in valid),
             "pass_at_1_cmp": (cc / nc) if nc else None, "pass_hat_k_cmp": pass_hat_k(nc, cc, k),
             "mean_score_cmp": _mean(r.cmp_score for r in cmp),
@@ -231,6 +297,8 @@ def summarize(records: list[TrialRecord], k: int) -> dict[str, Any]:
             "pass_at_1": _mean(v["pass_at_1"] for v in tv.values()),
             "pass_hat_k": _mean(v["pass_hat_k"] for v in tv.values()),
             "pass_hat_k_tasks": sum(1 for v in tv.values() if v["pass_hat_k"] is not None),
+            "pass_at_k": _mean(v["pass_at_k"] for v in tv.values()),
+            "pass_at_1_ci": _ci([v["pass_at_1"] for v in tv.values() if v["pass_at_1"] is not None]),
             "tasks": len(tv), "mean_score": _mean(r.score for r in valid),
             "total_cost_usd": total_cost if cost_known else None,
             "known_cost_usd": sum((r.cost_usd or 0) + (r.judge_cost_usd or 0) for r in valid),
@@ -243,8 +311,15 @@ def summarize(records: list[TrialRecord], k: int) -> dict[str, Any]:
             "failure_tags": dict(tags.most_common()),
             "cached_trials": sum(r.from_cache for r in rs),
             "components": {k2: sorted(v) for k2, v in comps.items()},
+            "trigger": trigger_stats(rs),
+            "harness_load": harness_load(rs),
         }
     return {"k": k, "profiles": profiles, "tasks": tasks}
+
+
+def _ci(values: list[float]) -> list[float] | None:
+    ci = paired_bootstrap(values)
+    return [ci.low, ci.high] if ci.low is not None else None
 
 
 def _diff(a: dict[str, Any], b: dict[str, Any], m: str) -> float | None:
