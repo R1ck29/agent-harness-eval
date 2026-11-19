@@ -5,7 +5,11 @@
     <trial_dir>/home/.claude/    Claude Code の CLAUDE_CONFIG_DIR
     <trial_dir>/home/.codex/     Codex の CODEX_HOME
     <trial_dir>/workdir/         フィクスチャを複製した作業ディレクトリ
+    <trial_dir>/tmp/             試行の一時フォルダ（TMPDIR・TEMP・TMP。試行のあとに消す。bwrap の中では空の /tmp）
     <trial_dir>/stdout.jsonl, stderr.txt
+
+環境変数は許可リスト: 親の環境から渡すのは BASE_ENV（PATH・LANG・LC_*・TERM など、OS とネットワークに要るもの）と、
+プロファイルの inherit_env に名前を書いたものだけ。それ以外（API キー・GH_TOKEN・親のセッションの変数など）は渡さない。
 
 Codex は OS の一時ディレクトリ配下の CODEX_HOME だと補助バイナリの作成を拒否する
 （0.163.0 で警告を確認）。そのため試行ディレクトリは結果ディレクトリ配下に作る。
@@ -14,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import platform
 import shlex
 import shutil
 import signal
@@ -21,9 +26,10 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import credentials
 from .spec import ROUTE_VARS, Profile
 
 # 親プロセス（Claude Code・デスクトップアプリ・Agent SDK の中から実行した場合など）が子に渡すセッションの変数。
@@ -44,8 +50,26 @@ INHERITED_UNSET = [
 ]
 
 
+# 親の環境から試行にそのまま渡す変数（許可リスト）。OS の基本・端末・言語と、モデルの API に届くためのネットワークの設定
+# （プロキシ・社内の証明書。値に評価の中身はない）。Windows の名前は大文字小文字を区別しないので大文字で比べる
+BASE_ENV = frozenset({
+    "PATH", "PATHEXT", "LANG", "LANGUAGE", "TERM", "COLORTERM", "TZ", "SHELL", "USER", "LOGNAME", "USERNAME",
+    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "PROGRAMDATA",
+    "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)", "APPDATA", "LOCALAPPDATA", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+})
+# 渡さないときに doctor が名前を出す変数（そのエージェントの経路・認証・設定になりうるもの。GH_TOKEN などは渡さないのが目的なので出さない）
+_NOTABLE = {"claude_code": ("ANTHROPIC_", "CLAUDE", "AWS_", "GOOGLE_", "CLOUD_ML_", "VERTEX_"), "codex": ("CODEX_", "OPENAI_", "AZURE_")}
+
+
+def base_allowed(name: str) -> bool:
+    u = name.upper()
+    return u in BASE_ENV or u.startswith("LC_")
+
+
 def route_variables(profile: Profile, environ: dict[str, str]) -> tuple[list[str], list[str]]:
-    """(試行で使うと決めた経路の変数, 宣言なしに親の環境から引き継ぐ経路の変数)。名前だけを返す（値は扱わない）。
+    """(試行で使うと決めた経路の変数, 親の環境にあるが宣言していないので試行に渡さない経路の変数)。名前だけを返す（値は扱わない）。
     決めた = プロファイルの env にある、または inherit_env で宣言して親の環境にある。"""
     names = ROUTE_VARS[profile.agent]
     dropped = set(INHERITED_UNSET) | set(profile.env_unset)
@@ -57,29 +81,37 @@ def route_variables(profile: Profile, environ: dict[str, str]) -> tuple[list[str
 _SECRET = ("KEY", "TOKEN", "HEADERS")  # 名前にこれを含む変数は秘密として扱い、値をキャッシュキーにも使わない
 
 
+def parent_env_names() -> list[str]:
+    """親の環境の変数の名前すべて（評価対象ではない補助のエージェント = 判定役・書き換え役が、借りるプロファイルなしで動くとき用）。"""
+    return sorted(n for n in os.environ if n not in INHERITED_UNSET)
+
+
 def missing_inherited(profile: Profile, environ: dict[str, str]) -> list[str]:
     """inherit_env で宣言したのに試行に渡らない変数の名前（親の環境にない・空・env_unset で消す。env で決めたものは除く）。
     API キーやトークンなら、全試行がログインできずに終わる。"""
     dropped = set(INHERITED_UNSET) | set(profile.env_unset)
-    return [n for n in profile.inherit_env if n not in profile.env and (not environ.get(n) or n in dropped)]
+    # 経路の変数と秘密（キー・トークン）だけを見る。その他の名前（証明書の場所など）は、なければ渡らないだけ
+    watch = set(ROUTE_VARS[profile.agent])
+    return [n for n in profile.inherit_env if n not in profile.env and (n in watch or any(x in n for x in _SECRET))
+            and (not environ.get(n) or n in dropped)]
 
 
-def passed_claude_vars(profile: Profile, environ: dict[str, str]) -> list[str]:
-    """経路以外で親の環境から試行にそのまま渡る Claude Code の変数（名前だけ）。組織で意図した設定か、
-    INHERITED_UNSET にない新しいセッションの変数。意図しないものは env_unset に入れる。"""
-    if profile.agent != "claude_code":
-        return []
-    skip = set(INHERITED_UNSET) | set(profile.env_unset) | set(profile.env) | set(ROUTE_VARS["claude_code"])
-    return sorted(n for n in environ if n.startswith("CLAUDE") and n not in skip)
+def dropped_vars(profile: Profile, environ: dict[str, str]) -> list[str]:
+    """親の環境にあるが許可リストにも inherit_env にもないので試行に渡さない、エージェントの設定になりうる変数（名前だけ。
+    経路の変数は route_variables が別に出す）。組織で意図して設定したもの（クライアント証明書など）なら inherit_env に書く。"""
+    skip = set(INHERITED_UNSET) | set(profile.env_unset) | set(profile.env) | set(profile.inherit_env) | set(ROUTE_VARS[profile.agent])
+    return sorted(n for n in environ if n.upper().startswith(_NOTABLE[profile.agent]) and n not in skip and not base_allowed(n))
 
 
 def route_signature(profile: Profile, environ: dict[str, str]) -> str:
     """試行に渡る経路の変数のキャッシュキー用の要約。経路を変えれば再実行される。
     秘密（キー・トークン・ヘッダ）は名前だけ。秘密でないもの（モデルの別名の実体・接続先・切り替え）は値の短いハッシュも含め、
     値だけを変えても再実行されるようにする（値そのものは残さない）。"""
-    chosen, undeclared = route_variables(profile, environ)
+    chosen, _ = route_variables(profile, environ)
+    dropped = set(INHERITED_UNSET) | set(profile.env_unset)
+    extra = [n for n in profile.inherit_env if n not in chosen and environ.get(n) and n not in dropped]
     parts = []
-    for name in sorted(chosen + undeclared):
+    for name in sorted(chosen + extra):
         if any(s in name for s in _SECRET):
             parts.append(name)
             continue
@@ -109,6 +141,8 @@ class TrialPaths:
     workdir: Path
     stdout: Path
     stderr: Path
+    tmp: Path | None = None
+    lent: list = field(default_factory=list)  # 複製した認証ファイル（credentials.Lent）。試行のあと release_home で返す
 
 
 def make_trial_paths(root: Path, config_dirname: str) -> TrialPaths:
@@ -117,9 +151,10 @@ def make_trial_paths(root: Path, config_dirname: str) -> TrialPaths:
     home = root / "home"
     cfg = home / config_dirname
     wd = root / "workdir"
-    for d in (home, cfg, wd):
+    tmp = root / "tmp"
+    for d in (home, cfg, wd, tmp):
         d.mkdir(parents=True, exist_ok=True)
-    return TrialPaths(root, home, cfg, wd, root / "stdout.jsonl", root / "stderr.txt")
+    return TrialPaths(root, home, cfg, wd, root / "stdout.jsonl", root / "stderr.txt", tmp)
 
 
 def placeholders(tp: TrialPaths, profile: Profile) -> dict[str, str]:
@@ -136,9 +171,15 @@ def fill(s: str, ph: dict[str, str], quote: bool = False) -> str:
 
 
 def build_env(profile: Profile, tp: TrialPaths, config_env: str) -> dict[str, str]:
-    env = dict(os.environ)
-    for k in INHERITED_UNSET + profile.env_unset:
-        env.pop(k, None)
+    """試行の環境変数。親の環境からは許可リスト（BASE_ENV）と inherit_env に書いたものだけを渡す。"""
+    dropped = set(INHERITED_UNSET) | set(profile.env_unset)
+    env = {k: v for k, v in os.environ.items() if base_allowed(k) and k not in dropped}
+    for k in profile.inherit_env:
+        if k in os.environ and k not in dropped:
+            env[k] = os.environ[k]
+    if tp.tmp is not None:  # 試行の一時ファイルは試行ディレクトリの中に（OS の /tmp に残さない。試行のあとに消す）
+        for k in ("TMPDIR", "TEMP", "TMP"):
+            env[k] = str(tp.tmp)
     real_home = Path.home()
     if profile.isolate_home:
         env["HOME"] = str(tp.home)
@@ -155,13 +196,101 @@ def build_env(profile: Profile, tp: TrialPaths, config_env: str) -> dict[str, st
 
 
 def copy_credentials(agent: str, tp: TrialPaths) -> None:
-    """copy_credentials: true のとき、本物の認証ファイルを一時ホームに複製する（試行後に削除）。"""
-    real = Path.home()
-    cands = {"claude_code": [(Path(os.environ.get("CLAUDE_CONFIG_DIR", real / ".claude")) / ".credentials.json", tp.config_dir / ".credentials.json")],
-             "codex": [(Path(os.environ.get("CODEX_HOME", real / ".codex")) / "auth.json", tp.config_dir / "auth.json")]}
-    for src, dst in cands.get(agent, []):
-        if src.is_file():
-            shutil.copy2(src, dst)
+    """copy_credentials: true のとき、本物の認証ファイルを一時ホームに複製する（ロックの中で。試行のあと release_home で返す）。"""
+    lent = credentials.lend(agent, tp.config_dir)
+    if lent is not None:
+        tp.lent.append(lent)
+
+
+def release_home(tp: TrialPaths, log=None) -> list[str]:
+    """試行の一時ホームと一時フォルダを消す。その前に、試行の中で更新された認証ファイルを本物へ書き戻す（ロック付き・原子的）。
+    戻り値: 起きたこと（"written_back" / "conflict"）の一覧。"""
+    events = []
+    for lent in tp.lent:
+        try:
+            ev = credentials.give_back(lent)
+        except OSError as e:
+            ev = f"error: {type(e).__name__}"
+        if ev:
+            events.append(ev)
+            if log:
+                log(f"  注意: 試行の中で {lent.agent} の認証が更新されました → "
+                    + ("本物へ書き戻しました" if ev == "written_back" else f"本物へは書き戻していません（{ev}。本物が先に更新されていました）"))
+    tp.lent.clear()
+    shutil.rmtree(tp.home, ignore_errors=True)
+    if tp.tmp is not None:
+        shutil.rmtree(tp.tmp, ignore_errors=True)
+    return events
+
+
+# ---------------------------------------------------------------- 隔離（bubblewrap）
+# 見えるもの = 試行ディレクトリ（一時ホーム・作業ディレクトリ。書ける）、読み取り専用のシステム、エージェントの CLI の本体、
+# プロファイルの sandbox_ro。--out の他の試行・タスクのフォルダ（参照解・採点）・本物のホーム（認証）・/tmp の残りは見えない。
+# ネットワークはモデルの API のために残す（上流への参照は leak 検査が INVALID にする）。agent-verify-layer の
+# eval/tools/sandbox-run.sh と同じ見え方
+SANDBOX_SYSTEM = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt")
+_BWRAP_PROBLEM: dict[str, str | None] = {}
+
+
+def sandbox_mode(profile: Profile) -> str:
+    """"bwrap"（隔離する）/ "off"（プロファイルで切った）/ "unsupported"（Linux 以外。leak 検査だけ）。"""
+    if profile.sandbox == "off":
+        return "off"
+    return "bwrap" if platform.system() == "Linux" else "unsupported"
+
+
+def bwrap_problem() -> str | None:
+    """bwrap が使えなければ理由（なし・ユーザー名前空間が使えないなど）。結果は 1 回の実行の中で使い回す。"""
+    if "r" not in _BWRAP_PROBLEM:
+        exe = shutil.which("bwrap")
+        if not exe:
+            _BWRAP_PROBLEM["r"] = "bwrap がありません（apt install bubblewrap など）"
+        else:
+            try:
+                p = subprocess.run([exe, "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
+                                    "--", "true"], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+                _BWRAP_PROBLEM["r"] = None if p.returncode == 0 else f"bwrap が動きません: {p.stderr.strip()[:200]}"
+            except (OSError, subprocess.TimeoutExpired) as e:
+                _BWRAP_PROBLEM["r"] = f"bwrap が動きません: {e}"
+    return _BWRAP_PROBLEM["r"]
+
+
+def _visible(path: str, binds: list[str]) -> bool:
+    return any(path == b or path.startswith(b.rstrip("/") + "/") for b in binds)
+
+
+def sandbox_cmd(cmd: list[str], tp: TrialPaths, env: dict[str, str], profile: Profile, n_exe: int = 1) -> list[str]:
+    """cmd（先頭 n_exe 個が実行ファイルとその引数のスクリプト）を bwrap の中で動かすコマンドにする。"""
+    exe = shutil.which(cmd[0], path=env.get("PATH")) or cmd[0]
+    real = os.path.realpath(exe)
+    ro: list[str] = [p for p in SANDBOX_SYSTEM if os.path.exists(p)]
+    if "/node_modules/" in real:  # CLI の本体（node_modules。秘密は置かれない）
+        ro.append(real.split("/node_modules/")[0] + "/node_modules")
+    elif os.path.basename(real).startswith("python"):  # Python の本体と標準ライブラリ（venv の外の実体）
+        ro.append(str(Path(real).parents[1]))
+    else:
+        ro.append(real)
+    for a in cmd[1:n_exe]:  # executable に書いたスクリプト（[node, cli.js] など）
+        if os.path.isabs(a) and os.path.isfile(a):
+            ro.append(os.path.realpath(a))
+    for var in ("AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE"):
+        if env.get(var) and os.path.isfile(env[var]):
+            ro.append(env[var])
+    resolv = "/etc/resolv.conf"  # systemd-resolved では /run の下へのリンク（/run は空にするので実体を見せる）
+    if os.path.islink(resolv) and os.path.realpath(resolv).startswith("/run/"):
+        ro.append(os.path.realpath(resolv))
+    ph = placeholders(tp, profile)
+    ro += [fill(x, ph) for x in profile.sandbox_ro if os.path.exists(fill(x, ph))]
+    args = ["bwrap", "--die-with-parent", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", "/home", "--tmpfs", "/workspace"]
+    for p in dict.fromkeys(ro):
+        args += ["--ro-bind", p, p]
+    trial = str(tp.root.resolve())
+    args += ["--bind", trial, trial, "--chdir", str(tp.workdir.resolve())]
+    for k in ("TMPDIR", "TEMP", "TMP"):
+        args += ["--setenv", k, "/tmp"]
+    run = real if not _visible(exe, ro + [trial]) else exe
+    return args + ["--", run, *cmd[1:]]
 
 
 def run_install(profile: Profile, tp: TrialPaths, env: dict[str, str], timeout_s: int = 300) -> None:

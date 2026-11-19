@@ -57,7 +57,8 @@ DEFAULT_CATEGORY = {
 }
 
 TASK_KEYS = {"id", "description", "targets", "tags", "fixture", "prompt", "limits",
-             "allow_tools", "deny_tools", "graders", "paired_negative", "split", "family", "calibration"}
+             "allow_tools", "deny_tools", "graders", "paired_negative", "split", "family", "calibration",
+             "allow_test_changes", "canaries", "leak_patterns"}
 # 判定役の校正: 決定的な採点器（command など）の合否と同じことを LLM 判定にも問い、一致率を測る（criteria は必須）
 CALIBRATION_KEYS = {"criteria", "focus", "max_chars", "graders"}  # graders: 対応する決定的な採点器の番号（既定: llm 以外すべて）
 # 自己改善ループ用のタスクの分割。train: 改善案を作る材料／dev: 候補の足切り／holdout: 昇格判定だけに使う（改善役に見せない）
@@ -70,12 +71,14 @@ LIMIT_KEYS = {"max_turns", "timeout_s", "max_budget_usd"}
 PROFILE_KEYS = {"id", "description", "agent", "model", "executable", "isolate_home",
                 "install", "env", "env_unset", "extra_args", "permission_mode",
                 "codex_sandbox", "pricing", "hash_paths", "copy_credentials",
-                "isolation_settings", "billing", "inherit_env"}
+                "isolation_settings", "billing", "inherit_env", "sandbox", "sandbox_ro"}
+SANDBOXES = ("bwrap", "off")  # bwrap: Linux で試行を隔離する（既定）／ off: 隔離しない（結果に記録し、verdict が警告する）
+ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 BILLINGS = ("api", "subscription")  # api: 呼び出しごとに課金（Bedrock・API キー）／ subscription: 定額（呼び出しごとの請求なし）
 # 認証の経路・接続先・請求先・モデルの実体を変える環境変数（各 CLI の実行ファイルに名前が含まれることを確認したものだけ）。
-# 試行は親の環境変数を引き継ぐため、これを親から黙って引き継ぐと、意図しない経路・口座・モデルで実行される。
+# 試行の環境変数は許可リスト（isolation.BASE_ENV + inherit_env）なので、親の環境にあっても宣言しなければ渡らない。
 # プロファイルの env で決めるか、親の値を使うなら inherit_env に名前だけ書く（値はプロファイルに書かない）。
-# 宣言のない引き継ぎは doctor が NG、run が警告する
+# 親の環境にあるのに宣言していないものは、doctor と run が「渡さない」と名前を出す（キャッシュキーには、渡すものだけが入る）
 ROUTE_VARS = {
     "claude_code": (
         "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL",
@@ -148,6 +151,9 @@ class Task:
     split: str | None = None  # train / dev / holdout（None は分割なし）
     family: str = ""  # 似たタスクのグループ。分割はグループ単位で行う（既定はタスク id）
     calibration: dict[str, Any] | None = None  # 判定役の校正項目（CALIBRATION_KEYS）
+    allow_test_changes: bool = False  # true: 見えているテストの削除・skip を改ざんとして数えない（テストを直すこと自体が課題のとき）
+    canaries: list[str] = field(default_factory=list)  # 参照解・採点に埋めた文字列。トランスクリプトに出たら INVALID
+    leak_patterns: list[str] = field(default_factory=list)  # ツールの入力がこれに当たったら INVALID（正規表現）
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -194,7 +200,9 @@ class Profile:
     hash_paths: list[str] = field(default_factory=list)
     copy_credentials: bool = False
     billing: str = "api"
-    inherit_env: list[str] = field(default_factory=list)  # 親の環境の値を使う経路の変数（名前だけ）
+    inherit_env: list[str] = field(default_factory=list)  # 親の環境から試行に渡す変数（名前だけ。許可リストに足す）
+    sandbox: str = "bwrap"  # SANDBOXES
+    sandbox_ro: list[str] = field(default_factory=list)  # 隔離の中に読み取り専用で見せる追加のパス（leak 検査でも許可）
     isolation_settings: bool = True
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -341,8 +349,20 @@ def load_task(path: Path) -> Task:
         allow_tools=_str_list(path, "allow_tools", d.get("allow_tools")),
         deny_tools=_str_list(path, "deny_tools", d.get("deny_tools")),
         graders=[parse_grader(path, i, g) for i, g in enumerate(graders)],
-        paired_negative=d.get("paired_negative"), split=split, family=family, calibration=calibration, raw=d,
+        paired_negative=d.get("paired_negative"), split=split, family=family, calibration=calibration,
+        allow_test_changes=bool(d.get("allow_test_changes", False)), canaries=_str_list(path, "canaries", d.get("canaries")),
+        leak_patterns=_patterns(path, d.get("leak_patterns")), raw=d,
     )
+
+
+def _patterns(path: Path, v: Any) -> list[str]:
+    out = _str_list(path, "leak_patterns", v)
+    for x in out:
+        try:
+            re.compile(x)
+        except re.error as e:
+            raise SpecError(f"{path}: leak_patterns の {x!r} は正規表現として読めません: {e}") from e
+    return out
 
 
 def load_profile(path: Path) -> Profile:
@@ -377,10 +397,13 @@ def load_profile(path: Path) -> Profile:
     if billing not in BILLINGS:
         raise SpecError(f"{path}: billing は {' / '.join(BILLINGS)}（月の予算に数えるのは api だけ）")
     inherit = _str_list(path, "inherit_env", d.get("inherit_env"))
-    unknown = [n for n in inherit if n not in ROUTE_VARS[d["agent"]]]
-    if unknown:
-        raise SpecError(f"{path}: inherit_env の {unknown} は {d['agent']} の経路を変える変数ではありません"
-                        f"（書けるもの: {', '.join(ROUTE_VARS[d['agent']])}）")
+    bad = [n for n in inherit if not ENV_NAME_RE.match(n)]
+    if bad:
+        raise SpecError(f"{path}: inherit_env には環境変数の名前だけを書きます（値は書かない）: {bad}")
+    sbx = d.get("sandbox", "bwrap")
+    sbx = {False: "off", True: "bwrap"}.get(sbx, sbx) if isinstance(sbx, bool) else sbx  # YAML は off を false と読む
+    if sbx not in SANDBOXES:
+        raise SpecError(f"{path}: sandbox は {' / '.join(SANDBOXES)}")
     sandbox = d.get("codex_sandbox", "workspace-write")
     if sandbox not in ("read-only", "workspace-write", "danger-full-access"):
         raise SpecError(f"{path}: codex_sandbox は read-only / workspace-write / danger-full-access")
@@ -393,7 +416,8 @@ def load_profile(path: Path) -> Profile:
         permission_mode=d.get("permission_mode"), codex_sandbox=sandbox, pricing=pricing,
         hash_paths=_str_list(path, "hash_paths", d.get("hash_paths")),
         copy_credentials=bool(d.get("copy_credentials", False)),
-        isolation_settings=bool(d.get("isolation_settings", True)), billing=billing, inherit_env=inherit, raw=d,
+        isolation_settings=bool(d.get("isolation_settings", True)), billing=billing, inherit_env=inherit,
+        sandbox=sbx, sandbox_ro=_str_list(path, "sandbox_ro", d.get("sandbox_ro")), raw=d,
     )
 
 

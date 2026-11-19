@@ -12,7 +12,8 @@ from pathlib import Path
 import yaml
 
 from . import __version__
-from .isolation import ancestor_instructions, missing_inherited, passed_claude_vars, route_variables
+from .credentials import describe as describe_credentials, inspect as inspect_credentials, preflight as credentials_preflight, source_path
+from .isolation import ancestor_instructions, bwrap_problem, dropped_vars, missing_inherited, route_variables, sandbox_mode
 from .metrics import EFFICIENCY_METRICS, HARD_CATEGORIES, gate, holdout_comparisons, promote, promote_efficiency
 from .report import render
 from .costs import resolve
@@ -278,9 +279,10 @@ def _route_warnings(profiles) -> list[str]:
         missing = missing_inherited(p, dict(os.environ))
         if missing:
             w.append(f"{p.id}: inherit_env で宣言した {missing} が設定されていません（このままでは試行に渡らず、トークンならログインできません）。同じ端末で export してから実行してください")
-        inherited = route_variables(p, dict(os.environ))[1]
-        if inherited:
-            w.append(f"{p.id}: 親の環境から {inherited} を宣言なしに引き継ぎます。意図して親の値を使うならプロファイルの inherit_env に名前だけ書き（値は書かない）、不要なら env_unset に入れてください（doctor で確認できます）")
+        undeclared = route_variables(p, dict(os.environ))[1]
+        if undeclared:
+            w.append(f"{p.id}: 親の環境にある {undeclared} は宣言されていないので試行に渡しません（環境変数は許可リスト）。"
+                     "親の値を使うならプロファイルの inherit_env に名前だけ書いてください（値は書かない。doctor で確認できます）")
     return w
 
 
@@ -513,11 +515,26 @@ def cmd_doctor(a) -> int:
             static_ok = False
             print(f"  NG: inherit_env で宣言した {missing} が設定されていません（このままでは試行に渡らず、トークンならログインできません）。同じ端末で export してから実行してください")
         if inherited:
-            static_ok = False
-            print(f"  NG: 親の環境から経路を変える変数 {inherited} を宣言なしに引き継ぎます（値は表示しません）。意図して親の値を使うならプロファイルの inherit_env に名前だけ書き（値は書かない）、不要なら env_unset に入れてください")
-        passed = passed_claude_vars(p, dict(os.environ))
-        if passed:
-            print(f"  注意: 親の環境から試行に渡る Claude Code の変数（経路以外）: {passed}。意図しない設定ならプロファイルの env_unset に入れてください")
+            print(f"  注意: 親の環境にある経路の変数 {inherited} は宣言されていないので試行に渡しません（値は表示しません。環境変数は許可リスト）。"
+                  "親の値を使うならプロファイルの inherit_env に名前だけ書いてください（値は書かない）")
+        dropped = dropped_vars(p, dict(os.environ))
+        if dropped:
+            print(f"  注意: 親の環境にある {dropped} は試行に渡しません。組織で意図して設定したもの（クライアント証明書など）なら inherit_env に書いてください")
+        mode = sandbox_mode(p)
+        if mode == "bwrap":
+            problem = bwrap_problem()
+            static_ok &= problem is None
+            print(f"  隔離: bwrap（{'使えます' if problem is None else 'NG: ' + problem + '。入れるか、sandbox: off と書く'}）")
+        else:
+            print("  隔離: " + ("なし（sandbox: off。結果に記録され、verdict が警告します）" if mode == "off"
+                              else "なし（bwrap は Linux だけ。試行の外を見た形跡の検査だけ行います）"))
+        if p.copy_credentials:
+            src = source_path(p.agent)
+            print(f"  認証の複製: {describe_credentials(inspect_credentials(p.agent, src)) if src else '対象外'}")
+            msg = credentials_preflight(p.agent, src) if src else None
+            if msg:
+                static_ok = False
+                print(f"  NG: {msg}")
     leaks = ancestor_instructions(Path(a.out))
     if leaks:
         static_ok = False

@@ -13,8 +13,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from harness_eval.cli import main  # noqa: E402
+from fake_env import SUFFIX  # noqa: E402
 
 FAKE = ROOT / "tests" / "fake_agents"
 
@@ -34,7 +36,7 @@ class E2E(unittest.TestCase):
         # 実物の代わりに偽 CLI を使うようプロファイルを書き換える
         for f in (ex / "profiles").glob("*.yaml"):
             fake = FAKE / ("fake_claude.py" if "claude" in f.name else "fake_codex.py")
-            f.write_text(f.read_text(encoding="utf-8") + f"\nexecutable: [{json.dumps(sys.executable)}, {json.dumps(str(fake))}]\n",
+            f.write_text(f.read_text(encoding="utf-8") + f"\nexecutable: [{json.dumps(sys.executable)}, {json.dumps(str(fake))}]\n" + SUFFIX,
                          encoding="utf-8")
         self.ex = ex
         self.out = self.tmp / "results"
@@ -255,7 +257,7 @@ class E2E(unittest.TestCase):
             fake = FAKE / ("fake_claude.py" if agent == "claude_code" else "fake_codex.py")
             (self.ex / "profiles" / f"{name}.yaml").write_text(
                 f"id: {name}\nagent: {agent}\ninstall: [{{copy: ../harnesses/hooked/settings.json, to: '{{config_dir}}/settings.json'}}]\n"
-                f"executable: [{json.dumps(sys.executable)}, {json.dumps(str(fake))}]\n", encoding="utf-8")
+                f"executable: [{json.dumps(sys.executable)}, {json.dumps(str(fake))}]\n" + SUFFIX, encoding="utf-8")
         t = self.ex / "tasks" / "hook.yaml"
         t.write_text("id: hook\ntargets: [claude_code, codex]\nprompt: 17 × 23 は？\nallow_tools: [Read]\n"
                      "graders: [{type: regex, pattern: '391'}, {type: hook_used, hook: 'SessionStart:.*', outcome: success}]\n",
@@ -299,17 +301,19 @@ class E2E(unittest.TestCase):
         self.assertEqual(json.loads(led.read_text(encoding="utf-8").splitlines()[-1])["billing"], "subscription")
 
     def test_doctor_reports_inherited_route_variables(self):
-        """親の環境から経路を変える変数（API キーなど）を引き継ぐと NG。値は表示しない。"""
+        """環境変数は許可リスト: 親の環境にある経路の変数（API キーなど）も、宣言しなければ試行に渡さない。doctor は名前だけ出す。"""
         from harness_eval.isolation import ROUTE_VARS
         clean = {k: v for k, v in os.environ.items() if k not in {x for xs in ROUTE_VARS.values() for x in xs}}
         with mock.patch.dict(os.environ, {**clean, "CLAUDE_CODE_CLIENT_CERT": "/c.pem"}, clear=True):
             code, out = run_cli("doctor", "--profiles", str(self.ex / "profiles"), "--out", str(self.out))
-            self.assertEqual(code, 0, out)  # 経路以外で試行に渡る変数は注意として名前を出すだけ（NG にしない）
+            self.assertEqual(code, 0, out)  # 渡さない変数は注意として名前を出すだけ（NG にしない）
             self.assertIn("CLAUDE_CODE_CLIENT_CERT", out)
+            self.assertIn("試行に渡しません", out)
             os.environ["ANTHROPIC_API_KEY"] = "sk-secret-value"
             code, out = run_cli("doctor", "--profiles", str(self.ex / "profiles"), "--out", str(self.out))
-        self.assertEqual(code, 1, out)
+        self.assertEqual(code, 0, out)  # 黙って引き継ぐことはもうないので NG ではない（宣言しなければ渡らない、と知らせる）
         self.assertIn("ANTHROPIC_API_KEY", out)
+        self.assertIn("宣言されていないので試行に渡しません", out)
         self.assertIn("inherit_env", out)  # 直し方は「名前を宣言」（値をプロファイルに書かせない）
         self.assertNotIn("sk-secret-value", out)
         # 親の値を使うと名前だけで宣言すれば OK（値はプロファイルにもログにも出ない）

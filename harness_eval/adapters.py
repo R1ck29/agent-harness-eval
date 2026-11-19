@@ -243,6 +243,10 @@ class CodexAdapter(_Adapter):
                           # 一時ホームの hooks は未信頼のため、これがないと警告なしで実行されない（0.163.0 で実測）。
                           # 普段は一度信頼すれば実行されるので、その状態を再現する
                           "--dangerously-bypass-hook-trust"]
+        # Web 検索は Claude と条件をそろえる: Claude はタスクの allow_tools に WebSearch / WebFetch がなければ使えないので、
+        # Codex もそのときは切る（既定では Codex だけ検索できる状態だった）
+        web = "live" if {"WebSearch", "WebFetch"} & set(task.allow_tools) else "disabled"
+        cmd += ["-c", f'web_search="{web}"']
         if profile.model:
             cmd += ["-m", profile.model]
         return cmd + (profile.extra_args if extra_args is None else extra_args) + ["-"]

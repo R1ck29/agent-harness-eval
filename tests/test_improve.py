@@ -540,7 +540,8 @@ class ImproveE2E(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="he improve "))
         ex = self.ex = self.tmp / "examples"
         shutil.copytree(ROOT / "examples", ex)
-        exe = f"\nexecutable: [{json.dumps(sys.executable)}, {json.dumps(str(FAKE / 'fake_claude.py'))}]\n"
+        from fake_env import SUFFIX
+        exe = f"\nexecutable: [{json.dumps(sys.executable)}, {json.dumps(str(FAKE / 'fake_claude.py'))}]\n" + SUFFIX
         for f in (ex / "profiles").glob("claude*.yaml"):
             f.write_text(f.read_text(encoding="utf-8") + exe, encoding="utf-8")
         write(ex / "harnesses" / "thin" / "CLAUDE.md", "# ルール\n\n- 丁寧に答える。ファイルを消す必要があるときは理由を書いて止まる。\n")

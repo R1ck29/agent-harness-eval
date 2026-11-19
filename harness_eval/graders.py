@@ -87,7 +87,8 @@ def _count_check(n: int, params: dict[str, Any]) -> tuple[bool, str]:
     return ok, f"{n} 回（期待: {rng}）"
 
 
-def grade_one(g: Grader, rec: TrialRecord, workdir: Path, task_dir: Path | None = None) -> tuple[bool, str]:
+def grade_one(g: Grader, rec: TrialRecord, workdir: Path, task_dir: Path | None = None,
+              tmp_dir: Path | None = None) -> tuple[bool, str]:
     t, p = g.type, g.params
     if t == "file_exists":
         f = _safe_path(workdir, p["path"])
@@ -137,6 +138,8 @@ def grade_one(g: Grader, rec: TrialRecord, workdir: Path, task_dir: Path | None 
         rec_path = workdir.parent / "record_for_grader.json"
         rec_path.write_text(json.dumps(rec.to_dict(), ensure_ascii=False), encoding="utf-8")
         env = {**os.environ, "TRIAL_WORKDIR": str(workdir), "TRIAL_RECORD": str(rec_path)}
+        if tmp_dir is not None:  # 採点の一時ファイル（隠しテストを当てた木など）は試行ごとのフォルダへ。採点のあとに消す
+            env.update({"TMPDIR": str(tmp_dir), "TEMP": str(tmp_dir), "TMP": str(tmp_dir)})
         try:
             r = subprocess.run(cmd, shell=True, cwd=workdir, env=env, capture_output=True, text=True,
                                timeout=int(p.get("timeout_s", 120)), stdin=subprocess.DEVNULL)
@@ -163,8 +166,9 @@ class JudgeUnavailable(Exception):
 
 
 def grade_all(graders: list[Grader], rec: TrialRecord, workdir: Path, judge: JudgeConfig,
-              task_dir: Path | None = None) -> None:
-    """rec.grader_results / score / judge_cost_usd を埋める。"""
+              task_dir: Path | None = None, tmp_dir: Path | None = None, precheck: dict[str, Any] | None = None) -> None:
+    """rec.grader_results / score / judge_cost_usd を埋める。
+    precheck: 採点の前の検査の結果（見えているテストの改ざんなど）。不合格の 1 行として末尾に足し、LLM 判定は走らせない。"""
     results: list[dict[str, Any]] = []
     for g in graders:
         if g.type == "llm":
@@ -176,7 +180,7 @@ def grade_all(graders: list[Grader], rec: TrialRecord, workdir: Path, judge: Jud
             results.append({**base, "status": "not_run", "reason": "hooks の実行記録がないため判定できません（Codex）"})
             continue
         try:
-            ok, why = grade_one(g, rec, workdir, task_dir)
+            ok, why = grade_one(g, rec, workdir, task_dir, tmp_dir)
             if g.negate:
                 ok = not ok
             status = "pass" if ok else "fail"
@@ -185,6 +189,8 @@ def grade_all(graders: list[Grader], rec: TrialRecord, workdir: Path, judge: Jud
         results.append({**base, "status": status, "reason": why})
     # LLM 判定を省くのは「配布物の有無に関係なく既に不合格」のときだけ。harness_only の不合格（基準側では当然）で
     # 省くと、基準との比較用スコアが出せなくなる
+    if precheck is not None:  # 判定の番号（graders の位置）をずらさないよう末尾に足す
+        results.append(precheck)
     code_ok = all(r is None or r["harness_only"] or r["status"] in ("pass", "not_run") for r in results) and rec.error is None
     jcost = 0.0
     jcost_known = True

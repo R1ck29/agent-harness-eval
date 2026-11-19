@@ -20,7 +20,7 @@ from harness_eval.metrics import decide, deltas, gate, paired_bootstrap, pass_ha
 from harness_eval.runner import append_spend, month_spent, schedule  # noqa: E402
 from harness_eval.adapters import older_than_verified  # noqa: E402
 from harness_eval.isolation import (INHERITED_UNSET, ancestor_instructions, missing_inherited,  # noqa: E402
-                                    passed_claude_vars, route_signature, route_variables)
+                                    dropped_vars, route_signature, route_variables)
 from harness_eval.record import TrialRecord  # noqa: E402
 from harness_eval.spec import (ROUTE_VARS, Grader, SpecError, lint, load_profile, load_profiles, load_task,  # noqa: E402
                                load_tasks)
@@ -515,7 +515,10 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("model-a", s1)
         self.assertNotEqual(route_signature(d, parent), route_signature(d, {k: v for k, v in parent.items() if k != "ANTHROPIC_API_KEY"}))
         with self.assertRaisesRegex(SpecError, "inherit_env"):
-            load_profile(write(tmp / "e.yaml", "id: e\nagent: codex\ninherit_env: [ANTHROPIC_API_KEY]\n"))  # codex の経路の変数ではない
+            load_profile(write(tmp / "e.yaml", "id: e\nagent: codex\ninherit_env: ['OPENAI_API_KEY=sk-x']\n"))  # 名前だけ（値は書かない）
+        # 経路以外の変数（社内の証明書の場所など）も inherit_env で渡せる（環境変数は許可リスト）
+        x = load_profile(write(tmp / "x.yaml", "id: x\nagent: codex\ninherit_env: [SSL_CERT_FILE, MY_CA_DIR]\n"))
+        self.assertEqual(x.inherit_env, ["SSL_CERT_FILE", "MY_CA_DIR"])
 
     def test_missing_inherited(self):
         """inherit_env で宣言したのに親の環境にない（空も含む）変数。実行するとログインできないので先に知らせる。"""
@@ -527,16 +530,19 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(missing_inherited(p, {"CLAUDE_CODE_OAUTH_TOKEN": ""}), ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"])
         self.assertEqual(missing_inherited(p, {"CLAUDE_CODE_OAUTH_TOKEN": "t", "ANTHROPIC_BASE_URL": "u"}), ["ANTHROPIC_BASE_URL"])
 
-    def test_passed_claude_vars(self):
-        """経路以外で親の環境から試行に渡る Claude Code の変数（名前だけ）。消す親セッションの変数・env_unset・env で決めたものは除く。"""
+    def test_dropped_vars(self):
+        """親の環境にあるが試行に渡さない、そのエージェントの設定になりうる変数（名前だけ）。消す親セッションの変数・env_unset・
+        env で決めたもの・経路の変数（route_variables が出す）・inherit_env で渡すものは除く。"""
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
         p = load_profile(write(tmp / "p.yaml", "id: p\nagent: claude_code\nenv: {CLAUDE_CODE_MAX_OUTPUT_TOKENS: '1'}\n"
                                                "env_unset: [CLAUDE_CODE_DROP]\n"))
         parent = {"CLAUDE_CODE_CLIENT_CERT": "/c.pem", "CLAUDE_EFFORT": "high", "CLAUDE_CODE_DROP": "1",
                   "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "9", "CLAUDE_CODE_OAUTH_TOKEN": "t", "PATH": "/bin"}
-        self.assertEqual(passed_claude_vars(p, parent), ["CLAUDE_CODE_CLIENT_CERT"])
-        self.assertEqual(passed_claude_vars(load_profile(write(tmp / "c.yaml", "id: c\nagent: codex\n")), parent), [])
+        self.assertEqual(dropped_vars(p, parent), ["CLAUDE_CODE_CLIENT_CERT"])
+        self.assertEqual(dropped_vars(load_profile(write(tmp / "c.yaml", "id: c\nagent: codex\n")), parent), [])  # Claude の変数は出さない
+        q = load_profile(write(tmp / "q.yaml", "id: q\nagent: claude_code\ninherit_env: [CLAUDE_CODE_CLIENT_CERT]\n"))
+        self.assertNotIn("CLAUDE_CODE_CLIENT_CERT", dropped_vars(q, parent))
         # 経路の変数を消す一覧に入れると、宣言なしの引き継ぎ（doctor の NG）も inherit_env も効かなくなる
         self.assertEqual(set(INHERITED_UNSET) & {n for ns in ROUTE_VARS.values() for n in ns}, set())
 
@@ -615,14 +621,23 @@ install:
   - {run: '{python} -c "import os,pathlib; pathlib.Path(os.environ[\\"CLAUDE_CONFIG_DIR\\"],\\"ran\\").write_text(\\"1\\")"'}
 """))
         tp = make_trial_paths(self.tmp / "trial", ".claude")
-        # 親セッション（デスクトップアプリなど）の変数は消し、組織で意図して設定した変数（クライアント証明書など）は渡す
+        # 環境変数は許可リスト: 親セッション（デスクトップアプリなど）の変数・秘密・宣言していない設定は渡さない。
+        # 組織で意図して設定した変数（クライアント証明書など）は inherit_env に書いたときだけ渡す
         parent = {"CLAUDECODE": "1", "CLAUDE_EFFORT": "low", "CLAUDE_CODE_MESSAGING_SOCKET": "/s", "DROP_ME": "1",
-                  "CLAUDE_CODE_CLIENT_CERT": "/c.pem"}
+                  "CLAUDE_CODE_CLIENT_CERT": "/c.pem", "GH_TOKEN": "ghp_x", "ANTHROPIC_API_KEY": "sk-x", "LC_ALL": "C.UTF-8",
+                  "HTTPS_PROXY": "http://proxy:8080", "TMPDIR": "/tmp/parent"}
         with mock.patch.dict(os.environ, parent):
             env = build_env(p, tp, "CLAUDE_CONFIG_DIR")
-        for k in ("CLAUDECODE", "CLAUDE_EFFORT", "CLAUDE_CODE_MESSAGING_SOCKET", "DROP_ME"):
+            q = load_profile(write(self.tmp / "q.yaml", "id: q\nagent: claude_code\ninherit_env: [CLAUDE_CODE_CLIENT_CERT, DROP_ME]\n"
+                                                        "env_unset: [DROP_ME]\n"))
+            env_q = build_env(q, tp, "CLAUDE_CONFIG_DIR")
+        for k in ("CLAUDECODE", "CLAUDE_EFFORT", "CLAUDE_CODE_MESSAGING_SOCKET", "DROP_ME", "CLAUDE_CODE_CLIENT_CERT", "GH_TOKEN",
+                  "ANTHROPIC_API_KEY"):
             self.assertNotIn(k, env)
-        self.assertEqual(env["CLAUDE_CODE_CLIENT_CERT"], "/c.pem")
+        self.assertEqual((env["PATH"], env["LC_ALL"], env["HTTPS_PROXY"]), (os.environ["PATH"], "C.UTF-8", "http://proxy:8080"))
+        self.assertEqual(env["TMPDIR"], str(tp.tmp))  # 試行の一時フォルダ（親の TMPDIR ではない）
+        self.assertEqual(env_q["CLAUDE_CODE_CLIENT_CERT"], "/c.pem")
+        self.assertNotIn("DROP_ME", env_q)  # env_unset は inherit_env より強い
         self.assertEqual(env["HOME"], str(tp.home))
         self.assertEqual(env["USERPROFILE"], str(tp.home))
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(tp.config_dir))

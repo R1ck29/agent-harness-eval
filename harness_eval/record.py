@@ -10,7 +10,7 @@ from typing import Any
 
 # 集計から除外する異常終了（評価対象の失敗ではなく、環境起因）
 EXCLUDED_ERRORS = {"rate_limit", "usage_limit", "overloaded", "auth", "api_error", "network", "launch_failed", "harness_error", "judge_error",
-                   "not_graded", "interrupted"}
+                   "not_graded", "interrupted", "leak"}
 # 失敗として数える異常終了
 
 
@@ -75,6 +75,7 @@ class TrialRecord:
     cmp_score: float | None = None
     cmp_passed: bool | None = None
     valid: bool = True
+    invalid_reason: str | None = None  # 無効な試行の理由（error の種類と同じ。leak = 評価の答え・試行の外を見た）
     error: dict[str, str] | None = None
     failure_tags: list[str] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict)

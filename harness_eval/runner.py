@@ -14,6 +14,7 @@ import json
 import os
 import platform
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -25,21 +26,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import __version__
+from . import __version__, credentials
 from .adapters import classify_stderr, get_adapter
+from .cheatproof import capture_tests, leak_check, summarize_hits, tamper_check, tamper_result
 from .costs import empty_usage, usage_summary
 from .graders import JudgeConfig, grade_all, judge_content, rescore
 from .judge_phase import JudgePhase
 from .judging import FAMILIES, JudgeSettings, make_settings
-from .isolation import (ancestor_instructions, build_env, copy_credentials, fill, kill_running, make_trial_paths, placeholders,
-                        route_signature, run_install, run_process, snapshot)
+from .isolation import (ancestor_instructions, build_env, bwrap_problem, copy_credentials, fill, kill_running, make_trial_paths,
+                        placeholders, release_home, route_signature, run_install, run_process, sandbox_cmd, sandbox_mode, snapshot)
 from .metrics import summarize
 from .record import EXCLUDED_ERRORS, TrialRecord
-from .spec import NO_SPLIT, Profile, SpecError, Task, split_mixing
+from .spec import NO_SPLIT, ROUTE_VARS, Profile, SpecError, Task, split_mixing
 
 NOT_RUN_ERRORS = {"budget_stop"}
 
-CACHE_SCHEMA = "6"  # 試行レコードの形式を変えたら上げる（古いキャッシュを使わないため）。6: LLM 判定を試行のあとにまとめて行う
+CACHE_SCHEMA = "7"  # 試行レコードの形式を変えたら上げる（古いキャッシュを使わないため）。7: 隔離・leak・tamper・環境変数の許可リスト
 
 
 @dataclass
@@ -291,7 +293,8 @@ class Runner(JudgePhase):
 
     def judge_route_profiles(self) -> list[Profile]:
         """LLM 判定が使う認証の出どころ（借りるプロファイル。なければ親の環境だけの仮のプロファイル）。経路の確認に使う。"""
-        return [self.judge_profiles.get(f) or Profile(id=f"LLM 判定（{f}・親の環境）", agent=f, path=self.run_dir / "judge.yaml")
+        return [self.judge_profiles.get(f) or Profile(id=f"LLM 判定（{f}・親の環境）", agent=f, path=self.run_dir / "judge.yaml",
+                                                      inherit_env=list(ROUTE_VARS[f]))
                 for f in (self.judge.used_families() if self.judge else [])]
 
     def _pick_judge_profile(self, profiles: list[Profile], family: str) -> Profile | None:
@@ -379,8 +382,8 @@ class Runner(JudgePhase):
         try:
             return self._execute_in(task, profile, trial, key, adapter, tdir, tp)
         finally:
-            # 一時ホームは認証情報の複製を含みうるので、例外・中断（Ctrl-C）でも必ず消す
-            shutil.rmtree(tp.home, ignore_errors=True)
+            # 一時ホームは認証情報の複製を含みうるので、例外・中断（Ctrl-C）でも必ず消す（試行の中で更新された認証は先に書き戻す）
+            release_home(tp, self.opt.log)
 
     def _execute_in(self, task: Task, profile: Profile, trial: int, key: str, adapter, tdir: Path, tp) -> TrialRecord:
         rec = self._record(task, profile, trial, key, trial_dir=str(tdir), started_at=datetime.now(timezone.utc).isoformat())
@@ -402,8 +405,11 @@ class Runner(JudgePhase):
             rec.valid = False
             return rec
         before = snapshot(tp.workdir)
+        tests_before = capture_tests(tp.workdir)  # 改ざんの基準（エージェントを起動する直前の作業ツリー）
         ph = placeholders(tp, profile)
         cmd = adapter.build_cmd(task, profile, tp.workdir, [fill(a, ph) for a in profile.extra_args])
+        if sandbox_mode(profile) == "bwrap":
+            cmd = sandbox_cmd(cmd, tp, env, profile, n_exe=len(adapter.exe))
         if self.interrupted.is_set():  # 準備（install など）の間に Ctrl-C された → エージェントを起動しない
             rec.valid, rec.error = False, {"type": "interrupted", "message": "Ctrl-C で中断"}
             return rec
@@ -432,13 +438,32 @@ class Runner(JudgePhase):
         rec.duration_ms = parsed.duration_ms or pr.wall_ms
         rec.num_turns, rec.tokens = parsed.num_turns, parsed.tokens
         rec.meta, rec.warnings, rec.skill_detection = parsed.meta, parsed.warnings, parsed.skill_detection
+        rec.meta["sandbox"] = sandbox_mode(profile)
+        leak = leak_check(rec.tool_calls, "\n".join(out_lines), tdir, self._protected(task), self._sandbox_allow(profile, tp),
+                          task.canaries, task.leak_patterns)
+        if leak["warnings"]:
+            rec.meta["leak_warnings"] = leak["warnings"][:5]
+        if leak["hits"]:  # 答えを見た・見ようとした → 合格にも不合格にも数えない（他のエラーより優先）
+            rec.meta["leak"] = leak["hits"][:10]
+            etype, emsg = "leak", "評価の答え・試行の外を参照: " + summarize_hits(leak)
         if etype:
             rec.error = {"type": etype, "message": (emsg or "")[:1000]}
         rec.valid = etype not in EXCLUDED_ERRORS
+        rec.invalid_reason = None if rec.valid else etype
         if rec.valid:
-            # 決定的な検査を先に行い、LLM 判定は合格した出力の判定入力（最小）だけを積んでおく。判定は全試行のあと（_judge_phase）
-            grade_all(task.graders, rec, tp.workdir, JudgeConfig(enabled=self.opt.llm, run=None, defer=True), task.path.parent)
-            if task.calibration and rec.error is None:
+            tamper = [] if task.allow_test_changes else tamper_check(tests_before, tp.workdir)
+            if tamper:
+                rec.meta["tamper"] = tamper[:10]
+            # 決定的な検査を先に行い、LLM 判定は合格した出力の判定入力（最小）だけを積んでおく。判定は全試行のあと（_judge_phase）。
+            # 採点の一時ファイルは試行ごとのフォルダに集め、終わったら消す（隠しテストを当てた木を OS の /tmp に残さない）
+            gtmp = tp.root / "grade_tmp"
+            gtmp.mkdir(exist_ok=True)
+            try:
+                grade_all(task.graders, rec, tp.workdir, JudgeConfig(enabled=self.opt.llm, run=None, defer=True), task.path.parent,
+                          tmp_dir=gtmp, precheck=tamper_result(tamper) if tamper else None)
+            finally:
+                shutil.rmtree(gtmp, ignore_errors=True)
+            if task.calibration and rec.error is None and not tamper:
                 c = task.calibration
                 content = judge_content(str(c.get("focus", "final")), int(c.get("max_chars", 20000)), rec, tp.workdir)
                 picked = [rec.grader_results[i] for i in c["graders"]] if c.get("graders") else rec.grader_results
@@ -449,6 +474,28 @@ class Runner(JudgePhase):
             self._finalize(rec, etype)
         (tp.root / "record_for_grader.json").unlink(missing_ok=True)
         return rec
+
+    def _protected(self, task: Task) -> list[Path]:
+        """leak 検査で守る場所: 本物のホーム・--out・キャッシュ・AHE 自身・タスクのフォルダ・フィクスチャの元・採点スクリプト、
+        とそれらの共通の親（examples/ のように参照解・採点が並ぶ評価の置き場所）。"""
+        mats = [task.path.parent] + ([task.fixture] if task.fixture else [])
+        for g in task.graders:
+            if g.type == "command":
+                run = str(g.params.get("run", "")).replace("{task_dir}", str(task.path.parent))
+                mats += [Path(t).resolve().parent for t in re.findall(r"[\w./\\:-]+\.(?:py|sh|ps1|js)", run)
+                         if Path(t).is_absolute() and Path(t).exists()]
+        try:
+            common = Path(os.path.commonpath([str(m) for m in mats]))
+            if len(common.parts) >= 3 and common != Path.home():
+                mats.append(common)
+        except ValueError:  # 別のドライブ
+            pass
+        return [Path.home(), self.out_dir, self.opt.cache_dir, Path(__file__).resolve().parents[1], *mats]
+
+    @staticmethod
+    def _sandbox_allow(profile: Profile, tp) -> list[Path]:
+        ph = placeholders(tp, profile)
+        return [Path(fill(x, ph)) for x in profile.sandbox_ro]
 
     def _finalize(self, rec: TrialRecord, etype: str | None) -> None:
         """grader_results から合否を決める。判定待ち（pending）が残っていれば、まだ決めない。"""
@@ -512,7 +559,22 @@ class Runner(JudgePhase):
         sink(rec)
         return rec
 
+    def preflight(self) -> None:
+        """試行を 1 つも始める前の確認。隔離（bwrap）が使えない・複製する認証の期限が近いなら止める（SpecError）。"""
+        profiles = list({p.id: p for _, p in self.pairs}.values())
+        boxed = [p.id for p in profiles if sandbox_mode(p) == "bwrap"]
+        problem = bwrap_problem() if boxed else None
+        if problem:
+            raise SpecError(f"{problem}。試行の隔離（{boxed} の sandbox: bwrap。既定）ができません。bwrap を入れるか、"
+                            "隔離しない場合はプロファイルに sandbox: off と書いてください（結果に記録され、verdict が警告します）")
+        lenders = [p for p in profiles + [x for x in self.judge_profiles.values() if x] if p.copy_credentials]
+        for agent in sorted({p.agent for p in lenders}):
+            msg = credentials.preflight(agent)
+            if msg:
+                raise SpecError(msg)
+
     def run(self) -> tuple[Path, list[TrialRecord], dict[str, Any]]:
+        self.preflight()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         started = datetime.now(timezone.utc).isoformat()
         records: list[TrialRecord] = []

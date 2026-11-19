@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 from harness_eval.cli import main  # noqa: E402
 from harness_eval.costs import resolve, token_cost  # noqa: E402
 from harness_eval.record import TrialRecord  # noqa: E402
+from fake_env import SUFFIX  # noqa: E402
 
 FAKE = ROOT / "tests" / "fake_agents"
 PY = sys.executable
@@ -38,7 +39,7 @@ class JudgePipeline(unittest.TestCase):
         shutil.copytree(ROOT / "examples", ex)
         for f in (ex / "profiles").glob("*.yaml"):
             fake = FAKE / ("fake_claude.py" if "claude" in f.name else "fake_codex.py")
-            f.write_text(f.read_text(encoding="utf-8") + f"\nexecutable: [{json.dumps(PY)}, {json.dumps(str(fake))}]\n", encoding="utf-8")
+            f.write_text(f.read_text(encoding="utf-8") + f"\nexecutable: [{json.dumps(PY)}, {json.dumps(str(fake))}]\n" + SUFFIX, encoding="utf-8")
         self.ex, self.out, self.cache = ex, self.tmp / "results", self.tmp / "cache"
         self.argv_log, self.prompt_log = self.tmp / "argv.jsonl", self.tmp / "judge_prompts.jsonl"
         self.env = {"FAKE_ARGV_LOG": str(self.argv_log), "FAKE_STATE_DIR": str(self.tmp), "FAKE_JUDGE_PROMPT_LOG": str(self.prompt_log)}

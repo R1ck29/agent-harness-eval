@@ -28,7 +28,7 @@ import yaml
 
 from .adapters import CLAUDE_ISOLATION_SETTINGS, _classify_message, _status_type
 from .graders import grade_all, JudgeConfig
-from .isolation import build_env, copy_credentials, make_trial_paths, run_process
+from .isolation import build_env, copy_credentials, make_trial_paths, parent_env_names, release_home, run_process
 from .record import TrialRecord
 from .spec import Profile, SpecError, Task, load_task
 
@@ -247,7 +247,8 @@ def convert(text: str, exe: list[str], model: str | None, profile: Profile | Non
             feedback: str = "") -> tuple[dict | None, float | None, str]:
     """1 件を書き換える。戻り値: (下書き, 費用, 失敗理由)。一時ホームで起動し、会話は保存させない。"""
     tp = make_trial_paths(work, ".claude")
-    prof = profile or Profile(id="harvest", agent="claude_code", path=work / "p.yaml")
+    # --profile がなければ、これまでどおり親の環境で動かす（書き換え役は評価対象ではないため）
+    prof = profile or Profile(id="harvest", agent="claude_code", path=work / "p.yaml", inherit_env=parent_env_names())
     # 実際の依頼文を含むので、テレメトリでのプロンプト記録は必ず止める
     prof = replace(prof, env_unset=list(prof.env_unset) + ["OTEL_LOG_USER_PROMPTS", "OTEL_LOG_TOOL_DETAILS"])
     try:
@@ -262,6 +263,7 @@ def convert(text: str, exe: list[str], model: str | None, profile: Profile | Non
         pr = run_process(cmd, tp.workdir, env, prompt, tp.stdout, tp.stderr, 600)
         out = tp.stdout.read_text(encoding="utf-8", errors="replace") if tp.stdout.exists() else ""
     finally:
+        release_home(tp)  # 試行の中で更新された認証は本物へ書き戻してから消す
         shutil.rmtree(tp.root, ignore_errors=True)  # 応答は架空化済みだが、念のため残さない
     if pr.launch_error or pr.timed_out:
         return None, None, "起動失敗またはタイムアウト"

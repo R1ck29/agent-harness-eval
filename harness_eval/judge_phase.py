@@ -14,7 +14,7 @@ from typing import Any
 from .adapters import classify_stderr, get_adapter
 from .costs import add_usage, judge_call_estimate, token_cost
 from .graders import JUDGE_PROMPT, JudgeUnavailable, parse_verdict
-from .isolation import build_env, copy_credentials, make_trial_paths, run_process
+from .isolation import build_env, copy_credentials, make_trial_paths, parent_env_names, release_home, run_process
 from .judging import FAMILIES, TIER_MODELS, blind, combine, judge_cache_key, majority, make_settings, pick_calibration
 from .record import TrialRecord
 from .spec import Profile, SpecError
@@ -95,6 +95,8 @@ class JudgePhase:
         adapter = get_adapter(family, src, executable=self._judge_exe(family))
         prof = Profile(id="judge", agent=family, path=src.path if src else self.run_dir / "judge.yaml",
                        env=dict(src.env) if src else {}, env_unset=list(src.env_unset) if src else [],
+                       # 借りるプロファイルがなければ、これまでどおり親の環境で判定する（判定役は評価対象ではなく、入力は標準入力だけ）
+                       inherit_env=list(src.inherit_env) if src else parent_env_names(),
                        copy_credentials=src.copy_credentials if src else False,
                        isolate_home=src.isolate_home if src else True)
         with self.lock:
@@ -109,6 +111,7 @@ class JudgePhase:
             out = tp.stdout.read_text(encoding="utf-8", errors="replace") if tp.stdout.exists() else ""
             err = tp.stderr.read_text(encoding="utf-8", errors="replace") if tp.stderr.exists() else ""
         finally:
+            release_home(tp, self.opt.log)
             shutil.rmtree(tp.root, ignore_errors=True)
         if pr.launch_error:
             raise JudgeUnavailable(f"判定 CLI を起動できません: {pr.launch_error}")

@@ -20,7 +20,7 @@ from . import __version__
 from .adapters import _classify_message, _status_type
 from .candidate import (KINDS, OPS, always_loaded_breakdown, apply_deltas, changed_skills, install_targets, materialize, prechecks,
                         profile_raw, train_specific_strings, write_profile, write_skill_variants)
-from .isolation import TrialPaths, ancestor_instructions, build_env, copy_credentials, make_trial_paths, run_process
+from .isolation import TrialPaths, ancestor_instructions, build_env, copy_credentials, make_trial_paths, release_home, run_process
 from .mockapi import improver_cmd, init_problem, parse_stream, read_isolation_check, special_chars, unusable_path
 from .record import TrialRecord
 from .runner import load_run
@@ -351,6 +351,7 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
         if t.split != "train" or t.content_hash() != meta["tasks"][tid].get("hash"):
             raise SpecError(f"{t.path}: 実行のあとでタスクの分割か中身が変わっています（今の split: {t.split}）。今の定義で train を実行し直してください")
     root = Path(tempfile.mkdtemp(prefix="harness-eval-improve-")).resolve()
+    tp: TrialPaths | None = None
     try:
         tp = make_trial_paths(root / "agent", ".claude")
         leaks = ancestor_instructions(tp.workdir)
@@ -413,6 +414,8 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
                 ensure_ascii=False, indent=2), encoding="utf-8")
             log(f"事前検査で見送りました（理由 {len(built['problems'])} 件）。理由を返して作り直させます（{n + 1}/{o.retries} 回目）")
     finally:
+        if tp is not None:
+            release_home(tp, log)  # 試行の中で更新された認証は本物へ書き戻す
         shutil.rmtree(root, ignore_errors=True)  # 依頼文・トランスクリプトの写しと認証の複製を残さない
     return write_candidate(o, built, report, log)
 
