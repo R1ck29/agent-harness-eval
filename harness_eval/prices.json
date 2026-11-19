@@ -1,0 +1,15 @@
+{
+  "_note": "公開 API 価格（標準ティア、USD / 100 万トークン）。値は下の出典ページで確認したものだけを書く。推測で埋めない。載っていないモデルの費用は「不明」になる。",
+  "fetched_at": "2026-11-19",
+  "sources": {
+    "claude_code": "https://platform.claude.com/docs/en/about-claude/pricing",
+    "codex": "https://developers.openai.com/api/docs/pricing"
+  },
+  "models": {
+    "claude-opus-5-5": {"family": "claude_code", "aliases": ["opus"], "input": 4, "cache_write": 5, "cache_write_ttl": "5m", "cache_read": 0.20, "output": 20},
+    "claude-sonnet-5-5": {"family": "claude_code", "aliases": ["sonnet"], "input": 2, "cache_write": 2.50, "cache_write_ttl": "5m", "cache_read": 0.10, "output": 10},
+    "claude-haiku-5-5": {"family": "claude_code", "aliases": ["haiku"], "input": 0.10, "cache_write": 0.125, "cache_read": 0.01, "output": 0.50, "condition": "プロンプト 100k トークン以下の単価"},
+    "gpt-6.2-astra": {"family": "codex", "aliases": [], "input": 8, "cache_write": 10, "cache_write_ttl": "30m", "cache_read": 0.40, "output": 40, "condition": "プロンプト 272k トークン以下の単価"},
+    "gpt-6.2-sol": {"family": "codex", "aliases": [], "input": 2, "cache_write": 2.50, "cache_write_ttl": "30m", "cache_read": 0.10, "output": 10, "condition": "プロンプト 272k トークン以下の単価"}
+  }
+}

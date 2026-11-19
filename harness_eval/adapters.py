@@ -130,6 +130,16 @@ class ClaudeAdapter(_Adapter):
                 return obj.get("result"), cost, None
         return None, None, "result がありません"
 
+    @staticmethod
+    def judge_tokens(stdout: str) -> dict[str, int | None]:
+        """判定 1 回のトークン（input はキャッシュを含まない Claude の定義）。記録がなければ空。"""
+        for obj in _jsonl(stdout.splitlines(), []):
+            if obj.get("type") == "result" and isinstance(obj.get("usage"), dict):
+                u = obj["usage"]
+                return {"input": u.get("input_tokens"), "cache_read": u.get("cache_read_input_tokens"),
+                        "cache_write": u.get("cache_creation_input_tokens"), "output": u.get("output_tokens")}
+        return {}
+
     def parse(self, lines: Iterable[str], profile: Profile | None = None) -> ParsedRun:
         r = ParsedRun(hook_calls=[])
         pending: dict[str, ToolCall] = {}
@@ -244,6 +254,10 @@ class CodexAdapter(_Adapter):
     def parse_judge(self, stdout: str) -> tuple[str | None, float | None, str | None]:
         r = self.parse(stdout.splitlines())
         return r.final_message, None, (f"{r.error_type}: {r.error_message}" if r.error_type else None)
+
+    def judge_tokens(self, stdout: str) -> dict[str, int | None]:
+        """判定 1 回のトークン（input はキャッシュ読みを含む OpenAI の定義）。"""
+        return dict(self.parse(stdout.splitlines()).tokens)
 
     def parse(self, lines: Iterable[str], profile: Profile | None = None) -> ParsedRun:
         r = ParsedRun(skill_detection="heuristic")

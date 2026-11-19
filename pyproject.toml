@@ -20,6 +20,7 @@ packages = ["harness_eval", "harness_eval._examples"]
 "harness_eval._examples" = "examples"
 
 [tool.setuptools.package-data]
+"harness_eval" = ["prices.json"]
 "harness_eval._examples" = [
   "tasks/*.yaml", "fixtures/*/*", "checks/*.py", "references/*", "references/*/*",
 ]
