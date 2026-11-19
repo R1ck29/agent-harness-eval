@@ -205,12 +205,19 @@ class TestJudgeGuards(unittest.TestCase):
         self.assertTrue(any("弱い判定役" in r for r in v["not_adoptable_reasons"]))
 
     def test_dev_tier_is_provisional(self):
-        j = {**STRONG_JUDGE, "tier": "dev"}
-        v = verdict(runs({f"t{i}": (2, 4) for i in range(8)}, 4), summary(judge=j), rules())
+        j = {**STRONG_JUDGE, "tier": "dev", "models": {"codex": "gpt-6.2-sol"}, "votes": 1,
+             "plan": {"claude_code": {"families": ["codex"], "same_family": False, "both_families": False}}}
+        v = verdict(self.llm_records(), summary(judge=j), rules())
         self.assertEqual((v["conclusion"], v["adoptable"], v["exit_code"]), ("IMPROVED", False, EXIT_NOT_ADOPTABLE))
+        self.assertIn("暫定", v["label"])
         self.assertTrue(any("dev 段階" in r for r in v["not_adoptable_reasons"]))
-        self.assertEqual(verdict(runs({f"t{i}": (2, 4) for i in range(8)}, 4), summary(judge=j),
-                                 rules(required_tier="dev"))["exit_code"], EXIT_NOT_ADOPTABLE)
+        self.assertEqual(verdict(self.llm_records(), summary(judge=j), rules(required_tier="dev"))["exit_code"], EXIT_NOT_ADOPTABLE)
+
+    def test_dev_tier_without_llm_decisions_does_not_matter(self):
+        # LLM 判定が合否を決めていなければ（決定的な採点器だけ）、判定役の段階は結論に効かない
+        j = {**STRONG_JUDGE, "tier": "dev", "models": {"codex": "gpt-6.2-sol"}, "votes": 1}
+        v = verdict(runs({f"t{i}": (2, 4) for i in range(8)}, 4), summary(judge=j), rules())
+        self.assertEqual((v["conclusion"], v["adoptable"], v["exit_code"]), ("IMPROVED", True, 0))
 
     def test_decisive_with_mid_model_or_single_vote_cannot_be_adopted(self):
         for overrides in ({"models": {**STRONG_JUDGE["models"], "codex": "gpt-6.2-sol"}}, {"votes": 1},
@@ -232,10 +239,12 @@ class TestJudgeGuards(unittest.TestCase):
         self.assertEqual(self.check(v, "judge_strength"), "provisional")
 
     def test_disagreement_counts_as_not_passed(self):
+        # 記録の合否が合格のままでも（旧い記録・集計の誤り）、判定不一致の試行は合格として数えない
         recs = self.llm_records(status="judge_disagreement")
-        for r in recs:
-            r.passed = r.cmp_passed = False
+        self.assertTrue(all(r.passed for r in recs if r.profile_id == "cand" and r.cmp_passed))
         v = verdict(recs, summary(judge=STRONG_JUDGE), rules())
+        self.assertEqual(v["candidate_rate"], 0.0)
+        self.assertNotEqual(v["conclusion"], "IMPROVED")
         self.assertEqual(v["judge_disagreements"], len(recs))
         self.assertEqual(self.check(v, "judge_disagreement"), "warn")
 

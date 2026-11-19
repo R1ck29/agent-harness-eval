@@ -16,7 +16,7 @@
   - 対照タスクの後退の疑い（推定 < −control_margin だが区間が 0 をまたぐ）
 
 採用できない（adoptable = False。結論は「暫定」）:
-  - dev 段階の判定役（rules.required_tier より低い段階）
+  - dev 段階の判定役の LLM 判定が合否を決めた試行がある（LLM 判定が合否を決めていなければ、判定役の段階は結論に効かない）
   - LLM 判定が合否を決めた試行があり、判定役が弱い（--allow-weak-judge）・盲検化していない（旧版の結果）
   - 事前登録した規則を変えて集計し直した（事後）
 
@@ -124,7 +124,10 @@ def invalid_reason(r: TrialRecord) -> str | None:
 
 
 def outcome(r: TrialRecord) -> bool | None:
-    """比較に使う合否（配布物がないと通らない判定を除いた合否。旧形式は全判定の合否）。"""
+    """比較に使う合否（配布物がないと通らない判定を除いた合否。旧形式は全判定の合否）。
+    判定役の不一致（judge_disagreement）がある試行は、記録の合否にかかわらず合格として数えない。"""
+    if any(g.get("type") == "llm" and g.get("status") == "judge_disagreement" for g in r.grader_results or []):
+        return False
     return bool(r.cmp_passed) if r.cmp_passed is not None else bool(r.passed)
 
 
@@ -176,15 +179,20 @@ def _judge_checks(j: dict[str, Any], agents: set[str], decided: int, disagreemen
     fail: list[str] = []
     prov: list[str] = []
     tier = j.get("tier")
-    if tier == "dev":
+    below = tier == "dev" and rules.required_tier == "decisive"
+    if below and decided:
         prov.append("dev 段階: 採用判断には使えません（--tier decisive で実行し直してください）")
-        checks.append(_c("tier", "provisional", "dev 段階（中位モデル・1 回）。結論は暫定で、採用・マージの根拠にできません"))
+        checks.append(_c("tier", "provisional", "dev 段階（中位モデル・1 回）の LLM 判定が合否を決めた試行があります。"
+                         "結論は暫定で、採用・マージの根拠にできません"))
+    elif tier == "dev":
+        checks.append(_c("tier", "ok", "dev 段階。ただし LLM 判定が合否を決めた試行はないため、結論は判定役の段階に依存しません"))
     else:
         checks.append(_c("tier", "ok" if tier else "n/a", f"段階 {tier or '記録なし（旧版）'}"))
     models = j.get("models") or {}
     weak = sorted(f"{f}: {m}" for f, m in models.items() if not strength_ok(m, "dev" if tier == "dev" else "decisive"))
-    if weak:
-        checks.append(_c("judge_strength", "provisional", f"弱い判定役（{', '.join(weak)}）。採用判断には使えません"))
+    if weak and j.get("llm", True):
+        checks.append(_c("judge_strength", "provisional" if decided else "warn",
+                         f"弱い判定役（{', '.join(weak)}）。" + ("採用判断には使えません" if decided else "ただし LLM 判定は合否を決めていません")))
     if not decided:
         checks.append(_c("calibration", "n/a", "LLM 判定が合否を決めた試行はありません（校正は不要）"))
         checks.append(_c("judge_family", "n/a", "LLM 判定を使っていないため判定役の系統は結論に影響しません"))
@@ -195,6 +203,8 @@ def _judge_checks(j: dict[str, Any], agents: set[str], decided: int, disagreemen
         checks.append(_c("judge_strength", "ok", f"判定モデル {models}"))
     if tier != "dev" and (j.get("votes") or 0) < TIER_VOTES["decisive"]:
         prov.append("採用判断には 1 系統あたり 3 回以上の判定が必要です")
+    if tier == "dev" and rules.required_tier == "dev":
+        prov.append("dev 段階の判定は、規則で dev を許しても採用判断には使えません")
     if tier not in ("dev", "decisive"):
         prov.append("decisive 段階の記録を確認できません")
     if not j.get("blind"):
@@ -338,7 +348,8 @@ def verdict(records: list[TrialRecord], summary: dict[str, Any], rules: Rules,
             regressed_ctrl = True
             checks.append(_c("controls", "fail", f"対照タスクで後退（差 {c_est:+.2f}、区間 [{c_low:+.2f}, {c_high:+.2f}]）"))
         elif c_est is not None and c_est < -rules.control_margin:
-            inconclusive.append(f"対照タスクの後退の疑い（差 {c_est:+.2f} < −{rules.control_margin:.2f}、区間が 0 をまたぐ）")
+            span = "区間が 0 をまたぐ" if c_low is not None else "区間を計算できない"
+            inconclusive.append(f"対照タスクの後退の疑い（差 {c_est:+.2f} < −{rules.control_margin:.2f}、{span}）")
             checks.append(_c("controls", "fail", inconclusive[-1]))
         elif missing_controls := sorted(t for t in ctrl if t not in cpairs or
                                         min(map(len, cpairs[t])) < rules.min_trials_per_task):
@@ -408,8 +419,9 @@ def _prereg_status(rules: Rules, prereg: dict[str, Any] | None) -> dict[str, Any
     reg = dict(prereg.get("rules") or {})
     if prereg.get("rules_hash") != rules_hash(reg):
         return {"status": "invalid", "hash": rules_hash(cur), "registered_hash": prereg.get("rules_hash")}
-    if reg.get("candidate") is None:
-        reg["candidate"] = cur["candidate"]
+    for k in ("baseline", "candidate"):  # 登録時に未定（自動選択）だった比較の組は、規則の変更とみなさない
+        if reg.get(k) is None:
+            reg[k] = cur[k]
     changed = sorted(k for k in set(reg) | set(cur) if reg.get(k) != cur.get(k))
     if changed:
         return {"status": "post_hoc", "hash": rules_hash(cur), "registered_hash": prereg.get("rules_hash"), "changed": changed,
@@ -440,3 +452,15 @@ def default_baseline(summary: dict[str, Any]) -> str | None:
     """配布物なし（install が空）のプロファイルが 1 つだけならそれ。"""
     empty = [pid for pid, v in (summary.get("meta", {}).get("profiles") or {}).items() if v.get("install_empty")]
     return empty[0] if len(empty) == 1 else None
+
+
+def run_verdicts(records: list[TrialRecord], summary: dict[str, Any], rules: Rules,
+                 prereg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """実行のあとの結論。ベースラインが決まらなければ空。候補が未定ならベースライン以外のすべてのプロファイルについて。"""
+    from dataclasses import replace
+    base = rules.baseline or default_baseline(summary)
+    profiles = sorted({r.profile_id for r in records})
+    if not base or base not in profiles:
+        return []
+    cands = [rules.candidate] if rules.candidate else [p for p in profiles if p != base]
+    return [verdict(records, summary, replace(rules, baseline=base, candidate=c), prereg) for c in cands if c in profiles]
