@@ -30,6 +30,9 @@ if "read-only" in args and "-C" not in args:  # LLM 判定（judge_cmd）: 対�
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": f"{verdict}\n偽の判定"}}, ensure_ascii=False))
     print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 2000, "cached_input_tokens": 1500, "output_tokens": 50}}))
     sys.exit(0)
+if os.environ.get("FAKE_REFRESH_AUTH") and (home / "auth.json").is_file():  # 試行の中での認証の更新（refresh）を再現する
+    (home / "auth.json").write_text(json.dumps({"tokens": {"access_token": "refreshed", "refresh_token": "rt-2"},
+                                                "last_refresh": "2026-11-20T00:00:00Z"}), encoding="utf-8")
 agents_md = (home / "AGENTS.md").read_text(encoding="utf-8") if (home / "AGENTS.md").exists() else ""
 skills_dir = Path(os.environ["HOME"]) / ".agents" / "skills"
 

@@ -242,6 +242,25 @@ def _judge_checks(j: dict[str, Any], agents: set[str], decided: int, disagreemen
     return fail, prov
 
 
+def _integrity(recs: list[TrialRecord], cand: str, inconclusive: list[str]) -> dict[str, Any]:
+    """leak（INVALID。有効率に入る）・tamper（不合格）・隔離なしの試行を数える。隔離のない試行で候補が答えを見に行った形跡があれば、
+    トランスクリプトに出ない読み方もありうるので結論を出さない（隔離ありなら、見に行っても見えないので警告だけ）。"""
+    leak = [r for r in recs if invalid_reason(r) == "leak"]
+    tamper = [r for r in recs if "test_tamper" in (r.failure_tags or [])]
+    modes = [(r.meta or {}).get("sandbox") for r in recs]
+    open_ = sum(1 for m in modes if m in ("off", "unsupported"))
+    unknown = sum(1 for m in modes if m is None)
+    cand_open_leak = [r for r in leak if r.profile_id == cand and (r.meta or {}).get("sandbox") != "bwrap"]
+    parts = [f"答え・試行の外の参照（INVALID） {len(leak)} 件", f"見えているテストの改ざん（不合格） {len(tamper)} 件",
+             f"隔離なしの試行 {open_} 件" + (f"（記録なし {unknown} 件）" if unknown else "")]
+    msg = "、".join(parts)
+    if cand_open_leak:
+        inconclusive.append(f"隔離なしの試行で、候補が評価の答え・試行の外を参照しました（{len(cand_open_leak)} 件）。"
+                            "検出できない読み方もありうるため結論を出しません")
+        return _c("integrity", "fail", inconclusive[-1] + f"（{msg}）")
+    return _c("integrity", "warn" if (leak or tamper or open_) else ("n/a" if unknown == len(recs) else "ok"), msg)
+
+
 def _c(cid: str, status: str, message: str) -> dict[str, Any]:
     return {"id": cid, "status": status, "message": message}
 
@@ -293,6 +312,9 @@ def verdict(records: list[TrialRecord], summary: dict[str, Any], rules: Rules,
         checks.append(_c("errors", "fail", inconclusive[-1]))
     else:
         checks.append(_c("errors", "warn" if bad else "ok", f"無効な試行 {len(bad)}/{len(recs)}（{err_rate:.0%}）{by_type or ''}"))
+
+    # 1b. ズル対策（評価の答えを見た形跡・見えているテストの改ざん・隔離の有無）
+    checks.append(_integrity(recs, cand, inconclusive))
 
     # 2. 比較（対象タスク）
     pairs, one_sided = _task_pairs(recs, base, cand, target)
