@@ -10,8 +10,10 @@
 from __future__ import annotations
 
 import hashlib
+import random
 import re
-from typing import Any, Iterable
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable
 
 FAMILIES = ("claude_code", "codex")
 TIERS = ("dev", "decisive")
@@ -109,3 +111,91 @@ def majority(votes: list[str]) -> str:
         if votes.count(v) * 2 > len(votes):
             return v
     return "unknown"
+
+
+def infer_family(model: str) -> str:
+    """モデル名から系統を推定する（--judge-model に系統を書かなかったとき）。gpt-* は codex、それ以外は claude_code。"""
+    return "codex" if model.strip().lower().startswith(("gpt", "o1", "o3", "o4")) else "claude_code"
+
+
+@dataclass(frozen=True)
+class JudgeSettings:
+    """この実行の判定役の設定（実行前に決め、summary.json の meta.judge と事前登録に残す）。"""
+    tier: str
+    models: dict[str, str | None]
+    votes: int
+    seed: int
+    plan: dict[str, Any]
+    available: tuple[str, ...]
+    forced: str | None = None
+    weak_allowed: bool = False
+    calibration_items: int = 6
+
+    def families_for(self, agent: str) -> list[str]:
+        return list((self.plan.get(agent) or {}).get("families") or [])
+
+    def used_families(self) -> list[str]:
+        return sorted({f for p in self.plan.values() for f in p["families"]})
+
+    def weak(self) -> list[str]:
+        return [f"{f}: {self.models.get(f) or 'CLI の既定'}" for f in self.used_families() if not strength_ok(self.models.get(f), self.tier)]
+
+    def meta(self, calibration: dict[str, Any] | None = None, usage: dict[str, Any] | None = None) -> dict[str, Any]:
+        used = self.used_families()
+        return {"tier": self.tier, "llm": True, "models": {f: self.models.get(f) for f in used},
+                "strength": {f: model_strength(self.models.get(f)) for f in used}, "weak_allowed": self.weak_allowed,
+                "weak": self.weak(), "blind": True, "votes": self.votes, "seed": self.seed, "order": "seed で並べ替えた順",
+                "plan": self.plan, "available": list(self.available), "forced": self.forced,
+                "input": "評価観点 + 最終応答か対象ファイル 1 つ（盲検化済み。会話の記録・ツールの入出力は渡さない）",
+                "calibration": calibration, "usage": usage}
+
+
+def make_settings(tier: str, evaluated: Iterable[str], available: Iterable[str], forced: str | None = None,
+                  model_overrides: dict[str, str] | None = None, votes: int | None = None, allow_weak: bool = False,
+                  seed: int = 0, calibration_items: int = 6) -> JudgeSettings:
+    """段階の既定（モデル・回数・系統）に上書きを当てる。弱い判定役（段階が求める強さ未満）は allow_weak がなければ止める。"""
+    from .spec import SpecError
+    if tier not in TIERS:
+        raise SpecError(f"--tier は {' / '.join(TIERS)}")
+    if votes is not None and votes < 1:
+        raise SpecError("--judge-votes は 1 以上")
+    if calibration_items < 1:
+        raise SpecError("--calibration-items は 1 以上")
+    models: dict[str, str | None] = dict(TIER_MODELS[tier])
+    models.update(model_overrides or {})
+    plan = plan_families(evaluated, available, tier, forced)
+    s = JudgeSettings(tier=tier, models=models, votes=votes or TIER_VOTES[tier], seed=seed, plan=plan,
+                      available=tuple(f for f in FAMILIES if f in set(available)), forced=forced, weak_allowed=allow_weak,
+                      calibration_items=calibration_items)
+    if s.weak() and not allow_weak:
+        raise SpecError(f"判定役のモデルが {tier} 段階には弱すぎます（{', '.join(s.weak())}。{tier} は "
+                        f"{'opus / gpt-6.2-astra' if tier == 'decisive' else 'sonnet / gpt-6.2-sol 以上'}）。"
+                        "承知の上で使うなら --allow-weak-judge（レポートに「弱い判定役」と出て、結論は採用判断に使えません）")
+    return s
+
+
+def combine(majorities: dict[str, str]) -> str:
+    """系統ごとの多数決をまとめる。全系統が合格なら pass。ある系統が合格で別の系統が合格でなければ判定不一致（合格にしない）。"""
+    vals = set(majorities.values())
+    if not vals:
+        return "unknown"
+    if vals == {"pass"}:
+        return "pass"
+    if "pass" in vals:
+        return "judge_disagreement"
+    return "fail" if "fail" in vals else "unknown"
+
+
+def pick_calibration(items: list[Any], n: int, seed: int, answer: Callable[[Any], bool]) -> list[Any]:
+    """校正に使う項目を n 件まで選ぶ（seed で並べ替え、決定的な採点器の合格と不合格を交互に取る。片方に偏らないため）。"""
+    rng = random.Random(f"calibration:{seed}")
+    pos = [x for x in items if answer(x)]
+    neg = [x for x in items if not answer(x)]
+    rng.shuffle(pos)
+    rng.shuffle(neg)
+    out: list[Any] = []
+    while len(out) < n and (pos or neg):
+        for side in (pos, neg):
+            if side and len(out) < n:
+                out.append(side.pop())
+    return out

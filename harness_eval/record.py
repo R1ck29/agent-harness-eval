@@ -80,6 +80,9 @@ class TrialRecord:
     meta: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     skill_detection: str = "exact"
+    # 判定待ちの LLM 判定の入力（最小: 評価観点・対象の種類・盲検化前の対象の文字列）。判定は runner がまとめて行う
+    judge_inputs: list[dict[str, Any]] = field(default_factory=list)
+    judge_votes: list[dict[str, Any]] = field(default_factory=list)  # 判定の記録（系統・モデル・票・多数決。応答の本文は残さない）
     from_cache: bool = False
     trial_dir: str | None = None
     started_at: str | None = None

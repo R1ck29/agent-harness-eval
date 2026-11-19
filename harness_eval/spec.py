@@ -57,7 +57,9 @@ DEFAULT_CATEGORY = {
 }
 
 TASK_KEYS = {"id", "description", "targets", "tags", "fixture", "prompt", "limits",
-             "allow_tools", "deny_tools", "graders", "paired_negative", "split", "family"}
+             "allow_tools", "deny_tools", "graders", "paired_negative", "split", "family", "calibration"}
+# 判定役の校正: 決定的な採点器（command など）の合否と同じことを LLM 判定にも問い、一致率を測る（criteria は必須）
+CALIBRATION_KEYS = {"criteria", "focus", "max_chars"}
 # 自己改善ループ用のタスクの分割。train: 改善案を作る材料／dev: 候補の足切り／holdout: 昇格判定だけに使う（改善役に見せない）
 SPLITS = ("train", "dev", "holdout")
 NO_SPLIT = "none"  # run --split none: 分割を付けていないタスク
@@ -145,6 +147,7 @@ class Task:
     paired_negative: str | None = None
     split: str | None = None  # train / dev / holdout（None は分割なし）
     family: str = ""  # 似たタスクのグループ。分割はグループ単位で行う（既定はタスク id）
+    calibration: dict[str, Any] | None = None  # 判定役の校正項目（CALIBRATION_KEYS）
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -318,6 +321,11 @@ def load_task(path: Path) -> Task:
     family = str(d.get("family") or d["id"])
     if not ID_RE.match(family):
         raise SpecError(f"{path}: family '{family}' は英数字・_ . - のみ")
+    calibration = d.get("calibration")
+    if calibration is not None:
+        if not isinstance(calibration, dict) or not str(calibration.get("criteria") or "").strip():
+            raise SpecError(f"{path}: calibration はマッピングで、criteria（決定的な採点器が見ていることを LLM 判定に問う文）が必須")
+        _check_keys(path, "calibration", calibration, CALIBRATION_KEYS)
     graders = d.get("graders") or []
     if not isinstance(graders, list) or not graders:
         raise SpecError(f"{path}: graders は 1 つ以上必要です")
@@ -330,7 +338,7 @@ def load_task(path: Path) -> Task:
         allow_tools=_str_list(path, "allow_tools", d.get("allow_tools")),
         deny_tools=_str_list(path, "deny_tools", d.get("deny_tools")),
         graders=[parse_grader(path, i, g) for i, g in enumerate(graders)],
-        paired_negative=d.get("paired_negative"), split=split, family=family, raw=d,
+        paired_negative=d.get("paired_negative"), split=split, family=family, calibration=calibration, raw=d,
     )
 
 

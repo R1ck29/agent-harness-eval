@@ -27,8 +27,10 @@ from typing import Any, Callable
 
 from . import __version__
 from .adapters import classify_stderr, get_adapter
-from .graders import JudgeConfig, JudgeUnavailable, grade_all
-from .graders import JUDGE_PROMPT
+from .costs import empty_usage, usage_summary
+from .graders import JudgeConfig, grade_all, judge_content, rescore
+from .judge_phase import JudgePhase
+from .judging import FAMILIES, JudgeSettings, make_settings
 from .isolation import (ancestor_instructions, build_env, copy_credentials, fill, kill_running, make_trial_paths, placeholders,
                         route_signature, run_install, run_process, snapshot)
 from .metrics import summarize
@@ -36,7 +38,8 @@ from .record import EXCLUDED_ERRORS, TrialRecord
 from .spec import NO_SPLIT, Profile, SpecError, Task, split_mixing
 
 NOT_RUN_ERRORS = {"budget_stop"}
-CACHE_SCHEMA = "5"  # 試行レコードの形式を変えたら上げる（古いキャッシュを使わないため）
+
+CACHE_SCHEMA = "6"  # 試行レコードの形式を変えたら上げる（古いキャッシュを使わないため）。6: LLM 判定を試行のあとにまとめて行う
 
 
 @dataclass
@@ -48,9 +51,16 @@ class RunOptions:
     splits: list[str] = field(default_factory=list)  # train / dev / holdout / none（分割なし）。空ならすべて
     jobs: int = 1
     llm: bool = True
-    judge_agent: str = "claude_code"
-    judge_model: str | None = "haiku"
-    judge_executable: list[str] | None = None
+    tier: str = "dev"  # dev（中位モデル 1 回・暫定）/ decisive（強いモデル・3 回・両系統一致。採用判断用）
+    judge_agent: str | None = None  # 判定役の系統を 1 つに固定する（既定: 評価対象の別系統。decisive で両方あれば両系統）
+    judge_models: dict[str, str] = field(default_factory=dict)  # 系統 → 判定モデルの上書き
+    judge_votes: int | None = None  # 1 系統あたりの判定回数の上書き（既定: dev 1 / decisive 3）
+    allow_weak_judge: bool = False
+    judge_families: list[str] | None = None  # 使ってよい判定役の系統（既定: CLI が見つかった系統）
+    calibration_items: int = 6
+    judge_executable: list[str] | None = None  # 判定 CLI の実行ファイル（--judge-agent の系統。なければ claude_code）
+    judge_executables: dict[str, list[str]] = field(default_factory=dict)  # 系統 → 判定 CLI の実行ファイル
+    prereg: dict[str, Any] | None = None  # 事前登録する判定規則（Rules.to_dict()）。run の開始前に prereg.json に保存する
     max_cost_usd: float | None = None
     monthly_budget_usd: float | None = None
     ledger: Path | None = None  # 費用台帳（既定: 出力先/spend.jsonl）
@@ -163,17 +173,18 @@ def uses_llm(task: Task) -> bool:
     return any(g.type == "llm" for g in task.graders)
 
 
-def cache_key(task: Task, profile: Profile, version: str | None, trial: int, opt: RunOptions, judge_sig: str = "",
-              route: str = "") -> str:
+def cache_key(task: Task, profile: Profile, version: str | None, trial: int, opt: RunOptions, route: str = "", *,
+              routes: str | None = None) -> str:
     """route: 試行に渡る経路の変数の要約（route_signature: 名前と、秘密でないものは値のハッシュ）。経路を変えれば再実行する。"""
-    judge = f"{opt.llm}:{opt.judge_agent}:{opt.judge_model}:{judge_sig}" if uses_llm(task) else "-"
-    # ツールの版も入れる（起動コマンドや採点の作りが変われば再実行する）
-    raw = "|".join([CACHE_SCHEMA, __version__, task.id, task.content_hash(), profile.id, profile.content_hash(), str(version), str(trial), judge,
+    route = routes if routes is not None else route
+    # 判定役の設定は入れない: LLM 判定は試行のあとに判定キャッシュ（判定入力 + モデル + ルーブリック + 段階のハッシュ）で行うので、
+    # 段階や判定モデルを変えても解く側を再実行しない。ツールの版は入れる（起動コマンドや採点の作りが変われば再実行する）
+    raw = "|".join([CACHE_SCHEMA, __version__, task.id, task.content_hash(), profile.id, profile.content_hash(), str(version), str(trial),
                     route])
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
-class Runner:
+class Runner(JudgePhase):
     def __init__(self, tasks: list[Task], profiles: list[Profile], opt: RunOptions, out_dir: Path):
         self.opt = opt
         self.pairs = select_pairs(tasks, profiles, opt)
@@ -201,24 +212,48 @@ class Runner:
         self._judge_seq = 0
         self.interrupted = threading.Event()
         self.ledger = Path(opt.ledger or Path(out_dir) / "spend.jsonl").resolve()
-        self.judge_profile = self._pick_judge_profile(profiles) if opt.llm else None
-        jp = self.judge_profile
-        self.judge_billing = jp.billing if jp else "api"
+        self.needs_judge = opt.llm and any(uses_llm(t) or t.calibration for t, _ in self.pairs)
+        self.judge: JudgeSettings | None = None
+        self.judge_profiles: dict[str, Profile | None] = {}
+        self.judge_versions: dict[str, str | None] = {}
+        if self.needs_judge:
+            fams = [opt.judge_agent] if opt.judge_agent else list(opt.judge_families or FAMILIES)
+            for f in fams:
+                self.judge_profiles[f] = self._pick_judge_profile(profiles, f)
+                self.judge_versions[f] = cli_version(get_adapter(f, self.judge_profiles[f], executable=self._judge_exe(f)))
+            available = [f for f, v in self.judge_versions.items() if v is not None]
+            self.judge = make_settings(opt.tier, {p.agent for _, p in self.pairs}, available, opt.judge_agent, opt.judge_models,
+                                       opt.judge_votes, opt.allow_weak_judge, opt.seed, opt.calibration_items)
         # 月の予算: 口座（エージェント）ごとに、台帳の今月の実績を引いた残りをこの実行の上限にする
         self.month_spent: dict[str, float] | None = None
         self.spent_api: dict[str, float] = defaultdict(float)  # この実行で口座に数える支出（billing: api のみ）
         if opt.monthly_budget_usd is not None:
-            agents = {p.agent for _, p in self.pairs} | ({opt.judge_agent} if opt.llm else set())
+            agents = {p.agent for _, p in self.pairs} | set(self.judge.used_families() if self.judge else [])
             self.month_spent = {a: month_spent(self.ledger, a) for a in sorted(agents)}
-        # 判定の結果に効きうるもの（借りるプロファイルの環境変数・実行ファイル・経路の変数の要約）をキャッシュキーに入れる
-        self.judge_sig = hashlib.sha256(json.dumps(
-            [jp.id if jp else None, jp.env if jp else None, jp.env_unset if jp else None,
-             jp.executable if jp else None, opt.judge_executable, route_signature(self.judge_route_profile(), dict(os.environ)),
-             hashlib.sha256(JUDGE_PROMPT.encode()).hexdigest()[:12],
-             cli_version(get_adapter(opt.judge_agent, jp, executable=opt.judge_executable)) if opt.llm else None],
-            sort_keys=True).encode()).hexdigest()[:12]
-        self.judge_warning = (f"LLM 判定（{opt.judge_agent}）の認証を借りる同種のプロファイルがありません。親の環境変数だけで判定します"
-                              if opt.llm and jp is None and any(uses_llm(t) for t, _ in self.pairs) else None)
+        self.judge_usage = empty_usage()
+        self.judge_usage.update({"cache_hits": 0, "by_model": {}})
+        self.calibration: dict[str, Any] | None = None
+        missing = [a for a, p in (self.judge.plan if self.judge else {}).items() if not p["families"]]
+        warn = []
+        if missing:
+            warn.append(f"判定役の CLI が見つかりません（評価対象 {missing}）。LLM 判定のある試行は judge_error として除外されます")
+        same = [a for a, p in (self.judge.plan if self.judge else {}).items() if p["same_family"]]
+        if same:
+            warn.append(f"同系統の判定役（評価対象 {same}）。別系統の CLI がないため同系統で判定します。"
+                        "LLM 判定が合否を決めた試行があれば結論は INCONCLUSIVE になります")
+        if self.judge and self.judge.weak():
+            warn.append(f"弱い判定役（{', '.join(self.judge.weak())}。--allow-weak-judge）。結論は採用判断に使えません")
+        no_auth = [f for f in (self.judge.used_families() if self.judge else []) if self.judge_profiles.get(f) is None]
+        if no_auth:
+            warn.append(f"LLM 判定（{no_auth}）の認証を借りる同種のプロファイルがありません。親の環境変数だけで判定します")
+        self.judge_warning = "\n注意: ".join(warn) or None
+
+    def _judge_exe(self, family: str) -> list[str] | None:
+        if family in self.opt.judge_executables:
+            return self.opt.judge_executables[family]
+        if self.opt.judge_executable and family == (self.opt.judge_agent or "claude_code"):
+            return self.opt.judge_executable
+        return None
 
     def _spend(self, usd: float | None, agent: str, billing: str) -> None:
         """費用を実行内の合計・口座別の合計・台帳に記録する。--max-cost-usd は推定額の合計で止める（サブスクリプションも含む。
@@ -241,8 +276,8 @@ class Runner:
             if self.opt.max_cost_usd is not None and self.spent >= self.opt.max_cost_usd:
                 return True
             accounts = [profile.agent] if profile.billing == "api" else []
-            if self.opt.llm and uses_llm(task) and self.judge_billing == "api":
-                accounts.append(self.opt.judge_agent)
+            if self.judge and uses_llm(task):
+                accounts += [f for f in self.judge.families_for(profile.agent) if self._judge_billing(f) == "api"]
             return any((rem := self.month_remaining(a)) is not None and self.spent_api[a] >= rem for a in accounts)
 
     def _record(self, task: Task, profile: Profile, trial: int, key: str, **kw: Any) -> TrialRecord:
@@ -250,33 +285,38 @@ class Runner:
                            trial=trial, cache_key=key, task_hash=task.content_hash(), profile_hash=profile.content_hash(),
                            cli_version=self.versions.get(profile.id), **kw)
 
-    def judge_route_profile(self) -> Profile:
-        """LLM 判定が使う認証の出どころ（借りるプロファイル。なければ親の環境だけの仮のプロファイル）。経路の確認に使う。"""
-        return self.judge_profile or Profile(id=f"LLM 判定（{self.opt.judge_agent}・親の環境）", agent=self.opt.judge_agent,
-                                             path=self.run_dir / "judge.yaml")
+    def _judge_billing(self, family: str) -> str:
+        jp = self.judge_profiles.get(family)
+        return jp.billing if jp else "api"
 
-    def _pick_judge_profile(self, profiles: list[Profile]) -> Profile | None:
+    def judge_route_profiles(self) -> list[Profile]:
+        """LLM 判定が使う認証の出どころ（借りるプロファイル。なければ親の環境だけの仮のプロファイル）。経路の確認に使う。"""
+        return [self.judge_profiles.get(f) or Profile(id=f"LLM 判定（{f}・親の環境）", agent=f, path=self.run_dir / "judge.yaml")
+                for f in (self.judge.used_families() if self.judge else [])]
+
+    def _pick_judge_profile(self, profiles: list[Profile], family: str) -> Profile | None:
         """LLM 判定の認証（env・env_unset・copy_credentials・executable）を借りるプロファイル。
-        指定がなければ、判定エージェントと同じ種類の基準プロファイル → 最初の同種プロファイルの順。配布物（install）は使わない。"""
-        same = [p for p in profiles if p.agent == self.opt.judge_agent]
+        指定がなければ、判定の系統と同じ種類の基準プロファイル → 最初の同種プロファイルの順。配布物（install）は使わない。"""
+        same = [p for p in profiles if p.agent == family]
         if self.opt.judge_profile:
             hit = [p for p in profiles if p.id == self.opt.judge_profile]
             if not hit:
                 raise SpecError(f"--judge-profile '{self.opt.judge_profile}' がプロファイルにありません")
-            if hit[0].agent != self.opt.judge_agent:
+            if hit[0].agent == family:
+                return hit[0]
+            if self.opt.judge_agent:
                 raise SpecError(f"--judge-profile '{self.opt.judge_profile}' は {hit[0].agent} 用です（--judge-agent {self.opt.judge_agent}）")
-            return hit[0]
         base = [p for p in same if p.id == self.opt.baseline]
         return (base or same or [None])[0]
 
     # ------------------------------------------------------------ plan
     def plan(self) -> dict[str, Any]:
-        """実行前の見積もり（何回エージェントを呼ぶか、キャッシュで何回省けるか、概算費用）。"""
+        """実行前の見積もり（何回エージェントを呼ぶか、キャッシュで何回省けるか、解く側と判定側の概算費用を段階ごとに）。"""
         hist = self._cost_history()
         rows, calls, hits, est, unknown = [], 0, 0, 0.0, 0
         for t, p in self.pairs:
             for i in range(self.opt.trials):
-                key = cache_key(t, p, self.versions[p.id], i, self.opt, self.judge_sig, self.routes[p.id])
+                key = cache_key(t, p, self.versions[p.id], i, self.opt, routes=self.routes[p.id])
                 if self.opt.use_cache and self._cache_get(key):
                     hits += 1
                     continue
@@ -289,8 +329,13 @@ class Runner:
             rows.append((t.id, p.id))
         return {"pairs": len(rows), "trials_total": len(rows) * self.opt.trials, "agent_calls": calls,
                 "cache_hits": hits, "estimated_cost_usd": est, "unknown_cost_calls": unknown,
-                "llm_judge": self.opt.llm and any(uses_llm(t) for t, _ in self.pairs),
-                "cli_versions": self.versions}
+                "solver": {"estimated_cost_usd": est, "unknown_cost_calls": unknown, "calls": calls},
+                "judge": self.judge_estimate() if self.needs_judge else None,
+                "llm_judge": self.needs_judge, "cli_versions": self.versions}
+
+    def estimated_total(self, plan: dict[str, Any]) -> float:
+        j = (plan.get("judge") or {}).get(self.judge.tier if self.judge else "", {})
+        return plan["solver"]["estimated_cost_usd"] + (j.get("estimated_cost_usd_max") or 0.0)
 
     def _cost_history(self) -> dict[tuple[str, str | None], float]:
         acc: dict[tuple[str, str | None], list[float]] = {}
@@ -325,41 +370,6 @@ class Runner:
         self.opt.cache_dir.mkdir(parents=True, exist_ok=True)
         (self.opt.cache_dir / f"{rec.cache_key}.json").write_text(
             json.dumps(rec.to_dict(), ensure_ascii=False), encoding="utf-8")
-
-    # ------------------------------------------------------------ judge
-    def _judge_runner(self) -> Callable[[str], tuple[str | None, float | None]]:
-        src = self.judge_profile
-        adapter = get_adapter(self.opt.judge_agent, src, executable=self.opt.judge_executable)
-        # 認証まわりだけ借りた判定専用プロファイル（配布物・追加引数・モデル指定は使わない）
-        prof = Profile(id="judge", agent=self.opt.judge_agent, path=src.path if src else self.run_dir / "judge.yaml",
-                       env=dict(src.env) if src else {}, env_unset=list(src.env_unset) if src else [],
-                       copy_credentials=src.copy_credentials if src else False,
-                       isolate_home=src.isolate_home if src else True)
-
-        def run(prompt: str) -> tuple[str | None, float | None]:
-            with self.lock:
-                self._judge_seq += 1
-                n = self._judge_seq
-            tp = make_trial_paths(self.run_dir / "judge" / str(n), adapter.config_dirname)
-            try:
-                env = build_env(prof, tp, adapter.config_env)
-                if prof.copy_credentials:
-                    copy_credentials(prof.agent, tp)
-                pr = run_process(adapter.judge_cmd(self.opt.judge_model), tp.workdir, env, prompt, tp.stdout, tp.stderr, 300)
-                out = tp.stdout.read_text(encoding="utf-8", errors="replace") if tp.stdout.exists() else ""
-                err = tp.stderr.read_text(encoding="utf-8", errors="replace") if tp.stderr.exists() else ""
-            finally:
-                shutil.rmtree(tp.root, ignore_errors=True)
-            if pr.launch_error:
-                raise JudgeUnavailable(f"判定 CLI を起動できません: {pr.launch_error}")
-            if pr.timed_out:
-                raise JudgeUnavailable("判定が 300 秒でタイムアウト")
-            text, cost, jerr = adapter.parse_judge(out)
-            self._spend(cost, self.opt.judge_agent, self.judge_billing)
-            if jerr or not text:
-                raise JudgeUnavailable(f"判定が失敗: {jerr or '応答なし'} {(classify_stderr(err) or '')} {err.strip()[-200:]}".strip())
-            return text, cost
-        return run
 
     # ------------------------------------------------------------ trial
     def _execute(self, task: Task, profile: Profile, trial: int, key: str) -> TrialRecord:
@@ -426,21 +436,34 @@ class Runner:
             rec.error = {"type": etype, "message": (emsg or "")[:1000]}
         rec.valid = etype not in EXCLUDED_ERRORS
         if rec.valid:
-            judge = JudgeConfig(enabled=self.opt.llm, run=self._judge_runner() if self.opt.llm else None)
-            try:
-                grade_all(task.graders, rec, tp.workdir, judge, task.path.parent)
-            except JudgeUnavailable as e:  # 判定側の環境問題は評価対象の失敗ではないので除外（キャッシュもしない）
-                rec.error, rec.valid = {"type": "judge_error", "message": str(e)[:1000]}, False
-            if rec.valid and rec.score is None and rec.error is None:  # 採点できるグレーダーが 1 つもない（例: llm だけのタスクを --no-llm）
-                rec.error, rec.valid = {"type": "not_graded", "message": "実行されたグレーダーがありません"}, False
-            rec.passed = rec.valid and rec.error is None and rec.score == 1.0
-            rec.cmp_passed = (rec.valid and rec.error is None and rec.cmp_score == 1.0) if rec.cmp_score is not None else None
-            if rec.valid and not rec.passed:
-                tags = [etype] if etype else []
-                tags += [g["category"] for g in rec.grader_results if g["status"] in ("fail", "unknown")]
-                rec.failure_tags = list(dict.fromkeys(tags))
+            # 決定的な検査を先に行い、LLM 判定は合格した出力の判定入力（最小）だけを積んでおく。判定は全試行のあと（_judge_phase）
+            grade_all(task.graders, rec, tp.workdir, JudgeConfig(enabled=self.opt.llm, run=None, defer=True), task.path.parent)
+            if task.calibration and rec.error is None:
+                c = task.calibration
+                content = judge_content(str(c.get("focus", "final")), int(c.get("max_chars", 20000)), rec, tp.workdir)
+                code = [g for g in rec.grader_results if g["type"] != "llm" and not g["harness_only"] and g["status"] != "not_run"]
+                if content is not None and code:
+                    rec.judge_inputs.append({"kind": "calibration", "criteria": str(c["criteria"]), "focus": str(c.get("focus", "final")),
+                                             "content": content, "answer": all(g["status"] == "pass" for g in code)})
+            self._finalize(rec, etype)
         (tp.root / "record_for_grader.json").unlink(missing_ok=True)
         return rec
+
+    def _finalize(self, rec: TrialRecord, etype: str | None) -> None:
+        """grader_results から合否を決める。判定待ち（pending）が残っていれば、まだ決めない。"""
+        rescore(rec)
+        if any(g["status"] == "pending" for g in rec.grader_results):
+            rec.passed, rec.cmp_passed = False, None
+            return
+        if rec.valid and rec.score is None and rec.error is None:  # 採点できるグレーダーが 1 つもない（例: llm だけのタスクを --no-llm）
+            rec.error, rec.valid = {"type": "not_graded", "message": "実行されたグレーダーがありません"}, False
+        rec.passed = rec.valid and rec.error is None and rec.score == 1.0
+        rec.cmp_passed = (rec.valid and rec.error is None and rec.cmp_score == 1.0) if rec.cmp_score is not None else None
+        rec.failure_tags = []
+        if rec.valid and not rec.passed:
+            tags = [etype] if etype else []
+            tags += [g["category"] for g in rec.grader_results if g["status"] in ("fail", "unknown", "judge_disagreement")]
+            rec.failure_tags = list(dict.fromkeys(tags))
 
     def _cleanup(self, rec: TrialRecord) -> None:
         if not rec.trial_dir:
@@ -453,7 +476,7 @@ class Runner:
                 (root / name).unlink(missing_ok=True)
 
     def _one(self, task: Task, profile: Profile, trial: int, sink) -> TrialRecord:
-        key = cache_key(task, profile, self.versions[profile.id], trial, self.opt, self.judge_sig, self.routes[profile.id])
+        key = cache_key(task, profile, self.versions[profile.id], trial, self.opt, routes=self.routes[profile.id])
         if self.opt.use_cache:
             hit = self._cache_get(key)
             if hit:
@@ -497,6 +520,10 @@ class Runner:
             row = holdout_row(self.run_id, list({t.id: t for t, _ in self.pairs}.values()), list({p.id: p for _, p in self.pairs}.values()))
             with (self.out_dir / HOLDOUT_LEDGER).open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if self.opt.prereg is not None:
+            # 事前登録: 判定規則と判定役の設定を、試行を 1 つも実行する前に固定して保存する（ハッシュ付き）
+            (self.run_dir / "prereg.json").write_text(json.dumps(prereg_record(self.opt.prereg, self.judge), ensure_ascii=False, indent=2),
+                                                      encoding="utf-8")
         jsonl = (self.run_dir / "trials.jsonl").open("w", encoding="utf-8")
 
         def sink(rec: TrialRecord) -> None:
@@ -527,16 +554,30 @@ class Runner:
         finally:
             ex.shutdown(wait=True)
             jsonl.close()
+        try:
+            self._judge_phase(records)
+        except KeyboardInterrupt:
+            self.interrupted.set()
+            kill_running()
+            raise
+        finally:
             shutil.rmtree(self.run_dir / "judge", ignore_errors=True)
+        for r in records:
+            if r.judge_votes and not r.from_cache:  # 判定で合格が決まった試行の作業フォルダ（キャッシュの試行は別の実行のもの）
+                self._cleanup(r)
         records.sort(key=lambda r: (r.profile_id, r.task_id, r.trial))
+        # 判定のあとの最終の記録で書き直す（実行中は判定待ちのまま追記している）
+        (self.run_dir / "trials.jsonl").write_text("".join(json.dumps(r.to_dict(), ensure_ascii=False) + "\n" for r in records),
+                                                   encoding="utf-8")
         summary = summarize([r for r in records if (r.error or {}).get("type") not in NOT_RUN_ERRORS], self.opt.kk)
         meta = {
             "run_id": self.run_id, "tool_version": __version__, "started_at": started,
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "platform": f"{platform.system()} {platform.release()}", "python": sys.version.split()[0],
             "options": {"trials": self.opt.trials, "k": self.opt.kk, "tags": self.opt.tags, "splits": self.opt.splits, "llm": self.opt.llm,
-                        "judge_agent": self.opt.judge_agent, "judge_model": self.opt.judge_model,
-                        "judge_profile": self.judge_profile.id if self.judge_profile else None,
+                        "tier": self.opt.tier, "judge_agent": self.opt.judge_agent, "judge_models": self.opt.judge_models,
+                        "judge_votes": self.opt.judge_votes, "allow_weak_judge": self.opt.allow_weak_judge,
+                        "judge_profiles": {f: (p.id if p else None) for f, p in self.judge_profiles.items()},
                         "jobs": self.opt.jobs,
                         "max_cost_usd": self.opt.max_cost_usd, "monthly_budget_usd": self.opt.monthly_budget_usd,
                         "month_spent_before_run_usd": self.month_spent, "use_cache": self.opt.use_cache,
@@ -549,12 +590,26 @@ class Runner:
                              "split": t.split, "family": t.family}
                       for t in {t.id: t for t, _ in self.pairs}.values()},
             "spent_usd_this_run": self.spent,
+            "judge": (self.judge.meta(self.calibration, {k: v for k, v in self.judge_usage.items()})
+                      | {"cli_versions": self.judge_versions}) if self.judge else
+                     {"llm": False, "tier": self.opt.tier, "note": "LLM 判定なし（--no-llm か、LLM 判定のタスクがない）",
+                      "calibration": {"needed": False, "items": 0, "rate": None}},
             "ancestor_instructions": ancestor_instructions(self.run_dir.parent),
             "not_run": sum(1 for r in records if (r.error or {}).get("type") in NOT_RUN_ERRORS),
         }
         summary["meta"] = meta
+        summary["usage"] = usage_summary(records, self.judge_usage, {p.id: p.model for _, p in self.pairs},
+                                         self.judge.tier if self.judge else None)
         (self.run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         return self.run_dir, records, summary
+
+
+def prereg_record(rules: dict[str, Any], judge: JudgeSettings | None) -> dict[str, Any]:
+    """事前登録の中身。rules_hash は規則だけのハッシュ（verdict が照合する）。"""
+    from .soundness import rules_hash
+    return {"registered_at": datetime.now(timezone.utc).isoformat(), "tool_version": __version__, "rules": rules,
+            "rules_hash": rules_hash(rules),
+            "judge": judge.meta() if judge else {"llm": False}}
 
 
 def load_run(run_dir: Path) -> tuple[list[TrialRecord], dict[str, Any]]:

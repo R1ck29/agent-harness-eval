@@ -15,14 +15,31 @@ from . import __version__
 from .isolation import ancestor_instructions, missing_inherited, passed_claude_vars, route_variables
 from .metrics import EFFICIENCY_METRICS, HARD_CATEGORIES, gate, holdout_comparisons, promote, promote_efficiency
 from .report import render
+from .judging import infer_family
 from .runner import HOLDOUT_LEDGER, RunOptions, Runner, load_run
+from .soundness import Rules, default_baseline, run_verdicts
 from .spec import MIN_HOLDOUT_TASKS, NO_SPLIT, SPLITS, Grader, SpecError, Task, lint, load_profiles, load_tasks
+
+
+def _judge_models(a: argparse.Namespace) -> dict[str, str]:
+    """--judge-model MODEL（--judge-agent の系統、なければモデル名から推定）／ --judge-model 系統=MODEL（複数可）。"""
+    out: dict[str, str] = {}
+    for v in a.judge_model or []:
+        fam, _, model = v.partition("=") if "=" in v else ("", "", v)
+        fam = fam or a.judge_agent or infer_family(model)
+        if fam not in ("claude_code", "codex"):
+            raise SpecError(f"--judge-model の系統は claude_code / codex（{v}）")
+        out[fam] = model
+    return out
 
 
 def _opts(a: argparse.Namespace) -> RunOptions:
     return RunOptions(
         trials=a.trials, k=a.k, tags=a.tag or [], task_ids=a.task or [], splits=a.split or [], jobs=a.jobs, llm=not a.no_llm,
-        judge_agent=a.judge_agent, judge_model=a.judge_model or None, judge_executable=a.judge_executable,
+        tier=a.tier, judge_agent=a.judge_agent, judge_models=_judge_models(a), judge_votes=a.judge_votes,
+        allow_weak_judge=a.allow_weak_judge, judge_families=a.judge_family, calibration_items=a.calibration_items,
+        judge_executable=a.judge_executable,
+        judge_executables={"codex": a.judge_codex_executable} if a.judge_codex_executable else {},
         max_cost_usd=a.max_cost_usd, monthly_budget_usd=a.monthly_budget_usd,
         retry_infra=a.retry_infra, retry_wait_s=a.retry_wait_s, judge_profile=a.judge_profile, use_cache=not a.no_cache, cache_dir=Path(a.cache_dir), keep=a.keep,
         baseline=a.baseline, seed=a.seed)
@@ -65,13 +82,46 @@ def cmd_plan(a) -> int:
         print(f"  注意: {w}")
     print(f"組み合わせ {p['pairs']} × 試行 {a.trials} = {p['trials_total']} 試行")
     print(f"  キャッシュで省略: {p['cache_hits']} 試行 ／ 実際にエージェントを呼ぶ: {p['agent_calls']} 回")
-    print(f"  概算費用: ${p['estimated_cost_usd']:.4f}（履歴がなく見積もれない呼び出し {p['unknown_cost_calls']} 回）")
-    print(f"  LLM 判定: {'あり（コード判定が全合格の試行のみ。配布物がないと通らない判定の不合格は除く）' if p['llm_judge'] else 'なし'}")
+    _print_estimate(p, runner)
     for agent, spent in (runner.month_spent or {}).items():
         print(f"  今月の実績（{agent}）: ${spent:.4f} ／ 月の予算 ${a.monthly_budget_usd:.2f}（残り ${runner.month_remaining(agent):.4f}）")
     for pid, v in p["cli_versions"].items():
         print(f"  {pid}: CLI {v or '見つかりません'}")
     return 0
+
+
+def _print_estimate(p: dict, runner: Runner) -> None:
+    """実行前の見積もり: 解く側（solver）と判定側（judge）を分けて、段階（dev / decisive）ごとに。"""
+    print(f"  解く側（solver）の概算: ${p['solver']['estimated_cost_usd']:.4f}"
+          f"（履歴がなく見積もれない呼び出し {p['solver']['unknown_cost_calls']} 回）")
+    if not p["judge"]:
+        print("  判定側（judge）: LLM 判定なし（費用 0）")
+        return
+    cur = runner.judge.tier if runner.judge else None
+    for tier, j in p["judge"].items():
+        mark = "← この実行" if tier == cur else ""
+        unk = f"、単価不明 {j['unknown_cost_calls']} 回" if j["unknown_cost_calls"] else ""
+        print(f"  判定側（judge）{tier}: 最大 {j['calls_max']} 回 × モデル {j['models']} × {j['votes']} 回 → 上限 ${j['estimated_cost_usd_max']:.4f}"
+              f"（{', '.join(j['basis']) or '—'}{unk}）{mark}")
+    print("    判定は決定的な検査に合格した出力と、ルーブリックでしか見られない基準にだけ走ります（上限は全試行が合格した場合）。"
+          "同じ出力の判定はキャッシュから再利用します")
+
+
+def _rules(a: argparse.Namespace, baseline: str | None, start: dict | None = None) -> Rules:
+    """判定規則: 既定（または start: 事前登録の規則）+ --rules（YAML のマッピング。Rules のキー）+ --baseline / --candidate / --control-tag。"""
+    d: dict = dict(start or {})
+    if getattr(a, "rules", None):
+        extra = yaml.safe_load(Path(a.rules).read_text(encoding="utf-8")) or {}
+        if not isinstance(extra, dict):
+            raise SpecError(f"{a.rules}: 判定規則はマッピング")
+        d.update(extra)
+    if baseline:
+        d["baseline"] = baseline
+    if getattr(a, "candidate", None):
+        d["candidate"] = a.candidate
+    if getattr(a, "control_tag", None):
+        d["control_tags"] = list(a.control_tag)
+    return Rules.from_dict(d)
 
 
 def cmd_run(a) -> int:
@@ -86,8 +136,10 @@ def cmd_run(a) -> int:
     if leaks and not a.allow_ancestor_instructions:
         print(_ancestor_message(leaks) + "（承知の上で実行するなら --allow-ancestor-instructions。結果に記録されます）", file=sys.stderr)
         return 2
+    rules = _rules(a, opt.baseline)
+    opt.prereg = rules.to_dict()
     runner = Runner(tasks, profiles, opt, Path(a.out))
-    judge = [runner.judge_route_profile()] if runner.judge_profile is None and runner.judge_warning else []
+    judge = [p for p in runner.judge_route_profiles() if p.id.startswith("LLM 判定")]
     for w in _budget_warnings(a, profiles) + _route_warnings(profiles + judge):
         print(f"注意: {w}", file=sys.stderr)
     if not runner.pairs:
@@ -97,12 +149,96 @@ def cmd_run(a) -> int:
     if missing:
         print(f"警告: CLI のバージョンを取得できません: {missing}（未インストール・PATH 未設定の可能性）", file=sys.stderr)
     plan = runner.plan()
+    print(f"見積もり（段階 {opt.tier}）:")
+    _print_estimate(plan, runner)
+    total = runner.estimated_total(plan)
+    if opt.max_cost_usd is not None and total > opt.max_cost_usd:
+        print(f"止めました: 見積もりの上限 ${total:.4f}（解く側 + 判定側）が --max-cost-usd ${opt.max_cost_usd:.4f} を超えます。"
+              "--tier dev・--trials・--task で小さくするか、上限を上げてください（何も実行していません）", file=sys.stderr)
+        return 2
     print(f"実行: {plan['trials_total']} 試行（キャッシュ {plan['cache_hits']}、新規 {plan['agent_calls']}）→ {runner.run_dir}")
     run_dir, records, summary = runner.run()
-    (run_dir / "report.html").write_text(render(summary, records, opt.baseline), encoding="utf-8")
+    prereg = json.loads((run_dir / "prereg.json").read_text(encoding="utf-8"))
+    summary["verdicts"] = run_verdicts(records, summary, rules, prereg)
+    (run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    (run_dir / "report.html").write_text(render(summary, records, opt.baseline or rules.baseline), encoding="utf-8")
+    _print_verdicts(summary)
     _print_summary(summary)
+    _print_usage(summary.get("usage"))
     print(f"\nレポート: {run_dir / 'report.html'}")
     return 0
+
+
+def _print_verdicts(summary: dict) -> None:
+    """結論を先頭に出す（ベースライン合格率・差と区間・判定役・妥当性チェック・結論と理由）。"""
+    vs = summary.get("verdicts") or []
+    if not vs:
+        print("\n結論: 判定できません（ベースラインが決まりません。--baseline を指定してください）")
+        return
+    for v in vs:
+        print(f"\n結論 {v['candidate']} vs {v['baseline']}: {v['label']}")
+        for r in v["reasons"] + v["not_adoptable_reasons"]:
+            print(f"  理由: {r}")
+        br = "—" if v["baseline_rate"] is None else f"{v['baseline_rate']:.0%}"
+        ci = "—" if not v["ci"] else f"[{v['ci'][0]:+.2f}, {v['ci'][1]:+.2f}]"
+        d = "—" if v["delta"] is None else f"{v['delta']:+.2f}"
+        print(f"  ベースライン合格率 {br}／差 {d} {ci}（{v['confidence']:.0%}、{v['ci_method']}）／タスク {v['n_tasks']} 件")
+        j = v["judge"]
+        if j.get("llm"):
+            cal = j.get("calibration_rate")
+            print(f"  判定役: 段階 {j.get('tier')}・モデル {j.get('models')}・盲検 {'あり' if j.get('blind') else 'なし'}・"
+                  f"{j.get('votes')} 回・校正一致率 {'—' if cal is None else f'{cal:.0%}'}（{j.get('calibration_items') or 0} 件）"
+                  + ("・弱い判定役" if j.get("weak_allowed") and any(s != "strong" for s in (j.get("strength") or {}).values()) else ""))
+        else:
+            print("  判定役: LLM 判定なし（校正は不要）")
+        bad = [c for c in v["checks"] if c["status"] not in ("ok", "n/a")]
+        print(f"  妥当性チェック: {len(v['checks']) - len(bad)} 件 ok" + (f"、要注意 {len(bad)} 件" if bad else ""))
+        for c in bad:
+            print(f"    [{c['status']}] {c['id']}: {c['message']}")
+
+
+def cmd_verdict(a) -> int:
+    """既存の結果を、モデルを呼ばずに事前登録の規則（なければ既定の規則）で判定し直す。終了コードで結論を返す
+    （0 IMPROVED / 1 REGRESSED / 3 INCONCLUSIVE / 4 NO CHANGE / 5 IMPROVED だが暫定で採用不可 / 2 定義エラー）。"""
+    from .soundness import verdict
+    run_dir = Path(a.run)
+    recs, summary = load_run(run_dir)
+    pf = run_dir / "prereg.json"
+    prereg = json.loads(pf.read_text(encoding="utf-8")) if pf.is_file() else None
+    start = dict((prereg or {}).get("rules") or {})
+    base = a.baseline or start.get("baseline") or default_baseline(summary) or summary.get("meta", {}).get("options", {}).get("baseline")
+    if not base:
+        raise SpecError("ベースラインが決まりません。--baseline を指定してください")
+    rules = _rules(a, base, start)
+    cand = rules.candidate
+    if cand is None:
+        others = sorted({r.profile_id for r in recs} - {base})
+        if len(others) != 1:
+            raise SpecError(f"候補が決まりません。--candidate を指定してください（候補: {others}）")
+        cand = others[0]
+    from dataclasses import replace
+    v = verdict(recs, summary, replace(rules, candidate=cand), prereg)
+    (run_dir / "verdict.json").write_text(json.dumps(v, ensure_ascii=False, indent=2), encoding="utf-8")
+    if a.json:
+        print(json.dumps(v, ensure_ascii=False, indent=2))
+    else:
+        _print_verdicts({"verdicts": [v]})
+        if v["prereg"]["status"] == "none":
+            print("  注意: 事前登録（prereg.json）がない結果です（旧版）。既定の規則で判定しました")
+        print(f"記録: {run_dir / 'verdict.json'}（終了コード {v['exit_code']}）")
+    return v["exit_code"]
+
+
+def _print_usage(u: dict | None) -> None:
+    if not u:
+        return
+    f = lambda d: (f"入力 {d['input']:,}・キャッシュ読み {d['cache_read']:,}・キャッシュ書き {d['cache_write']:,}・出力 {d['output']:,}"
+                   f"（{d['calls']} 回、${d['cost_usd']:.4f}{'、費用不明 ' + str(d['cost_unknown']) + ' 回' if d['cost_unknown'] else ''}）")
+    print(f"\nトークン（この実行で呼んだ分。公開価格 {u['prices']['fetched_at']} で換算）")
+    print(f"  解く側（solver）: {f(u['solver'])}")
+    print(f"  判定側（judge） : {f(u['judge'])}、判定キャッシュ {u['judge'].get('cache_hits', 0)} 回")
+    share = "—" if u["judge_share"] is None else f"{u['judge_share']:.0%}"
+    print(f"  合計 ${u['total_cost_usd']:.4f}（判定の割合 {share}、段階 {u['tier'] or '—'}）")
 
 
 def _budget_warnings(a, profiles) -> list[str]:
@@ -153,6 +289,12 @@ def _print_summary(summary) -> None:
 
 def cmd_report(a) -> int:
     recs, summary = load_run(Path(a.run))
+    if "verdicts" not in summary:  # 旧版の結果: 既定の規則で結論を付ける（モデルは呼ばない。summary.json は書き換えない）
+        base = a.baseline or default_baseline(summary) or summary.get("meta", {}).get("options", {}).get("baseline")
+        pf = Path(a.run) / "prereg.json"
+        prereg = json.loads(pf.read_text(encoding="utf-8")) if pf.is_file() else None
+        summary["verdicts"] = run_verdicts(recs, summary, Rules(baseline=base), prereg) if base else []
+    _print_verdicts(summary)
     out = Path(a.run) / "report.html"
     out.write_text(render(summary, recs, a.baseline or summary.get("meta", {}).get("options", {}).get("baseline")), encoding="utf-8")
     _print_summary(summary)
@@ -532,6 +674,12 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--tasks", nargs="+", required=True, help="タスク YAML（ファイルまたはディレクトリ）")
         sp.add_argument("--profiles", nargs="+", required=need_profiles, default=[], help="プロファイル YAML")
 
+    def rulesopts(sp):
+        sp.add_argument("--candidate", help="結論を出す候補のプロファイル id（既定: ベースライン以外のすべて）")
+        sp.add_argument("--control-tag", action="append", help="このタグのタスクは対照（後退していないことだけを見る。複数可）")
+        sp.add_argument("--rules", help="判定規則の YAML（floor・ceiling・min_tasks・min_trials_per_task・min_effect・max_error_rate・"
+                                        "min_calibration_agreement など。run では事前登録される）")
+
     def runopts(sp):
         sp.add_argument("--trials", type=int, default=1, help="1 組あたりの試行回数（スモーク 1、フル 3 を推奨）")
         sp.add_argument("--k", type=int, help="pass^k の k（既定: --trials と同じ）")
@@ -541,9 +689,23 @@ def main(argv: list[str] | None = None) -> int:
                         help="この分割のタスクだけ（複数可。none は分割なし）。holdout は他と混ぜられない")
         sp.add_argument("--jobs", type=int, default=1, help="並列数（既定 1。レート制限に注意）")
         sp.add_argument("--no-llm", action="store_true", help="LLM 判定を実行しない（スモーク用）")
-        sp.add_argument("--judge-agent", default="claude_code", choices=["claude_code", "codex"])
-        sp.add_argument("--judge-model", default="haiku", help="LLM 判定のモデル（既定 haiku。空文字で CLI 既定）")
-        sp.add_argument("--judge-executable", nargs="+", help="判定に使う CLI の実行ファイル（既定: PATH 上の claude / codex）")
+        sp.add_argument("--tier", choices=["dev", "decisive"], default="dev",
+                        help="判定役の段階。dev（既定）: 中位モデル（sonnet / gpt-6.2-sol）1 回・LLM 判定が効いた結論は暫定。"
+                             "decisive: 強いモデル（opus / gpt-6.2-astra）3 回・両系統一致。採用・マージ判断（verdict）はこちらが必要")
+        sp.add_argument("--judge-agent", choices=["claude_code", "codex"],
+                        help="判定役の系統を 1 つに固定する（既定: 評価対象の別系統。decisive で両方の CLI があれば両系統の一致を要求）")
+        sp.add_argument("--judge-model", action="append",
+                        help="判定モデルの上書き（MODEL または 系統=MODEL。複数可。既定は段階のモデル）")
+        sp.add_argument("--judge-votes", type=int, help="1 系統あたりの判定回数（既定: dev 1 / decisive 3。多数決）")
+        sp.add_argument("--allow-weak-judge", action="store_true",
+                        help="段階が求める強さ未満の判定モデル（haiku など）を許す（レポートに「弱い判定役」。結論は採用判断に使えない）")
+        sp.add_argument("--judge-family", action="append", choices=["claude_code", "codex"],
+                        help="判定役に使ってよい系統（既定: CLI が見つかった系統すべて）")
+        sp.add_argument("--calibration-items", type=int, default=6,
+                        help="判定役の校正に使う項目数（calibration のあるタスクの出力から。既定 6）")
+        sp.add_argument("--judge-executable", nargs="+", help="判定に使う CLI の実行ファイル（--judge-agent の系統。なければ claude）")
+        sp.add_argument("--judge-codex-executable", nargs="+", help="判定に使う codex の実行ファイル")
+        rulesopts(sp)
         sp.add_argument("--max-cost-usd", type=float, help="この実行全体の費用上限（到達後の試行は未実行）")
         sp.add_argument("--monthly-budget-usd", type=float, help="月の予算。--out 配下の今月の実績を引いた残りをこの実行の上限にする")
         sp.add_argument("--retry-infra", type=int, default=1, help="レート制限・過負荷で落ちた試行の再試行回数")
@@ -658,6 +820,13 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--out", required=True, help="書き出し先（空のフォルダ）")
     sp.add_argument("--id-prefix", help="プロファイル id の頭（既定: 元のプロファイルの id）")
     sp.set_defaults(fn=cmd_skill_variants)
+    sp = sub.add_parser("verdict", help="既存の結果を事前登録の規則で判定し直す（モデルは呼ばない。終了コード 0 IMPROVED / 1 REGRESSED / "
+                                        "3 INCONCLUSIVE / 4 NO CHANGE / 5 暫定で採用不可）")
+    sp.add_argument("run", help="結果のフォルダ（summary.json・trials.jsonl・あれば prereg.json）")
+    sp.add_argument("--baseline", help="ベースラインのプロファイル id（既定: 事前登録 → 配布物なしのプロファイル）")
+    rulesopts(sp)
+    sp.add_argument("--json", action="store_true", help="結論を JSON で標準出力に出す（verdict.json にも保存）")
+    sp.set_defaults(fn=cmd_verdict)
     sp = sub.add_parser("calibrate", help="LLM 判定と人手ラベルの一致率")
     sp.add_argument("run")
     sp.add_argument("--labels", required=True)

@@ -133,7 +133,7 @@ class E2E(unittest.TestCase):
         self.assertIn("claude-ds-lite/csv-summary-format", out)  # 下がったタスクは診断として出る
 
     def test_llm_judge_only_when_code_passes(self):
-        args = ["--trials", "1", "--task", "csv-summary-insight", "--judge-executable", sys.executable, str(FAKE / "fake_claude.py")]
+        args = ["--trials", "1", "--task", "csv-summary-insight", "--judge-agent", "claude_code", "--judge-executable", sys.executable, str(FAKE / "fake_claude.py")]
         code, out, s, recs = self.run_eval(*args)
         self.assertEqual(code, 0, out)
         by = {r["profile_id"]: r for r in recs}
@@ -193,7 +193,7 @@ class E2E(unittest.TestCase):
         prof = self.ex / "profiles" / "claude-ds-lite.yaml"
         prof.write_text(prof.read_text(encoding="utf-8") + "\nenv: {FAKE_MARKER: from-profile}\nextra_args: [--add-dir, '{workdir}']\n",
                         encoding="utf-8")
-        args = ["--trials", "1", "--task", "csv-summary-insight", "--judge-executable", sys.executable, str(FAKE / "fake_claude.py"),
+        args = ["--trials", "1", "--task", "csv-summary-insight", "--judge-agent", "claude_code", "--judge-executable", sys.executable, str(FAKE / "fake_claude.py"),
                 "--judge-profile", "claude-ds-lite"]
         code, out, s, recs = self.run_eval(*args)
         self.assertEqual(code, 0, out)
