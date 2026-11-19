@@ -147,6 +147,16 @@ class TestGuards(unittest.TestCase):
         v = verdict(recs, summary({f"c{i}": ["control"] for i in range(4)}), rules(control_tags=("control",)))
         self.assertEqual(v["conclusion"], "IMPROVED", v["reasons"])
 
+    def test_registered_controls_must_be_present_and_usable(self):
+        recs = runs({f"t{i}": (2, 4) for i in range(8)}, 4)
+        registered = rules(control_tags=("control",))
+        missing = verdict(recs, summary(), registered)
+        self.assertEqual(missing["conclusion"], "INCONCLUSIVE")
+        controls = runs({"c": (4, 4)}, 4, valid=False, error={"type": "agent_error"})
+        invalid = verdict(recs + controls, summary({"c": ["control"]}), registered)
+        self.assertEqual(invalid["conclusion"], "INCONCLUSIVE")
+        self.assertEqual(invalid["controls"]["tasks"], 0)
+
 
 class TestJudgeGuards(unittest.TestCase):
     def llm_records(self, status="pass", agent="claude_code"):
@@ -186,7 +196,7 @@ class TestJudgeGuards(unittest.TestCase):
         self.assertIn("校正は不要", {c["id"]: c["message"] for c in v["checks"]}["calibration"])
 
     def test_weak_judge_is_marked_and_not_adoptable(self):
-        j = {**STRONG_JUDGE, "models": {"codex": "gpt-6.2-mini"}, "strength": {"codex": "weak"}, "weak_allowed": True}
+        j = {**STRONG_JUDGE, "models": {**STRONG_JUDGE["models"], "codex": "gpt-6.2-mini"}, "weak_allowed": True}
         v = verdict(self.llm_records(), summary(judge=j), rules())
         self.assertEqual(v["conclusion"], "IMPROVED")
         self.assertFalse(v["adoptable"])
@@ -199,6 +209,20 @@ class TestJudgeGuards(unittest.TestCase):
         v = verdict(runs({f"t{i}": (2, 4) for i in range(8)}, 4), summary(judge=j), rules())
         self.assertEqual((v["conclusion"], v["adoptable"], v["exit_code"]), ("IMPROVED", False, EXIT_NOT_ADOPTABLE))
         self.assertTrue(any("dev 段階" in r for r in v["not_adoptable_reasons"]))
+        self.assertEqual(verdict(runs({f"t{i}": (2, 4) for i in range(8)}, 4), summary(judge=j),
+                                 rules(required_tier="dev"))["exit_code"], EXIT_NOT_ADOPTABLE)
+
+    def test_decisive_with_mid_model_or_single_vote_cannot_be_adopted(self):
+        for overrides in ({"models": {**STRONG_JUDGE["models"], "codex": "gpt-6.2-sol"}}, {"votes": 1},
+                          {"tier": None}, {"tier": "bogus"}):
+            with self.subTest(overrides=overrides):
+                v = verdict(self.llm_records(), summary(judge={**STRONG_JUDGE, **overrides}), rules())
+                self.assertEqual(v["exit_code"], EXIT_NOT_ADOPTABLE)
+
+    def test_missing_family_route_is_inconclusive(self):
+        v = verdict(self.llm_records(), summary(judge={**STRONG_JUDGE, "plan": {}}), rules())
+        self.assertEqual(v["conclusion"], "INCONCLUSIVE")
+        self.assertEqual(self.check(v, "judge_route"), "fail")
 
     def test_legacy_haiku_unblinded_same_family(self):
         # 旧版: 判定役 haiku（claude_code）・盲検化なし。評価対象も claude_code
@@ -229,6 +253,9 @@ class TestPrereg(unittest.TestCase):
         self.assertEqual(changed["prereg"]["changed"], ["ceiling"])
         self.assertFalse(changed["adoptable"])
         self.assertEqual(changed["exit_code"], EXIT_NOT_ADOPTABLE)
+        tampered = verdict(recs, summary(), rules(), {**prereg, "rules_hash": "invalid"})
+        self.assertEqual(tampered["prereg"]["status"], "invalid")
+        self.assertEqual(tampered["conclusion"], "INCONCLUSIVE")
 
     def test_no_prereg_is_reported(self):
         v = verdict(runs({f"t{i}": (2, 4) for i in range(8)}, 4), summary(), rules())

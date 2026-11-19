@@ -29,11 +29,11 @@ import hashlib
 import json
 import random
 import re
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, fields
 from statistics import mean
 from typing import Any
 
-from .judging import model_strength
+from .judging import TIER_VOTES, model_strength, other_family, strength_ok
 from .metrics import sign_test
 from .record import EXCLUDED_ERRORS, TrialRecord
 from .spec import SpecError
@@ -78,6 +78,8 @@ class Rules:
             raise SpecError("floor < ceiling で、どちらも 0〜1")
         if self.min_tasks < 2 or self.min_trials_per_task < 1:
             raise SpecError("min_tasks は 2 以上、min_trials_per_task は 1 以上")
+        if self.resamples < 1 or self.min_calibration_items < 1:
+            raise SpecError("resamples と min_calibration_items は 1 以上")
         if not 0 < self.confidence < 1 or not 0 <= self.max_error_rate <= 1 or not 0 <= self.min_calibration_agreement <= 1:
             raise SpecError("confidence・max_error_rate・min_calibration_agreement は 0〜1")
         if not 0 < self.min_effect < 1 or self.control_margin < 0:
@@ -174,33 +176,45 @@ def _judge_checks(j: dict[str, Any], agents: set[str], decided: int, disagreemen
     fail: list[str] = []
     prov: list[str] = []
     tier = j.get("tier")
-    if tier == "dev" and rules.required_tier == "decisive":
+    if tier == "dev":
         prov.append("dev 段階: 採用判断には使えません（--tier decisive で実行し直してください）")
         checks.append(_c("tier", "provisional", "dev 段階（中位モデル・1 回）。結論は暫定で、採用・マージの根拠にできません"))
     else:
         checks.append(_c("tier", "ok" if tier else "n/a", f"段階 {tier or '記録なし（旧版）'}"))
+    models = j.get("models") or {}
+    weak = sorted(f"{f}: {m}" for f, m in models.items() if not strength_ok(m, "dev" if tier == "dev" else "decisive"))
+    if weak:
+        checks.append(_c("judge_strength", "provisional", f"弱い判定役（{', '.join(weak)}）。採用判断には使えません"))
     if not decided:
         checks.append(_c("calibration", "n/a", "LLM 判定が合否を決めた試行はありません（校正は不要）"))
         checks.append(_c("judge_family", "n/a", "LLM 判定を使っていないため判定役の系統は結論に影響しません"))
         return fail, prov
-    weak = sorted(f for f, s in (j.get("strength") or {}).items() if s == "weak")
-    if weak:
-        prov.append(f"弱い判定役（{', '.join(f'{f}: {(j.get('models') or {}).get(f)}' for f in weak)}）の判定が合否を決めた試行があります")
-        checks.append(_c("judge_strength", "provisional", f"弱い判定役 {weak}。採用判断には使えません"))
+    if weak or not models:
+        prov.append(f"弱い判定役（{', '.join(weak) or 'モデル不明'}）の判定が合否を決めた試行があります")
     else:
-        checks.append(_c("judge_strength", "ok", f"判定モデル {j.get('models')}"))
+        checks.append(_c("judge_strength", "ok", f"判定モデル {models}"))
+    if tier != "dev" and (j.get("votes") or 0) < TIER_VOTES["decisive"]:
+        prov.append("採用判断には 1 系統あたり 3 回以上の判定が必要です")
+    if tier not in ("dev", "decisive"):
+        prov.append("decisive 段階の記録を確認できません")
     if not j.get("blind"):
         prov.append("判定役は盲検化されていません（旧版の結果）")
         checks.append(_c("blind", "provisional", "盲検化なし（旧版の結果）"))
     else:
         checks.append(_c("blind", "ok", f"盲検化あり・判定順はランダム（seed {j.get('seed')}）"))
     plan = j.get("plan") or {}
-    same = sorted(a for a in agents if (plan.get(a) or {}).get("same_family", j.get("legacy") and a in (j.get("models") or {})))
+    routes = {a: set(models if j.get("legacy") else (plan.get(a) or {}).get("families") or ()) for a in agents}
+    same = sorted(a for a, families in routes.items() if families == {a})
+    missing = sorted(a for a, families in routes.items() if a not in same and
+                     (other_family(a) not in families or not families <= models.keys()))
     if same:
         fail.append(f"同系統の判定役しかありません（評価対象 {same}）。LLM 判定が合否を決めた試行が {decided} 件あります")
         checks.append(_c("judge_family", "fail", f"同系統の判定役（{same}）。別系統の CLI を入れてください"))
-    else:
-        both = all((plan.get(a) or {}).get("both_families") for a in agents)
+    if missing:
+        fail.append(f"別系統の判定役を確認できません（評価対象 {missing}）")
+        checks.append(_c("judge_route", "fail", fail[-1]))
+    if not same and not missing:
+        both = all(len(families) == 2 for families in routes.values())
         checks.append(_c("judge_family", "ok", "両系統一致" if both else "別系統の判定役"))
     if disagreements:
         checks.append(_c("judge_disagreement", "warn", f"判定不一致 {disagreements} 件（合格として数えていません）"))
@@ -309,8 +323,14 @@ def verdict(records: list[TrialRecord], summary: dict[str, Any], rules: Rules,
     # 3. 対照タスク
     controls = None
     regressed_ctrl = False
+    missing_tags = sorted(tag for tag in rules.control_tags if not any(
+        tag in ((meta_tasks.get(t) or {}).get("tags") or []) for t in ctrl
+    ))
+    if missing_tags:
+        inconclusive.append(f"対照タグ {missing_tags} のタスクがありません")
+        checks.append(_c("controls_missing", "fail", inconclusive[-1]))
     if ctrl:
-        cpairs, c_one = _task_pairs(recs, base, cand, ctrl)
+        cpairs, _ = _task_pairs(recs, base, cand, ctrl)
         c_est, c_low, c_high = cluster_bootstrap(list(cpairs.values()), rules.confidence, rules.resamples, rules.seed)
         controls = {"tasks": len(cpairs), "delta": c_est, "ci": [c_low, c_high] if c_low is not None else None,
                     "regressed_tasks": sorted(t for t, (b, c) in cpairs.items() if sum(c) / len(c) < sum(b) / len(b) - 1e-9)}
@@ -320,25 +340,27 @@ def verdict(records: list[TrialRecord], summary: dict[str, Any], rules: Rules,
         elif c_est is not None and c_est < -rules.control_margin:
             inconclusive.append(f"対照タスクの後退の疑い（差 {c_est:+.2f} < −{rules.control_margin:.2f}、区間が 0 をまたぐ）")
             checks.append(_c("controls", "fail", inconclusive[-1]))
-        elif c_one:
-            inconclusive.append(f"対照タスクに片側だけ有効な結果のものがあります: {c_one[:5]}")
+        elif missing_controls := sorted(t for t in ctrl if t not in cpairs or
+                                        min(map(len, cpairs[t])) < rules.min_trials_per_task):
+            inconclusive.append(f"対照タスクの有効な比較が不足しています: {missing_controls[:5]}")
             checks.append(_c("controls", "fail", inconclusive[-1]))
         else:
             checks.append(_c("controls", "ok", f"対照タスク {len(cpairs)} 件で後退なし（差 {c_est if c_est is None else round(c_est, 3)}）"))
-    elif rules.control_tags:
-        checks.append(_c("controls", "warn", f"対照タグ {list(rules.control_tags)} のタスクがありません"))
 
     # 4. 判定役
     j = judge_info(summary)
     decided = sum(1 for r in recs if invalid_reason(r) is None and llm_decided(r))
     disagreements = sum(1 for r in recs for g in r.grader_results or [] if g.get("status") == "judge_disagreement")
-    agents = {r.agent for r in recs}
+    agents = {r.agent for r in recs if invalid_reason(r) is None and llm_decided(r)}
     j_fail, prov = _judge_checks(j, agents, decided, disagreements, rules, checks)
     inconclusive += j_fail
 
     # 5. 事前登録
     reg = _prereg_status(rules, prereg)
-    if reg["status"] == "post_hoc":
+    if reg["status"] == "invalid":
+        inconclusive.append("事前登録のハッシュを検証できません")
+        checks.append(_c("prereg", "fail", inconclusive[-1]))
+    elif reg["status"] == "post_hoc":
         prov.append("事前登録と違う規則で集計し直しています（事後）")
         checks.append(_c("prereg", "provisional", f"事後: 事前登録 {reg.get('registered_hash')} と違う規則 {reg['hash']}（違い: {reg.get('changed')}）"))
     elif reg["status"] == "registered":
@@ -384,6 +406,8 @@ def _prereg_status(rules: Rules, prereg: dict[str, Any] | None) -> dict[str, Any
     if not prereg:
         return {"status": "none", "hash": rules_hash(cur)}
     reg = dict(prereg.get("rules") or {})
+    if prereg.get("rules_hash") != rules_hash(reg):
+        return {"status": "invalid", "hash": rules_hash(cur), "registered_hash": prereg.get("rules_hash")}
     if reg.get("candidate") is None:
         reg["candidate"] = cur["candidate"]
     changed = sorted(k for k in set(reg) | set(cur) if reg.get(k) != cur.get(k))
