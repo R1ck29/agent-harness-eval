@@ -213,8 +213,16 @@ if fmt == "json":  # LLM 判定
         sys.exit(1)
     content = prompt.split("<<<", 1)[-1]
     verdict = "PASS" if "2026-03" in content and "店" in content else "FAIL"
-    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": f"{verdict}\n偽の判定",
-                      "total_cost_usd": 0.001}))
+    if os.environ.get("FAKE_JUDGE_PROMPT_LOG"):  # 判定入力の確認用（盲検化・最小の入力）
+        with open(os.environ["FAKE_JUDGE_PROMPT_LOG"], "a", encoding="utf-8") as f:
+            f.write(json.dumps({"family": "claude_code", "model": args[args.index("--model") + 1] if "--model" in args else None,
+                                "prompt": prompt}, ensure_ascii=False) + "\n")
+    if os.environ.get("FAKE_JUDGE_VERDICT"):
+        verdict = os.environ["FAKE_JUDGE_VERDICT"]
+    res = {"type": "result", "subtype": "success", "is_error": False, "result": f"{verdict}\n偽の判定", "total_cost_usd": 0.001}
+    if os.environ.get("FAKE_JUDGE_USAGE"):
+        res["usage"] = {"input_tokens": 1000, "cache_read_input_tokens": 500, "cache_creation_input_tokens": 100, "output_tokens": 20}
+    print(json.dumps(res))
     sys.exit(0)
 
 assert "--verbose" in args, "stream-json には --verbose が必要"

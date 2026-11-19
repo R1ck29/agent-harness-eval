@@ -19,6 +19,17 @@ if log:
     with open(log, "a", encoding="utf-8") as f:
         f.write(json.dumps({"argv": args, "home": os.environ.get("HOME"), "cfg": str(home), "cwd": os.getcwd(),
                             "claudecode": os.environ.get("CLAUDECODE"), "marker": os.environ.get("FAKE_MARKER")}) + "\n")
+if "read-only" in args and "-C" not in args:  # LLM 判定（judge_cmd）: 対象に「2026-03」と店舗名があれば PASS
+    content = prompt.split("<<<", 1)[-1]
+    verdict = os.environ.get("FAKE_CODEX_JUDGE_VERDICT") or ("PASS" if "2026-03" in content and "店" in content else "FAIL")
+    if os.environ.get("FAKE_JUDGE_PROMPT_LOG"):
+        with open(os.environ["FAKE_JUDGE_PROMPT_LOG"], "a", encoding="utf-8") as f:
+            f.write(json.dumps({"family": "codex", "model": args[args.index("-m") + 1] if "-m" in args else None,
+                                "prompt": prompt}, ensure_ascii=False) + "\n")
+    print(json.dumps({"type": "thread.started", "thread_id": "judge"}))
+    print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": f"{verdict}\n偽の判定"}}, ensure_ascii=False))
+    print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 2000, "cached_input_tokens": 1500, "output_tokens": 50}}))
+    sys.exit(0)
 agents_md = (home / "AGENTS.md").read_text(encoding="utf-8") if (home / "AGENTS.md").exists() else ""
 skills_dir = Path(os.environ["HOME"]) / ".agents" / "skills"
 
