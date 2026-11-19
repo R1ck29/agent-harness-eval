@@ -141,6 +141,17 @@ class JudgePipeline(unittest.TestCase):
         for t in ("claude-ds-lite", "/tmp/x", "CLAUDE.md", "Codex", "opus", "ds-lite"):
             self.assertNotIn(t, b)
 
+    def test_blind_terms_include_installed_skill_and_file_names(self):
+        """配布物の install（copy / to）から、複製したファイル名とスキル名を伏せる語に入れる。"""
+        from harness_eval.runner import RunOptions, Runner
+        from harness_eval.spec import load_profiles, load_tasks
+        tasks = load_tasks([str(self.ex / "tasks" / "csv-summary-insight.yaml")])
+        r = Runner(tasks, load_profiles(self.profiles("claude-ds-lite")), RunOptions(log=lambda s: None), self.out)
+        terms, _ = r._blind_terms()
+        for t in ("csv-monthly-summary", "CLAUDE.md", "skills"):
+            self.assertIn(t, terms)
+        self.assertFalse([t for t in terms if "{" in t])  # {config_dir} などの置換前の文字列は入れない
+
     def test_judge_order_is_shuffled_by_seed(self):
         from harness_eval.runner import RunOptions, Runner
         from harness_eval.spec import load_profiles, load_tasks
@@ -282,6 +293,20 @@ class JudgePipeline(unittest.TestCase):
                 v = json.loads(out)
                 self.assertEqual((v["conclusion"], code), (name, want), v["reasons"])
 
+
+    def test_verdict_bad_rules_file_is_a_definition_error(self):
+        """--rules の YAML が壊れている・ない → 終了コード 2（REGRESSED の 1 と区別する）。"""
+        from test_soundness import runs as mk
+        d = self.tmp / "bad-rules"
+        d.mkdir()
+        recs = mk({f"t{i}": (2, 4) for i in range(8)}, 4)
+        (d / "trials.jsonl").write_text("".join(json.dumps(r.to_dict(), ensure_ascii=False) + "\n" for r in recs), encoding="utf-8")
+        (d / "summary.json").write_text(json.dumps({"meta": {"tasks": {}, "options": {}}}), encoding="utf-8")
+        (d / "rules.yaml").write_text("ceiling: [unclosed\n", encoding="utf-8")
+        for rules in (d / "rules.yaml", d / "missing.yaml"):
+            code, out = run_cli("verdict", str(d), "--baseline", "base", "--candidate", "cand", "--rules", str(rules))
+            self.assertEqual(code, 2, out)
+            self.assertIn("判定規則を読めません", out)
 
 if __name__ == "__main__":
     unittest.main()

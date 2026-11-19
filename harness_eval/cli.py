@@ -112,7 +112,10 @@ def _rules(a: argparse.Namespace, baseline: str | None, start: dict | None = Non
     """判定規則: 既定（または start: 事前登録の規則）+ --rules（YAML のマッピング。Rules のキー）+ --baseline / --candidate / --control-tag。"""
     d: dict = dict(start or {})
     if getattr(a, "rules", None):
-        extra = yaml.safe_load(Path(a.rules).read_text(encoding="utf-8")) or {}
+        try:
+            extra = yaml.safe_load(Path(a.rules).read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError) as e:  # 定義の誤りは終了コード 2（REGRESSED の 1 と区別する）
+            raise SpecError(f"{a.rules}: 判定規則を読めません: {e}") from e
         if not isinstance(extra, dict):
             raise SpecError(f"{a.rules}: 判定規則はマッピング")
         d.update(extra)

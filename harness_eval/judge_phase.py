@@ -162,9 +162,14 @@ class JudgePhase:
         terms += [m for tier in TIER_MODELS.values() for m in tier.values()]
         for p in profiles:  # 配布物の名前（スキル・ファイル名など）もどの条件かを教えうる
             for it in p.install:
-                for k in ("src", "dest", "name"):
-                    if isinstance(it.get(k), str):
-                        terms.append(Path(it[k]).name)
+                if not isinstance(it.get("copy"), str):
+                    continue
+                src = Path(it["copy"].replace("{profile_dir}", str(p.base_dir)))
+                src = src if src.is_absolute() else p.base_dir / src
+                names = [src.name, Path(str(it.get("to", ""))).name]
+                if src.is_dir():  # skills/ を丸ごと複製する場合は、中のスキル名・ファイル名も
+                    names += [c.name for c in src.iterdir()]
+                terms += [n for n in names if n and "{" not in n]
         paths = [str(self.run_dir), str(self.opt.cache_dir), str(Path.home())] + [str(p.base_dir) for p in profiles]
         return terms, paths
 
