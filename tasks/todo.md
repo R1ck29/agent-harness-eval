@@ -30,3 +30,6 @@
 ## 続き（11/20 00:57 JST、Claude 5h 上限で停止。次は 05:20 JST 以降の新しいセッション）
 - 停止時点: 77d1206（leak/tamper/env 許可リスト/試行ごと TMPDIR/web_search）・dd511f8（verdict の完全性検査・模擬ズルエージェントのメタ評価・sandbox/認証書き戻し/web_search のテスト）は push 済み。README/guide/reference の未コミット差分はこの WIP コミットに入れた（レビュー未了）。252 passed / 1 skipped。
 - 残り: 上のズル対策チェックリストを実装と突き合わせて [x] に更新・不足分の実装（特に bwrap の実体と doctor の期限表示の確認）、docs/results/2026-11-19-sound-eval-defaults.md にメタ評価の結果を記録、ruff・CI（ubuntu/macos/windows）緑の確認、PR 作成（`gh pr create --base main`、本文に評価 a〜d + メタ評価 + 残課題 + EVAL-GATE 行）。マージしない。
+- **CI 回帰（最優先で直す）**: 069d0a7 は 6 ジョブ全部緑だったが、77d1206/dd511f8 以降 macOS・Windows が赤（run 44560124361; ubuntu は緑）。
+  - macOS: tests/test_cheatproof.py::LeakCheck::test_own_dir_glob_is_allowed が 'INVALID' != 'clean'（推定: /var → /private/var の実パス化か大文字小文字でパス比較がずれる。要確認）。
+  - Windows: test_e2e の多数が agent_crash（20/20 など）→ 推定: 環境変数の許可リストが Windows に必要な変数（SYSTEMROOT・COMSPEC・PATHEXT・USERPROFILE・APPDATA・TEMP など）を落とした。要確認。
