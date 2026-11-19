@@ -59,7 +59,7 @@ DEFAULT_CATEGORY = {
 TASK_KEYS = {"id", "description", "targets", "tags", "fixture", "prompt", "limits",
              "allow_tools", "deny_tools", "graders", "paired_negative", "split", "family", "calibration"}
 # 判定役の校正: 決定的な採点器（command など）の合否と同じことを LLM 判定にも問い、一致率を測る（criteria は必須）
-CALIBRATION_KEYS = {"criteria", "focus", "max_chars"}
+CALIBRATION_KEYS = {"criteria", "focus", "max_chars", "graders"}  # graders: 対応する決定的な採点器の番号（既定: llm 以外すべて）
 # 自己改善ループ用のタスクの分割。train: 改善案を作る材料／dev: 候補の足切り／holdout: 昇格判定だけに使う（改善役に見せない）
 SPLITS = ("train", "dev", "holdout")
 NO_SPLIT = "none"  # run --split none: 分割を付けていないタスク
@@ -329,6 +329,9 @@ def load_task(path: Path) -> Task:
     graders = d.get("graders") or []
     if not isinstance(graders, list) or not graders:
         raise SpecError(f"{path}: graders は 1 つ以上必要です")
+    for gi in (calibration or {}).get("graders") or []:
+        if not isinstance(gi, int) or not 0 <= gi < len(graders) or (graders[gi] or {}).get("type") == "llm":
+            raise SpecError(f"{path}: calibration.graders の {gi} は決定的な採点器（llm 以外）の番号（0 始まり）にしてください")
     return Task(
         id=str(d["id"]), prompt=str(d["prompt"]), path=path.resolve(),
         description=str(d.get("description", "")), targets=targets,

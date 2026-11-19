@@ -207,6 +207,17 @@ class JudgePipeline(unittest.TestCase):
         self.assertAlmostEqual(u["judge_share"], u["judge"]["cost_usd"] / u["total_cost_usd"])
         self.assertIn("判定側（judge）", out)
 
+    def test_report_and_cli_lead_with_the_verdict(self):
+        code, out, s, recs = self.go("--no-llm", "--trials", "2", task="arithmetic-no-skill")
+        run_dir = sorted(d for d in self.out.iterdir() if d.is_dir())[-1]
+        html = (run_dir / "report.html").read_text(encoding="utf-8")
+        self.assertLess(html.index("<h2>結論</h2>"), html.index("<h2>サマリー</h2>"))
+        self.assertIn(s["verdicts"][0]["label"], html)
+        self.assertIn("ベースライン合格率", html)
+        self.assertIn("解く側（solver）", html)
+        self.assertLess(out.index("結論 "), out.index("プロファイル "))
+        self.assertIn(s["verdicts"][0]["conclusion"], ("IMPROVED", "NO CHANGE", "REGRESSED", "INCONCLUSIVE"))
+
     def test_codex_judge_cost_from_price_table(self):
         code, out, s, recs = self.go(*CLAUDE_J, *CODEX_J)
         # OpenAI の定義: input 2000 のうち 1500 がキャッシュ読み。dev の codex 判定は gpt-6.2-sol

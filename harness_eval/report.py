@@ -55,15 +55,70 @@ def _ci(ci: list[float] | None) -> str:
     return "" if not ci else f"<br><span class='mut'>[{ci[0] * 100:+.0f}, {ci[1] * 100:+.0f}]</span>"
 
 
+CONCLUSION_CLASS = {"IMPROVED": "ok", "REGRESSED": "ng", "INCONCLUSIVE": "warn", "NO CHANGE": "mut"}
+
+
+def _verdict_section(verdicts: list[dict[str, Any]] | None, usage: dict[str, Any] | None) -> list[str]:
+    """冒頭: 結論（理由付き）・ベースライン合格率・差と区間・判定役の設定・妥当性チェック・トークンと費用（solver / judge 別）。"""
+    out = ["<h2>結論</h2>"]
+    if not verdicts:
+        out.append("<div class='warn'>結論を出せません（ベースラインが決まりません。--baseline を指定するか "
+                   "<code>python -m harness_eval verdict</code> を使ってください）</div>")
+    for v in verdicts or []:
+        cls = "warn" if v.get("provisional") else CONCLUSION_CLASS.get(v["conclusion"], "")
+        ci = "—" if not v.get("ci") else f"[{v['ci'][0]:+.2f}, {v['ci'][1]:+.2f}]"
+        d = "—" if v.get("delta") is None else f"{v['delta']:+.2f}"
+        j = v.get("judge") or {}
+        cal = j.get("calibration_rate")
+        weak = j.get("weak_allowed") and any(x != "strong" for x in (j.get("strength") or {}).values()) and j.get("tier") != "dev"
+        jtxt = ("LLM 判定なし（校正は不要）" if not j.get("llm") else
+                f"段階 {_e(j.get('tier'))}・モデル {_e(j.get('models'))}・系統 {_e({a: p.get('families') for a, p in (j.get('plan') or {}).items()})}・"
+                f"盲検 {'あり' if j.get('blind') else 'なし'}・{_e(j.get('votes'))} 回・校正一致率 {_pct(cal)}（{_e(j.get('calibration_items') or 0)} 件）"
+                + ("・<span class='ng'>弱い判定役</span>" if weak else ""))
+        out.append(f"<div style='font-size:20px;margin:8px 0'><b>{_e(v['candidate'])}</b> vs <b>{_e(v['baseline'])}</b>: "
+                   f"<span class='{cls}'>{_e(v['label'])}</span></div><ul>")
+        out += [f"<li>{_e(r)}</li>" for r in v["reasons"] + v.get("not_adoptable_reasons", [])]
+        out.append("</ul><table>"
+                   f"<tr><th>ベースライン合格率</th><td>{_pct(v.get('baseline_rate'))}（候補 {_pct(v.get('candidate_rate'))}）</td></tr>"
+                   f"<tr><th>差（候補 − ベースライン）</th><td>{d} {ci}（{_pct(v.get('confidence'))} 区間。{_e(v.get('ci_method'))}）"
+                   f"・タスク {_e(v.get('n_tasks'))} 件</td></tr>"
+                   f"<tr><th>判定役</th><td>{jtxt}</td></tr>"
+                   f"<tr><th>事前登録</th><td>{_e((v.get('prereg') or {}).get('status'))}（規則のハッシュ {_e(v.get('rules_hash'))}）</td></tr></table>")
+        out.append("<details><summary>妥当性チェック</summary><table><tr><th>チェック</th><th>結果</th><th>内容</th></tr>")
+        icon = {"ok": "ok", "fail": "ng", "warn": "warn", "provisional": "warn"}
+        out += [f"<tr><td>{_e(c['id'])}</td><td class='{icon.get(c['status'], 'mut')}'>{_e(c['status'])}</td><td>{_e(c['message'])}</td></tr>"
+                for c in v["checks"]]
+        out.append("</table></details>")
+    if usage:
+        out.append("<h2>トークンと費用（この実行で呼んだ分・公開価格で換算）</h2><table><tr><th>役割</th><th class='n'>呼び出し</th>"
+                   "<th class='n'>入力</th><th class='n'>キャッシュ読み</th><th class='n'>キャッシュ書き</th><th class='n'>出力</th>"
+                   "<th class='n'>費用</th></tr>")
+        for role, label in (("solver", "解く側（solver）"), ("judge", "判定側（judge）")):
+            u = usage[role]
+            unk = f"（不明 {u['cost_unknown']} 回）" if u.get("cost_unknown") else ""
+            out.append(f"<tr><td>{label}</td><td class='n'>{u['calls']}</td>" + "".join(
+                f"<td class='n'>{u[k]:,}</td>" for k in ("input", "cache_read", "cache_write", "output")) +
+                f"<td class='n'>{_usd(u['cost_usd'])}{unk}</td></tr>")
+        share = usage.get("judge_share")
+        out.append(f"</table><div class='mut'>合計 {_usd(usage.get('total_cost_usd'))}・判定の割合 {_pct(share)}・判定キャッシュ "
+                   f"{_e(usage['judge'].get('cache_hits', 0))} 回・価格 {_e(usage['prices']['fetched_at'])} "
+                   f"{_e(', '.join(usage['prices']['sources'].values()))}</div>")
+    return out
+
+
 def render(summary: dict[str, Any], records: list[TrialRecord], baseline: str | None = None) -> str:
     meta = summary.get("meta", {})
     k = summary["k"]
     P = summary["profiles"]
     out = [f"<!doctype html><html lang='ja'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
            f"<title>Harness Eval {_e(meta.get('run_id'))}</title><style>{CSS}</style></head><body>"]
+    j = meta.get("judge") or {}
+    jdesc = (f"段階 {_e(j.get('tier'))}・{_e(j.get('models'))}" if j.get("llm") else
+             f"{_e(meta.get('options', {}).get('judge_agent'))}/{_e(meta.get('options', {}).get('judge_model'))}")
     out.append(f"<h1>ハーネス評価レポート</h1><div class='mut'>run {_e(meta.get('run_id'))} ・ {_e(meta.get('started_at'))} ・ "
                f"試行 {_e(meta.get('options', {}).get('trials'))} 回/組 ・ k={k} ・ LLM判定 {'あり' if meta.get('options', {}).get('llm') else 'なし'}"
-               f"（{_e(meta.get('options', {}).get('judge_agent'))}/{_e(meta.get('options', {}).get('judge_model'))}）</div>")
+               f"（{jdesc}）</div>")
+    out += _verdict_section(summary.get("verdicts"), summary.get("usage"))
     if meta.get("ancestor_instructions"):
         out.append("<div class='warn'>注意: --out より上のフォルダの指示・スキルが全試行（配布物なしの基準を含む）に読み込まれた可能性があります: "
                    f"{_e(', '.join(meta['ancestor_instructions']))}</div>")

@@ -441,7 +441,8 @@ class Runner(JudgePhase):
             if task.calibration and rec.error is None:
                 c = task.calibration
                 content = judge_content(str(c.get("focus", "final")), int(c.get("max_chars", 20000)), rec, tp.workdir)
-                code = [g for g in rec.grader_results if g["type"] != "llm" and not g["harness_only"] and g["status"] != "not_run"]
+                picked = [rec.grader_results[i] for i in c["graders"]] if c.get("graders") else rec.grader_results
+                code = [g for g in picked if g["type"] != "llm" and not g["harness_only"] and g["status"] != "not_run"]
                 if content is not None and code:
                     rec.judge_inputs.append({"kind": "calibration", "criteria": str(c["criteria"]), "focus": str(c.get("focus", "final")),
                                              "content": content, "answer": all(g["status"] == "pass" for g in code)})
