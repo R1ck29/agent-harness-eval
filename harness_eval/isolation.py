@@ -58,6 +58,7 @@ BASE_ENV = frozenset({
     "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)", "APPDATA", "LOCALAPPDATA", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
     "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "PYTHONUTF8", "PYTHONIOENCODING", "PYTHONLEGACYWINDOWSSTDIO",  # 文字コード（Windows の cp1252 で日本語や記号を出して落ちないように）
 })
 # 渡さないときに doctor が名前を出す変数（そのエージェントの経路・認証・設定になりうるもの。GH_TOKEN などは渡さないのが目的なので出さない）
 _NOTABLE = {"claude_code": ("ANTHROPIC_", "CLAUDE", "AWS_", "GOOGLE_", "CLOUD_ML_", "VERTEX_"), "codex": ("CODEX_", "OPENAI_", "AZURE_")}

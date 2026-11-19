@@ -625,7 +625,7 @@ install:
         # 組織で意図して設定した変数（クライアント証明書など）は inherit_env に書いたときだけ渡す
         parent = {"CLAUDECODE": "1", "CLAUDE_EFFORT": "low", "CLAUDE_CODE_MESSAGING_SOCKET": "/s", "DROP_ME": "1",
                   "CLAUDE_CODE_CLIENT_CERT": "/c.pem", "GH_TOKEN": "ghp_x", "ANTHROPIC_API_KEY": "sk-x", "LC_ALL": "C.UTF-8",
-                  "HTTPS_PROXY": "http://proxy:8080", "TMPDIR": "/tmp/parent"}
+                  "HTTPS_PROXY": "http://proxy:8080", "TMPDIR": "/tmp/parent", "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
         with mock.patch.dict(os.environ, parent):
             env = build_env(p, tp, "CLAUDE_CONFIG_DIR")
             q = load_profile(write(self.tmp / "q.yaml", "id: q\nagent: claude_code\ninherit_env: [CLAUDE_CODE_CLIENT_CERT, DROP_ME]\n"
@@ -636,6 +636,8 @@ install:
             self.assertNotIn(k, env)
         self.assertEqual((env["PATH"], env["LC_ALL"], env["HTTPS_PROXY"]), (os.environ["PATH"], "C.UTF-8", "http://proxy:8080"))
         self.assertEqual(env["TMPDIR"], str(tp.tmp))  # 試行の一時フォルダ（親の TMPDIR ではない）
+        # 文字コードの設定は渡す（落とすと Windows の cp1252 で非 ASCII の出力が UnicodeEncodeError になる）
+        self.assertEqual((env["PYTHONUTF8"], env["PYTHONIOENCODING"]), ("1", "utf-8"))
         self.assertEqual(env_q["CLAUDE_CODE_CLIENT_CERT"], "/c.pem")
         self.assertNotIn("DROP_ME", env_q)  # env_unset は inherit_env より強い
         self.assertEqual(env["HOME"], str(tp.home))

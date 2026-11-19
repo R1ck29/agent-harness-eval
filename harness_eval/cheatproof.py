@@ -70,7 +70,10 @@ def leak_check(tool_calls: list[dict[str, Any]], transcript: str, trial_dir: Pat
     allow: 試行の外でも読んでよい絶対パス（プロファイルの sandbox_ro など）。patterns: タスクが足す INVALID の正規表現。"""
     trial = str(Path(trial_dir).resolve())
     allowed = sorted({f for a in [trial, str(trial_dir), *map(str, allow)] for f in _forms(a)}, key=len, reverse=True)
-    own_glob = re.compile("/".join(f"(?:{re.escape(part)}|\\*)" for part in trial.replace("\\", "/").split("/")))
+    # 自分の試行ディレクトリを、途中をグロブ（*）にして書いたもの。実パス（macOS の /private/var）と、渡された表記（/var）の両方
+    own_glob = re.compile("|".join(
+        "/".join(f"(?:{re.escape(part)}|\\*)" for part in form.replace("\\", "/").split("/"))
+        for form in dict.fromkeys([trial, str(trial_dir)])))
     guard = sorted({f for p in protected for f in _forms(str(p)) if len(f) > 3}, key=len, reverse=True)
     extra = [re.compile(p) for p in patterns]
     hits: list[dict[str, str]] = []

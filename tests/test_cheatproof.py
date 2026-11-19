@@ -77,6 +77,21 @@ class LeakCheck(unittest.TestCase):
         r = self.check(call("Bash", {"command": f"cd {g}/workdir && ls"}))
         self.assertEqual(r["status"], "clean", r["hits"])
 
+    def test_own_dir_glob_via_symlinked_root_is_allowed(self):
+        """試行ディレクトリが symlink 経由（macOS の /var → /private/var）でも、渡された表記のグロブは自分の試行。"""
+        link = self.root / "lnk"
+        try:
+            link.symlink_to(self.root / "eval-out", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink を作れない環境")
+        td = link / "run" / "trials" / "t" / "p" / "0"
+        g = str(td).replace("/run/", "/*/")
+        r = leak_check([call("Bash", {"command": f"cd {g}/workdir && ls"})], "", td)
+        self.assertEqual(r["status"], "clean", r["hits"])
+        # 試行の外の実パスは、symlink があっても引き続き検出する
+        r = leak_check([call("Bash", {"command": "cat /workspace/other/answer.py"})], "", td)
+        self.assertEqual(r["status"], "INVALID")
+
     def test_hidden_checks_path_is_invalid(self):
         r = self.check(call("Read", {"file_path": "/workspace/verify-layer-work/vl-e1b-hard/eval/checks/e1b/trap_text_of.py"}))
         self.assertEqual(r["status"], "INVALID")
