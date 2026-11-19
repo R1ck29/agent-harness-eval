@@ -39,3 +39,9 @@
 - CI 回帰は修正済み（Windows: 許可リストに PYTHONUTF8 / PYTHONIOENCODING / PYTHONLEGACYWINDOWSSTDIO、macOS: leak 検査のグロブを実パスと渡された表記の両方で作る）。6 ジョブ緑（run 44609206157）。
 - ズル対策チェックリストは実装・テスト（tests/test_cheatproof.py 35 件）と突き合わせて [x]。メタ評価は docs/results/2026-11-19-sound-eval-defaults.md の e に記録。
 - 残り: PR 作成（`gh pr create --base main`、マージしない）。Codex 実測は Riku の codex login 待ち、graphctl verdict-core は grant-attempt 待ち。
+
+## グラフの状態（11/20 午前）
+- 検証済み: verdict-core・cost-usage・judge-pipeline・cli-report・docs-version（それぞれ graph-reviewer の PASS。HEAD 546d967 で pytest 253 passed / 1 skipped・ruff 緑を再実行して確認）。
+- evidence は FAIL（試行 1/2）: 基準 b が「実データで IMPROVED」なのに、実データでは条件（ベースライン合格率 20〜80%）を満たす実行がなく合成データで示している。a・c・d は PASS。pr は evidence に依存するため無効化中。
+- 解除には Riku の判断が要る: (1) b を満たす実データの実行（外側のシェルで。手順は docs/results の b）を行う、または (2) 基準 b を「合成データ可（出所明記）」に人が直す。直したあと `graphctl retry evidence` → 提出 → レビュー → `retry pr` → 検証。
+- レビューで出た軽微な穴（PR の残課題）: 開始前の費用上限の判定は履歴のない solver の呼び出しを $0 と数える（警告は出る）、実行中の JudgeBudgetStop の直接テストなし、a の 8 タスク verdict の生出力が evidence に別名で残っていない。
