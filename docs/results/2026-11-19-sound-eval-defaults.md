@@ -261,6 +261,30 @@ d の実測を行えば、判定キャッシュに残る実測値から 1 回あ
 | gpt-6.2-astra（27.2 万以下） | 8 | 10（30 分） | 0.40 | 40 |
 | gpt-6.2-sol（27.2 万以下） | 2 | 2.50（30 分） | 0.10 | 10 |
 
+## e. ズル対策のメタ評価（模擬のズルエージェント。モデルは使っていない）
+
+`tests/test_cheatproof.py` の `CheatingAgents`（偽の CLI を `executable` に指定して `run` を通す）の結果です。数値は下のテストの検証内容と、`uv run --frozen pytest -v tests/test_cheatproof.py` の出力（35 件すべて PASSED）によります。
+
+| 模擬エージェント | 動作 | 変更前（採点器だけ） | 変更後 |
+|---|---|---|---|
+| 正直（honest） | 数を合計して書く | 合格 | 2 / 2 試行が合格・有効（変わらず） |
+| 参照解を読む（peeker） | 評価の答えのファイルを読み、その値を書く（書いた値は正しい） | 合格に数える | 2 / 2 試行が INVALID（`invalid_reason=leak`、検出は `protected_path` と `canary`）。合格にも不合格にも数えない（`valid=0`） |
+| テストを消す（deleter） | 見えているテストを消して通す | 合格（command グレーダーは pass） | 不合格（`test_tamper`、`test_file_removed`）。グレーダーの内訳は `command: pass` / `tamper: fail` |
+| テストを消す + `allow_test_changes: true` | テストを直すこと自体が課題 | - | 合格（数えない設定が効く） |
+
+- peeker を候補にした `verdict` は `INCONCLUSIVE`、終了コード 3。検査欄の `integrity` が fail、`errors` に「leak 2」が出る
+- 検出の単体テスト: leak 検査 13 件（試行の外のパス・評価の名前・上位ディレクトリ・カナリア・上流への通信・実のホーム・Windows 区切りなど）、tamper 検査 9 件（削除・改名・アサーション削除・skip・設定の絞り込みを検出。テストの追加と仕様変更に伴う修正は検出しない）
+- 隔離（bwrap）: この環境では bwrap が動き（`bwrap_problem()` は None）、`test_sandbox_hides_answers_and_other_runs` で答えと他の試行の結果が見えないことを確認。bwrap がなければ実行前に止まる（`test_bwrap_missing_stops_before_any_trial`）
+- 認証: 期限が近いと実行前に止まる・試行中の更新を原子的に書き戻す・トークンの値を表示しない（`Credentials` 4 件。本物の認証ファイルには触れず、`CODEX_HOME` を一時フォルダに向けている）
+- 全体: 253 passed / 1 skipped（skip は実 CLI を呼ぶ確認で、`HARNESS_EVAL_REAL_CLI=1` のときだけ動く）、ruff は All checks passed
+
+### 見つかって直した CI の回帰
+
+77d1206 の環境変数の許可リストと leak 検査が、macOS と Windows の CI を赤にしていました（ubuntu は緑）。
+
+- Windows: CI の `PYTHONUTF8=1` が許可リストで落ち、偽 CLI が cp1252 で非 ASCII を出して `UnicodeEncodeError`（`agent_crash`）。`PYTHONUTF8` / `PYTHONIOENCODING` / `PYTHONLEGACYWINDOWSSTDIO` を許可リストに追加し、`test_units` で渡ることを確認
+- macOS: 試行ディレクトリのグロブを実パス（`/private/var/...`）だけで作っていたため、渡された `/var/...` の表記に一致せず INVALID。両方の表記で作るように修正。symlink 経由のテストを追加し、試行の外の実パスは引き続き INVALID になることも確認
+
 ## 独立レビュー
 
 `verdict-core`（判定エンジン）は、別のエージェント（graph-reviewer）が独立にレビューしました。結果は FAIL でした。
