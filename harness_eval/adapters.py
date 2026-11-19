@@ -48,6 +48,10 @@ def _jsonl(lines: Iterable[str], warnings: list[str]) -> Iterable[dict[str, Any]
 
 def _classify_message(msg: str) -> str:
     m = msg.lower()
+    # 利用上限（サブスクリプションの上限・クレジット切れ）。数時間戻らないので再試行せず、結果から除外する
+    if re.search(r"usage limit|hit your (?:usage|rate) limit|insufficient_quota|exceeded your current quota|"
+                 r"credit balance is too low|purchase more credits", m):
+        return "usage_limit"
     if re.search(r"rate.?limit|\b429\b|too many requests", m):
         return "rate_limit"
     if re.search(r"overloaded|\b529\b", m):
