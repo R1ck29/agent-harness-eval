@@ -233,7 +233,7 @@ def _judge_checks(j: dict[str, Any], agents: set[str], decided: int, disagreemen
     if items < rules.min_calibration_items or rate is None:
         fail.append(f"判定役の校正が不足しています（校正項目 {items} 件、必要 {rules.min_calibration_items} 件）")
         checks.append(_c("calibration", "fail", f"校正項目 {items} 件 < {rules.min_calibration_items} 件。"
-                         "決定的な採点器を持つタスクに calibration_criteria を書いてください"))
+                         "決定的な採点器を持つタスクに calibration を書いてください"))
     elif rate < rules.min_calibration_agreement:
         fail.append(f"判定役と決定的な採点器の一致率 {rate:.0%} が {rules.min_calibration_agreement:.0%} 未満です")
         checks.append(_c("calibration", "fail", f"一致率 {rate:.0%}（{cal.get('agree')}/{items}）< {rules.min_calibration_agreement:.0%}"))

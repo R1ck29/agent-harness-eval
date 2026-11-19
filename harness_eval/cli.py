@@ -15,6 +15,7 @@ from . import __version__
 from .isolation import ancestor_instructions, missing_inherited, passed_claude_vars, route_variables
 from .metrics import EFFICIENCY_METRICS, HARD_CATEGORIES, gate, holdout_comparisons, promote, promote_efficiency
 from .report import render
+from .costs import resolve
 from .judging import infer_family
 from .runner import HOLDOUT_LEDGER, RunOptions, Runner, load_run
 from .soundness import Rules, default_baseline, run_verdicts
@@ -249,8 +250,9 @@ def _budget_warnings(a, profiles) -> list[str]:
     unpriced = [p.id for p in profiles if p.agent == "codex" and not p.pricing]
     if unpriced:
         w.append(f"{unpriced} は費用が分からない（pricing 未設定）ため、費用の上限の計算に入りません")
-    if not a.no_llm and a.judge_agent == "codex":
-        w.append("Codex の判定は費用が分からないため、費用の上限の計算に入りません")
+    unpriced_judge = sorted(f"{f}={m}" for f, m in _judge_models(a).items() if resolve(m, f)[1] is None) if not a.no_llm else []
+    if unpriced_judge:
+        w.append(f"判定モデル {unpriced_judge} は公開価格表（prices.json）にないため、CLI が費用を返さなければ費用の上限の計算に入りません")
     if a.jobs > 1:
         w.append(f"--jobs {a.jobs} では、上限に達した時点で実行中の試行（最大 {a.jobs - 1} 件）の分だけ上限を超えることがあります")
     subs = [p.id for p in profiles if p.billing == "subscription"]
@@ -716,7 +718,7 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--cache-dir", default=".harness-eval-cache")
         sp.add_argument("--keep", choices=["all", "failed", "none"], default="failed", help="作業ディレクトリを残す範囲（none は生ログも消す）")
         sp.add_argument("--baseline", help="Δ の基準にするプロファイル id")
-        sp.add_argument("--seed", type=int, default=0, help="プロファイルの実行順を入れ替える乱数の種（同じ値なら同じ順）")
+        sp.add_argument("--seed", type=int, default=0, help="プロファイルの実行順・LLM 判定の順番・校正項目の選び方を決める乱数の種（同じ値なら同じ順）")
         sp.add_argument("--allow-ancestor-instructions", action="store_true",
                         help="--out より上に CLAUDE.md・AGENTS.md・.claude/ などがあっても実行する（結果に記録。比較は汚れうる）")
         sp.add_argument("--out", default="results", help="結果の出力先")

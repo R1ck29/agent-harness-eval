@@ -1,9 +1,9 @@
 """判定役（LLM judge）の段階・モデルの強さ・系統の決め方と、判定入力の盲検化。
 
 段階（tier）:
-  decisive … 採用・マージ判断用（既定）。強いモデル（Claude: opus／Codex: gpt-6.2-astra）、多数決（既定 3 回）、
+  decisive … 採用・マージ判断用。強いモデル（Claude: opus／Codex: gpt-6.2-astra）、多数決（既定 3 回）、
              評価対象と別系統。両系統の CLI があれば、PASS には両系統の多数決の一致を要求する
-  dev      … 安い開発用。中位モデル（Claude: sonnet／Codex: gpt-6.2-sol）で 1 回。結論は「暫定」で、採用判断には使えない
+  dev      … 安い開発用（既定）。中位モデル（Claude: sonnet／Codex: gpt-6.2-sol）で 1 回。LLM 判定が合否を決めた結論は「暫定」で、採用判断には使えない
 
 系統（family）: claude_code と codex。評価対象と同じ系統の判定役は、自分の系統の出力を甘く見る可能性があるため避ける。
 """

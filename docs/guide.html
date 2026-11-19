@@ -388,15 +388,15 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <li>エラーで結果が出なかった試行（<code>usage_limit</code>・<code>rate_limit</code>・<code>auth</code>・<code>agent_error</code> など）が 20% を超える。利用上限のメッセージは、旧版が <code>agent_error</code> と記録した結果からも見つける</li>
 <li>比べたタスクが 5 件未満、または 1 タスク・1 条件あたりの有効な試行が 2 回未満（10 件未満は警告）</li>
 <li>片側にしか値がないタスクがある</li>
-<li>対照タスクの後退の疑い（推定 &lt; −0.10 だが区間が 0 をまたぐ）</li>
-<li>LLM 判定が合否を決めた試行があるのに、判定役が同系統だけ、または校正が足りない（6 件未満・一致率 80% 未満）。LLM 判定が合否を決めていなければ掛からない</li>
+<li>対照タスクの後退の疑い（推定 &lt; −0.10 だが区間が 0 をまたぐ）。<code>--control-tag</code> のタスクがない・対照タスクの有効な試行が足りないときも同じ</li>
+<li>LLM 判定が合否を決めた試行があるのに、判定役が同系統だけ（別系統を確認できない）、または校正が足りない（6 件未満・一致率 80% 未満）。LLM 判定が合否を決めていなければ掛からない</li>
 <li><code>prereg.json</code> のハッシュが合わない</li>
 </ul>
 <p>採用判断に使えないとき（IMPROVED でも暫定）: dev 段階の LLM 判定が合否を決めた試行がある、弱い判定役か盲検化の記録がない旧版の判定が合否を決めた、decisive で 1 系統あたりの判定が 3 回未満（<code>--judge-votes</code>）、事前登録と違う規則で集計し直した（「事後」）。LLM 判定を使わない実行は、段階によらず採用判断に使えます。</p>
 <p><code>python -m harness_eval verdict &lt;結果フォルダ&gt;</code> は、モデルを呼ばずに既存の結果（旧版の結果も可）を判定し直し、<code>verdict.json</code> に書いて、上の終了コードで返します（定義エラーは 2）。<code>run</code> の終了コードは結論によらず 0 です。規則のキーは <a href="reference.html#rules">リファレンス「判定規則」</a> にあります。</p>
 <h3 id="pr-gate">他のリポジトリの PR を関門にかける</h3>
 <ol>
-<li>プロファイルを 2 つ作る。<code>before</code> はデフォルトブランチのハーネス、<code>after</code> は PR のブランチのハーネス。</li>
+<li>プロファイルを 2 つ作る。<code>before</code> はデフォルトブランチのハーネス、<code>after</code> は PR のブランチのハーネス。2 つのブランチを別のフォルダに取り出し、それぞれの <code>install</code> の <code>copy</code> でそのフォルダを指す（<code>id</code> は <code>before</code>・<code>after</code>）。タスクは 5 件以上（推奨 10 件以上）。LLM 判定を使うなら <code>calibration</code> を書いたタスクも入れる。</li>
 <li>同じ run で両方を実行する: <code>run --tasks … --profiles before.yaml after.yaml --trials 3 --baseline before --candidate after --tier decisive --out …</code>（対照タスクがあれば <code>--control-tag control</code> も）。</li>
 <li>CI で <code>python -m harness_eval verdict &lt;実行フォルダ&gt;</code> を実行し、終了コード 0（採用してよい IMPROVED）のときだけマージを許す。NO CHANGE・REGRESSED・INCONCLUSIVE・暫定（5）はマージしない。</li>
 </ol>
@@ -467,7 +467,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <li>費用台帳 <code>--out/spend.jsonl</code> には、再試行・中断・<code>doctor</code> を含め、費用が発生するたびに 1 行追記します。<code>--out</code> を変えると別の台帳になります。<code>harvest</code> は <code>--ledger</code>（既定 <code>results/spend.jsonl</code>）に書くので、<code>run</code> と同じ台帳に数えるには <code>--ledger &lt;run の --out&gt;/spend.jsonl</code> を付けます。口座ごとの残りは <code>plan</code> で確認できます。</li>
 <li>LLM 判定の費用は判定エージェントの口座に入ります。<code>billing: subscription</code> のプロファイルは呼び出しごとの請求がないため、月の予算には数えません（<code>--max-cost-usd</code> には数えます）。</li>
 <li>実行前に、解く側（solver）と判定側（judge）を分けて、dev と decisive の両方の見積もりを出します（<code>plan</code> も同じ）。判定側は全出力が決定的な検査に合格した場合の上限で、1 回あたりは判定キャッシュの実測、なければ多めの仮定です。<code>--max-cost-usd</code> は判定の費用を含み、見積もりが上限を超えると何も実行せずに止まります（終了コード 2）。実行中に上限に達したら判定もやめます（<code>budget_stop</code>）。</li>
-<li>判定の費用は、判定のトークンを <code>harness_eval/prices.json</code>（公開 API 価格。出典 URL と取得日つき）で換算します。表にないモデルは推測せず「不明」にします。実行後は solver・judge 別のトークン・回数・費用・判定の割合を CLI と summary.json の <code>usage</code> に出します。</li>
+<li>判定の費用は、判定のトークンを <code>harness_eval/prices.json</code>（公開 API 価格。出典 URL と取得日つき）で換算します。表にないモデルは CLI が返す費用を使い、それもなければ推測せず「不明」にします。実行後は solver・judge 別のトークン・回数・費用・判定の割合を CLI と summary.json の <code>usage</code> に出します。</li>
 <li>費用が分からない試行（<code>pricing</code> のない Codex、表にないモデルでの判定）は上限の計算に入りません。<code>--jobs</code> が 2 以上だと、実行中の分だけ上限を超えることがあります（実行前に注意を表示）。</li>
 <li>総額はエージェントと LLM 判定の合計です。どちらかが不明な試行が 1 つでもあれば「不明」と表示します。費用の出どころ（<code>cost_source</code>）は <a href="reference.html#cost">リファレンス「費用の出どころ」</a> にあります。</li>
 </ul>
