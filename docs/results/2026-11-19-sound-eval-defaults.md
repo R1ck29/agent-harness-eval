@@ -1,0 +1,280 @@
+# 評価の既定を健全にする変更（v0.10.0）の前後比較
+
+2026-11-19 · ブランチ `feat/sound-eval-defaults`
+
+旧既定は `origin/main`（`c859326`、v0.8.0）、新既定はこのブランチです。
+同じ既存の結果を、モデルを呼ばずに両方のコードで判定し直して比べました。
+旧コードは別の worktree `/workspace/verify-layer-work/ahe-old` で `PYTHONPATH` を通して実行し、`harness_eval.__file__` で旧コードが読み込まれていることを確かめています。
+元の結果フォルダは書き換えず、コピーを使いました。
+
+生の出力は `/workspace/verify-layer-work/evidence/sound-old/`（旧）と `/workspace/verify-layer-work/evidence/sound-new/`（新）にあります。
+
+## まとめ
+
+| | 既存の結果 | 旧既定（v0.8.0） | 新既定（このブランチ） |
+| --- | --- | --- | --- |
+| a | 11/18 の天井の実行（実データ） | `report` は Δ pass@1 −12pt [−38, +0]、悪化 1。天井の警告はない。`promote` は「見送り」（exit 1） | **INCONCLUSIVE**（exit 3）。ベースラインの合格率 100% が天井 |
+| b | 改善が既知の実行（**合成**: フェイクエージェント） | `promote` は「判定不能」（exit 3） | **IMPROVED**（exit 0）。差 +0.33 [+0.11, +0.56] |
+| c | 11/19 10:03 の Codex 実行（実データ。利用上限） | 60 試行すべてが有効。54 件の利用上限を失敗として数え、pass@1 は 5〜10% | **INCONCLUSIVE**（exit 3）。無効な試行が 88〜90%（usage_limit） |
+| d | 判定役と決定的な採点器の一致率 | 測る仕組みがない | 仕組みはモックで動作を確認。**実測はできていない**（後述） |
+
+a と c は実データで示せました。
+b は、記録済みの実データに条件を満たす改善例がないため合成のデータで示しました。
+d は認証と利用上限のため実測できていません。
+
+## a. 天井の実行（`eval-out/full/20261118-203822-800-2c`）
+
+8 タスク（罠 4・対照 4）× 2 試行です。採点はすべて決定的で、LLM 判定は使っていません。
+合格数は次のとおりです。
+
+- claude-baseline: 16/16（罠 8/8）
+- claude-static-rules: 16/16
+- claude-verify-layer: 14/16（罠 6/8。`trap-drift-scope` が 0/2）
+
+### 旧既定
+
+```
+$ PYTHONPATH=ahe-old python -m harness_eval report a-run --baseline claude-baseline     # exit 0
+プロファイル            pass^k  pass@1  有効/全  総コスト
+claude-baseline         100%   100%   16/16   $1.0503
+claude-static-rules     100%   100%   16/16   $1.2619
+claude-verify-layer      88%    88%   16/16   $1.1370
+```
+
+report.html の「基準との差（Δ）」の節には、次のように出ていました。
+
+```
+| claude-static-rules | 8 | +0pt [+0, +0] | +0pt [+0, +0] | ... | 0 ／ 0 p=1.000
+| claude-verify-layer | 8 | -12pt [-38, +0] | -12pt [-38, +0] | ... | 0 ／ 1 p=1.000
+```
+
+天井と床の警告は出ていません。
+
+```
+$ PYTHONPATH=ahe-old python -m harness_eval promote --run a-run --candidate claude-verify-layer --incumbent claude-baseline --max-regressions 0 --any-split   # exit 1
+昇格判定 見送り: claude-verify-layer − claude-baseline の pass_at_1
+  差 -0.125 [-0.375, +0.000]（タスク 8 件、最低 20 件。区間の下端が 0 を超えること）
+  - 見送る理由: 悪化したタスクが 1 件で、回帰予算 0 件を超えています: ['trap-drift-scope']
+```
+
+タスク数は最低 20 件に届いていませんが、結論は「判定不能」ではなく「見送り」と言い切っています。
+static-rules と baseline（どちらも 100%）の比較も「見送り」（exit 1）でした。
+
+### 新既定
+
+```
+$ python -m harness_eval verdict a-run --baseline claude-baseline --candidate claude-verify-layer     # exit 3
+結論 claude-verify-layer vs claude-baseline: INCONCLUSIVE
+  理由: ベースラインの合格率 100% が天井（80% 超）です。タスクが易しすぎて改善を測れません
+  ベースライン合格率 100%／差 -0.12 [-0.38, +0.00]（95%、タスクでクラスタした 2 段ブートストラップ …）／タスク 8 件
+  判定役: LLM 判定なし（校正は不要）
+    [fail] baseline_range: ベースラインの合格率 100% が天井（80% 超）です。タスクが易しすぎて改善を測れません
+    [warn] sample_size: タスク 8 件は推奨 10 件未満です。区間は実際より狭く出やすい
+    [warn] power: 区間 [-0.38, +0.00] が 0 をまたぐ（半幅 0.19、最小効果 ±0.10）
+    [warn] prereg: 事前登録の記録がありません（旧版の結果）。既定の規則で判定（ハッシュ 04a1ed3b13408b2a）
+```
+
+- `--candidate claude-static-rules` でも INCONCLUSIVE（天井、exit 3）でした
+- 対照タグを付けて罠 4 タスクだけを比べると（`--control-tag control`）、INCONCLUSIVE でした。理由は天井と、タスク 4 件が最低 5 件に足りないことの 2 つです（exit 3。`sound-new/a-verdict-control.txt`）
+
+## b. 改善が既知の実行（合成のデータ。モデルは使っていない）
+
+### 実データを使えなかった理由
+
+新既定が IMPROVED を出せるか確かめるには、次の条件を満たす実行が必要です。
+
+- ベースラインの合格率が 20〜80%
+- タスクが 5 件以上
+- 1 タスク・1 条件あたり 2 試行以上
+- 採点が決定的
+
+`/workspace/verify-layer-work` の下にある 12 個の summary.json と 13 個の trials.jsonl、examples、tests/data、他のリポジトリを調べましたが、条件を満たす実データはありませんでした。
+いちばん近い `eval-out/hard/full-e1b-merged` も、ベースラインが 85%（天井）で、差は 1 タスクの 1 試行だけでした。
+また、この環境からは入れ子の `claude -p` を呼べないため、新しく実データを取ることもできませんでした。
+
+### 合成のデータの作り方
+
+そこで、リポジトリのフェイクエージェント `tests/fake_agents/fake_claude.py` を本物の runner と採点器に通しました。
+このフェイクエージェントは、配布物（ds-lite のスキルと CLAUDE.md）があるときだけ、形式の規則と確認の規則を守ります。
+同梱の 6 タスクだけでは、差のあるタスクが 2 件しかありません。そのため新既定でも INCONCLUSIVE（検出力不足。区間 [+0.00, +0.67]）でした。
+id を変えて 3 回ずつ複製した 18 タスクにすると、次の結果になりました。
+これは「本物の改善を新既定が見落とさないか」という仕組みの確認です。モデルで改善を実測したものではありません。
+
+```
+$ python -m harness_eval run --tasks b/ex/tasks3 --profiles claude-baseline.yaml claude-ds-lite.yaml --baseline claude-baseline --trials 2 --no-llm --out b/out3
+結論 claude-ds-lite vs claude-baseline: IMPROVED
+  理由: 差 +0.33 の 95% 区間 [+0.11, +0.56] が 0 より上
+  ベースライン合格率 67%／差 +0.33 [+0.11, +0.56]（95%、…）／タスク 18 件
+  判定役: LLM 判定なし（校正は不要）
+  妥当性チェック: 7 件 ok
+$ python -m harness_eval verdict b/out3/<run>      # exit 0
+```
+
+同じ結果を旧コードの `promote` に渡すと、次のとおり「判定不能」（exit 3）でした。
+
+```
+$ PYTHONPATH=ahe-old python -m harness_eval promote --run b/old/run --candidate claude-ds-lite --incumbent claude-baseline --max-regressions 0 --any-split --comparisons 1
+昇格判定 判定不能（データ不足・有意でない）: … 差 +0.333 [+0.111, +0.556]（タスク 18 件、最低 20 件。…）
+```
+
+なお、pass^k で見るとベースラインは 50% です。新既定の verdict は、配布物がないと通らない判定（スキルの使用）を除いた合否で比べます。そのため、ベースラインの合格率は 67% になっています。
+
+### 実データで b を確かめる手順（外側のシェルで実行）
+
+ベースラインの合格率が 20〜80% に入る、決定的な採点器を持つタスクを 10 件以上用意します。
+そのうえで、次を実行します。
+
+```
+python -m harness_eval run --tasks <タスク> --profiles <before>.yaml <after>.yaml --baseline <before> --candidate <after> \
+  --trials 3 --tier decisive --max-cost-usd 10 --out /srv/harness-eval
+python -m harness_eval verdict /srv/harness-eval/<run>      # 0 なら IMPROVED
+```
+
+## c. 利用上限で壊れた Codex の実行（`eval-out/hard/full-e1b-codex/20261119-100308-327-e2`）
+
+- 試行は 60 件で、`agent_error` が 54 件、エラーなしが 6 件でした
+- 54 件すべてのメッセージが利用上限の文言（`You’ve hit your usage limit. … try again at 2:45 PM.`）に一致しました
+- 旧版の記録では 60 件すべてが `valid: true` です
+
+### 旧既定
+
+```
+$ PYTHONPATH=ahe-old python -m harness_eval report c-run --baseline codex-baseline     # exit 0
+codex-agents-md           0%     5%   20/20   不明
+codex-baseline            0%    10%   20/20   不明
+codex-verify-layer        0%    10%   20/20   不明
+```
+
+利用上限の試行も失敗として数えています（有効 20/20、除外 0）。
+HTML の Δ には `codex-agents-md -5pt [-15, +0]`（悪化 1）が出ていました。
+`promote`（verify-layer と baseline）は、壊れたデータのまま「見送り」（exit 1）と言い切っていました。
+原因は、旧コードの `_classify_message` が「usage limit」を `agent_error` に分類し、`agent_error` が除外の対象に入っていないことです。
+
+### 新既定
+
+```
+$ python -m harness_eval verdict c-run --baseline codex-baseline --candidate codex-verify-layer --control-tag control    # exit 3
+結論 codex-verify-layer vs codex-baseline: INCONCLUSIVE
+  理由: エラーで無効になった試行が 35/40（88%）で、上限 20% を超えています（usage_limit 35）
+  理由: ベースラインの合格率 100% が天井（80% 超）です。…
+  理由: データが足りません: 比べられたタスク 2 件（最低 5）、…
+  理由: 片側の条件にしか有効な結果がないタスクがあります: ['trap-reviewer-identity']（悪化が隠れうる）
+  理由: 対照タスクの有効な比較が不足しています: [...]
+```
+
+`--candidate codex-agents-md` でも INCONCLUSIVE でした。無効な試行は 36/40（90%、usage_limit 36）で、exit 3 です。
+旧版の記録で `agent_error` になっている試行も、メッセージから利用上限と判定しています。
+これから実行する分は、アダプタが `usage_limit` として記録し、集計から除外します。
+
+## d. 判定役と決定的な採点器の一致率
+
+### 実測できなかった理由
+
+判定役の実呼び出しは 2 回（接続の確認だけ）で止めました。結果は次のとおりで、どちらもトークンは 0 です。
+
+| 呼び出し | 結果 | トークン・費用 |
+| --- | --- | --- |
+| `claude -p --model opus --output-format json --max-turns 1 --tools ""` | exit 1、`terminal_reason: api_error`（認証なし） | 0 トークン、$0 |
+| `codex exec --json -s read-only -m gpt-6.2-astra -` | exit 1、`You’ve hit your usage limit … try again at 8:56 PM.` | `turn.failed`（使用量の記録なし） |
+
+### モックでの動作確認
+
+偽の判定 CLI（`tests/fake_agents`）で仕組みを動かしました。
+
+```
+$ python -m harness_eval run --tasks csv-summary-format.yaml csv-summary-insight.yaml --profiles claude-baseline.yaml claude-ds-lite.yaml \
+    --baseline claude-baseline --trials 3 --tier decisive --judge-executable <fake_claude> --judge-codex-executable <fake_codex>
+  判定側（judge）dev: 最大 12 回 × モデル {'codex': 'gpt-6.2-sol'} × 1 回 → 上限 $0.9543（仮定（実測なし・上限寄り））
+  判定側（judge）decisive: 最大 72 回 × モデル {'claude_code': 'opus', 'codex': 'gpt-6.2-astra'} × 3 回 → 上限 $16.3134（…）← この実行
+結論 claude-ds-lite vs claude-baseline: INCONCLUSIVE
+  理由: データが足りません: 比べられたタスク 2 件（最低 5）、…
+  理由: 判定役と決定的な採点器の一致率 50% が 80% 未満です
+  判定役: 段階 decisive・モデル {'claude_code': 'opus', 'codex': 'gpt-6.2-astra'}・盲検 あり・3 回・校正一致率 50%（6 件）
+```
+
+偽の判定役は「2026-03 と店舗名があれば PASS」という規則で答えます。これは形式の採点器（表のヘッダと最多月の行）とは別の基準です。
+そのため、一致率は 50%（`決定的=pass / 判定役=fail` が 3 件、`決定的=fail / 判定役=fail` が 3 件）になりました。
+一致率が足りないので、LLM 判定に依存する結論は INCONCLUSIVE になります。この拒否の動きはここで確認できました。
+
+テストでも次の動きを確かめています（`tests/test_judge_pipeline.py`、`tests/test_soundness.py`）。
+
+- 判定入力から、プロファイル名・パス・依頼文・系統名が消えていること
+- 判定の順が seed で決まること
+- 両系統の判定が食い違ったときに合格にしないこと
+- 判定キャッシュが効くこと
+
+### 実測の手順（外側のシェルで実行。判定は合計 10 回以内）
+
+同梱の `csv-summary-format` には、校正の項目（file_contains の 2 つと同じことを問う文）を入れてあります。
+`csv-summary-insight` には LLM 判定があります。
+2 タスク × 2 プロファイル × 1 試行では、解く側の呼び出しが 4 回です。
+判定の回数は、新既定が「合格した出力 ≤ 2 件 × 2 系統 × 1 回 + 校正 3 件 × 2 系統 = 10 回以内」、旧既定相当が「≤ 2 + 3 = 5 回」です。
+
+```
+OUT=/srv/harness-eval   # リポジトリやホームの外
+# 新既定（強いモデル・盲検・別系統と両系統一致）。回数を抑えるため 1 系統 1 回（採用判断には使えない設定だが、一致率の測定には足りる）
+python -m harness_eval run --tasks examples/tasks --task csv-summary-format --task csv-summary-insight \
+  --profiles examples/profiles/claude-baseline.yaml examples/profiles/claude-ds-lite.yaml --baseline claude-baseline \
+  --trials 1 --tier decisive --judge-votes 1 --calibration-items 3 --max-cost-usd 3 --out "$OUT"
+# 旧既定に相当（haiku・同系統）。旧版には校正の仕組みがないので新版で設定だけ旧既定にそろえる（盲検は外せない点が旧版と違う）
+python -m harness_eval run --tasks examples/tasks --task csv-summary-format --task csv-summary-insight \
+  --profiles examples/profiles/claude-baseline.yaml examples/profiles/claude-ds-lite.yaml --baseline claude-baseline \
+  --trials 1 --judge-agent claude_code --judge-model haiku --allow-weak-judge --calibration-items 3 --max-cost-usd 3 --out "$OUT"
+# 一致率と判定の費用
+python - <<'EOF'
+import json, glob
+for f in sorted(glob.glob("/srv/harness-eval/2*/summary.json"))[-2:]:
+    s = json.load(open(f)); j = s["meta"]["judge"]; u = s["usage"]
+    print(f, j.get("models"), j.get("calibration"), u["judge"], u["solver"]["cost_usd"], u["judge_share"])
+EOF
+```
+
+## この変更の評価で使ったトークンと費用
+
+| 区分 | 実測 |
+| --- | --- |
+| 解く側（solver） | 0 トークン（実モデルは呼んでいない。a・c は記録の再集計、b と d はフェイクエージェント） |
+| 判定側（judge） | 0 トークン（接続の確認 2 回は認証エラーと利用上限で、使用量 0） |
+| 費用（公開価格で換算） | $0.00。判定の割合は計算できない（合計 0） |
+
+1 回の評価実行あたりの費用も、実測はありません。
+`plan` が見積もる上限は次のとおりです。
+
+- 対象: 同梱の 2 タスク × 2 プロファイル × 3 試行。判定は全試行が決定的な検査に合格した場合
+- 1 回あたりの判定入力の仮定: 固定の指示 1.2 万トークン + 判定対象（最大 2 万文字）をすべてキャッシュなし
+- dev（gpt-6.2-sol × 1 回）: 最大 12 回、上限 $0.95
+- decisive（opus と gpt-6.2-astra × 3 回）: 最大 72 回、上限 $16.31
+
+実際の判定入力は最大文字数より短いことが多く、判定キャッシュからの再利用もあるので、実際の額は上限よりかなり小さくなる見込みです。
+d の実測を行えば、判定キャッシュに残る実測値から 1 回あたりの見積もりが置き換わります。
+
+価格の出典（2026-11-19 取得。`harness_eval/prices.json`）は次の 2 つです。
+
+- https://platform.claude.com/docs/en/about-claude/pricing
+- https://developers.openai.com/api/docs/pricing
+
+| モデル | 入力 | キャッシュ書き | キャッシュ読み | 出力（USD / 100 万トークン） |
+| --- | --- | --- | --- | --- |
+| claude-opus-5-5 | 4 | 5（5 分） | 0.20 | 20 |
+| claude-sonnet-5-5 | 2 | 2.50（5 分） | 0.10 | 10 |
+| claude-haiku-5-5（10 万以下） | 0.10 | 0.125 | 0.01 | 0.50 |
+| gpt-6.2-astra（27.2 万以下） | 8 | 10（30 分） | 0.40 | 40 |
+| gpt-6.2-sol（27.2 万以下） | 2 | 2.50（30 分） | 0.10 | 10 |
+
+## 独立レビュー
+
+`verdict-core`（判定エンジン）は、別のエージェント（graph-reviewer）が独立にレビューしました。結果は FAIL でした。
+
+- 指摘: 判定不一致の試行が、記録上の合否が合格のままなら合格として数えられる
+- 修正: `cc15927` で直し、記録上の合否が合格でも数えないことをテストで確認しました
+
+グラフ（`task-graph.json`）の状態の書き込みについて、残っている問題があります。
+
+- graphctl の証拠の形式が通らず、この FAIL をグラフに記録できていません
+- `verdict-core` は試行の上限（2/2）に達しています。続けるには人の `graphctl grant-attempt` が要ります
+
+## 続き
+
+- d の実測: Codex の利用上限が戻ったあと（20:56 以降）か、`claude` に認証がある外側のシェルで、上の手順を実行して数値をここに追記する。追記先は「d」と「使ったトークンと費用」の節
+- 実データの b: ベースラインの合格率が 20〜80% の、10 タスク以上の実行で確かめる
+- グラフ: Riku が `graphctl grant-attempt verdict-core` を許可したら、レビュー結果を記録し、残りのノードを順に検証する
