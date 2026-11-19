@@ -13,7 +13,8 @@ Claude Code と Codex の「ハーネス」（CLAUDE.md / AGENTS.md・Skills・S
   権限設定で読ませず、効くことを起動のたびに確かめる
 - 配布物の変更案は、改善に使っていない評価用のタスク（holdout）で現行と比べて採否を出す（`promote`。自己改善ループの関門）
 - 毎回読み込まれる量（開始時の文脈）と成功あたりの費用を測り、成功率を落とさず費用を下げた変更案も採用できる（`promote --objective efficiency`）
-- 各試行は一時ホームで隔離し、普段の `~/.claude` / `~/.codex` には触らない
+- 各試行は一時ホームで動き、普段の `~/.claude` / `~/.codex` には触らない。Linux では bubblewrap で試行の外（参照解・採点・他の試行・本物のホーム）を見せず、
+  答えを見た形跡のある試行は無効、見えているテストを壊した試行は不合格にする（[ズル対策](#ズル対策既定で有効)）
 - 採点はコード判定が基本（独自スクリプトも可）。LLM 判定は補助
 - 依存は Python 3.10+ と PyYAML だけ。各 CLI（`claude -p` / `codex exec --json`）を直接呼ぶ
 
@@ -158,7 +159,8 @@ python -m harness_eval plan --tasks examples/tasks --profiles "examples/profiles
 ### ④ スモーク評価（1 試行）
 
 **`run` はタスク入力を設定先のモデルに送り、料金が発生し得ます。`--no-llm` は LLM 判定だけを無効にします。**
-合成データを使ってください。一時ホームは設定の隔離であり、外のファイルへのアクセスを禁止する sandbox ではありません。
+合成データを使ってください。Linux では試行を bubblewrap の中で動かします（`bwrap` が要ります。[ズル対策](#ズル対策既定で有効)）。
+macOS・Windows では隔離がなく、一時ホームは設定の隔離にとどまります（試行の外を見た形跡の検査だけ行います）。
 
 ```bash
 python -m harness_eval run --tasks examples/tasks --profiles "examples/profiles/claude-*.yaml" --tag smoke --no-llm --baseline claude-baseline --out "$OUT"
@@ -259,6 +261,36 @@ dry-run は `（--dry-run: 書き換え・書き出しはしていません。�
   LLM 判定が合否を決めていなければ、このチェックは掛かりません
 
 `--out` の上の指示ファイルなど、これまでの漏れの検査はそのままです。
+答えを見た形跡のある試行（下の「ズル対策」）は、エラーと同じく無効な試行として数えます。
+
+### ズル対策（既定で有効）
+
+解く側のエージェントが、評価の答え（参照解・採点スクリプト・他の試行の結果・本物のホームの認証）を読んだり、
+見えているテストを壊して合格したりしないようにします。
+
+| 対策 | 既定 | 結果 |
+| --- | --- | --- |
+| 隔離（`sandbox: bwrap`） | Linux で有効 | 試行は bubblewrap の中で動く。見えるのは試行ディレクトリ（一時ホーム・作業ディレクトリ。書ける）、読み取り専用のシステム（`/usr` `/bin` `/lib*` `/etc` `/opt`）、CLI の本体、プロファイルの `sandbox_ro` だけ。`/home`・`/workspace`・`/tmp` は空。ネットワークはモデルの API のために残す |
+| 答えを見た形跡（leak） | 常に | ツールの入力に試行の外の絶対パス（本物のホーム・`--out`・タスクのフォルダ・採点スクリプト・AHE 自身など）、評価の名前（`trials.jsonl` など）、3 段以上の `../`、上流リポジトリへのネットワーク参照があれば、その試行は無効（`valid=false`、`invalid_reason=leak`）。合格にも不合格にも数えない。参照解・採点に埋めたカナリア（`AHE-EVAL-CANARY-5d2e9b`、タスクの `canaries`）がトランスクリプトのどこかに出ても無効 |
+| 見えているテストの改ざん（tamper） | 常に | 採点の前に、起動直前の作業ツリーと比べる。既存のテストファイルの削除・改名、確認の行が正味で減った、既存のテストへの skip、テストの設定で対象を狭める変更があれば不合格（`failure_tag: test_tamper`）。テストを直すこと自体が課題のタスクは `allow_test_changes: true` |
+| 環境変数 | 常に | 親の環境から渡すのは許可リスト（`PATH`・`LANG`・`LC_*`・`TERM`・`TZ`・`SHELL`、Windows の必須、プロキシと証明書）と `inherit_env` に書いた名前だけ。API キー・`GH_TOKEN`・親のセッションの変数は、宣言しなければ渡らない |
+| 一時ファイル | 常に | 試行の `TMPDIR` と、`command` 採点の `TMPDIR` は試行ごとのフォルダで、終わったら消す（隠しテストを当てた木を OS の `/tmp` に残さない） |
+| Web 検索 | 常に | Codex の Web 検索は、タスクの `allow_tools` に `WebSearch`・`WebFetch` があるときだけ有効（Claude と同じ条件） |
+
+verdict の検査欄 `integrity` に、無効にした試行・改ざん・隔離なしの試行の数が出ます。
+隔離のない試行で候補が答えを見に行った形跡があれば、トランスクリプトに出ない読み方もありうるため `INCONCLUSIVE` にします。
+
+隔離を使えない環境（`bwrap` がない・コンテナでユーザー名前空間が使えない）では、`run` が試行を始める前に止まります。
+`apt install bubblewrap` などで入れるか、隔離しない場合はプロファイルに `sandbox: off` と書きます（結果に記録され、verdict が警告します）。
+層の hook が試行の外のスクリプトを呼ぶ場合は、そのパスを `sandbox_ro` に並べます（隔離の中に読み取り専用で見せ、leak 検査でも許可します）。
+
+**認証ファイルの複製（`copy_credentials: true`）の注意**: 試行の中の CLI が複製したログインを更新すると、更新用のトークンは使い回せないため、
+本物のログインが使えなくなります（Codex の `auth.json` で実際に起きました）。そこで次のようにしています。
+
+- `run` は始める前に本物の認証の期限を確かめ、期限まで 2 時間ない・切れている、または Codex の最終更新が 7 日より前なら止まります。
+  `codex login`（または一度 `codex` を実行して更新）してからやり直してください。`doctor` が期限を表示します（値は表示しません）
+- それでも試行の中で更新されたら、本物がまだ複製したときのままのときだけ、ロックを取って原子的に書き戻します
+- 会社の評価では、更新の起きない API キー（Codex は `CODEX_API_KEY`、Claude は `ANTHROPIC_API_KEY`）を `inherit_env` で渡すことを勧めます
 
 ### 判定役（LLM 判定）
 
@@ -354,7 +386,8 @@ python -m unittest discover -s tests
 Remove-Item Env:HARNESS_EVAL_REAL_CLI
 ```
 
-`tests/fake_agents/` は実機で観測した出力形式を再現する偽 CLI、`tests/data/` は実機の出力を元にしたフィクスチャです
+`tests/test_cheatproof.py` の隔離の確認は、`bwrap` が使える Linux だけで走ります（ないとスキップ）。
+`tests/fake_agents/` は実機で観測した出力形式を再現する偽 CLI（`fake_cheater.py` はズルをする模擬エージェント）、`tests/data/` は実機の出力を元にしたフィクスチャです
 （Claude Code の stream-json は識別子・パス・拡張一覧を匿名化）。
 
 ## 用語
