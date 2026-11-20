@@ -128,7 +128,10 @@ def outcome(r: TrialRecord) -> bool | None:
     判定役の不一致（judge_disagreement）がある試行は、記録の合否にかかわらず合格として数えない。"""
     if any(g.get("type") == "llm" and g.get("status") == "judge_disagreement" for g in r.grader_results or []):
         return False
-    return bool(r.cmp_passed) if r.cmp_passed is not None else bool(r.passed)
+    if r.cmp_passed is not None:
+        return bool(r.cmp_passed)
+    # 現行形式の明示的な null は「配布物専用の条件を外すと比較できる判定がない」= 比較から外す。旧形式（フィールドなし）だけ全判定の合否
+    return bool(r.passed) if r.cmp_legacy else None
 
 
 def llm_decided(r: TrialRecord) -> bool:
@@ -336,8 +339,21 @@ def verdict(records: list[TrialRecord], summary: dict[str, Any], rules: Rules,
     # 1b. ズル対策（評価の答えを見た形跡・見えているテストの改ざん・隔離の有無）
     checks.append(_integrity(recs, cand, inconclusive, rules))
 
+    # 1c. 必須の LLM 判定が未実施（--no-llm）の試行。未実施の条件で勝敗が変わり得るので採用に使わない
+    skipped = [r for r in recs if invalid_reason(r) is None
+               and any(g.get("type") == "llm" and g.get("status") == "not_run" for g in r.grader_results or [])]
+    if skipped:
+        inconclusive.append(f"必須の LLM 判定が未実施（--no-llm）の試行が {len(skipped)} 件あります。判定を実行していない条件で"
+                            "合否が変わり得るため、結論を出しません（--no-llm はスモーク確認用です）")
+        checks.append(_c("required_conditions", "fail", inconclusive[-1]))
+
     # 2. 比較（対象タスク）
     pairs, one_sided = _task_pairs(recs, base, cand, target)
+    # 予定した対象タスクのうち、両条件とも有効な試行が 0 件のもの（全滅したタスクがデータ不足の判定から消えないように）
+    no_valid = sorted(t for t in target if t not in pairs and t not in one_sided)
+    if no_valid:
+        inconclusive.append(f"有効な試行が 1 件もないタスクがあります（両条件とも）: {no_valid[:5]}（予定した対象タスク {len(target)} 件中 {len(no_valid)} 件）")
+        checks.append(_c("missing_tasks", "fail", inconclusive[-1]))
     n_tasks = len(pairs)
     base_rate = mean(sum(b) / len(b) for b, _ in pairs.values()) if pairs else None
     cand_rate = mean(sum(c) / len(c) for _, c in pairs.values()) if pairs else None

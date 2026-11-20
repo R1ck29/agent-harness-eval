@@ -174,9 +174,10 @@ class TamperCheck(unittest.TestCase):
         self.edit("a.py", lambda s: s + "y = 2\n")
         self.assertEqual(self.kinds(), [])
 
-    def test_updating_assertion_for_new_spec_is_clean(self):
+    def test_rewriting_an_existing_assertion_is_flagged_by_default(self):
+        """既存のテスト本体の書き換えは（確認の数が同じでも）検出する。テストを直すこと自体が課題なら allow_test_changes: true。"""
         self.edit("tests/test_a.py", lambda s: s.replace("self.assertEqual(2, 2)", "self.assertEqual(2, 1 + 1)"))
-        self.assertEqual(self.kinds(), [])
+        self.assertEqual(self.kinds(), ["test_body_modified"])
 
     def test_deleting_test_file(self):
         (self.wd / "tests/test_a.py").unlink()

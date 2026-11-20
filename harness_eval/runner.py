@@ -183,8 +183,10 @@ def cache_key(task: Task, profile: Profile, version: str | None, trial: int, opt
     route = routes if routes is not None else route
     # 判定役の設定は入れない: LLM 判定は試行のあとに判定キャッシュ（判定入力 + モデル + ルーブリック + 段階のハッシュ）で行うので、
     # 段階や判定モデルを変えても解く側を再実行しない。ツールの版は入れる（起動コマンドや採点の作りが変われば再実行する）
+    # LLM 判定の有無（--no-llm）は入れる: --no-llm では判定入力が記録に残らないため、同じ結果を LLM 判定ありの実行で再利用すると
+    # 必須の LLM 判定を飛ばして採用できてしまう。段階・判定モデルは入れない（判定キャッシュで行うので）
     raw = "|".join([CACHE_SCHEMA, __version__, task.id, task.content_hash(), profile.id, profile.content_hash(), str(version), str(trial),
-                    route])
+                    route, "llm" if opt.llm else "no-llm"])
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
