@@ -107,6 +107,20 @@ class HostWritesDoNotFollowLinks(unittest.TestCase):
         self.assertIn("link", snap)  # リンクは中身ではなく「リンクであること・向き先」を記録する
         self.assertNotEqual(snap["link"], isolation.snapshot(self.victim.parent)["victim.txt"])
 
+    @unittest.skipIf(os.name == "nt", "シンボリックリンクの作成に権限が要る")
+    def test_host_places_files_without_following_planted_links(self):
+        wd = self.tmp / "wd"
+        wd.mkdir()
+        (wd / "retry.json").symlink_to(self.victim)
+        (wd / "grade_tmp").symlink_to(self.tmp)
+        isolation.replace_text(wd / "retry.json", "{}")
+        self.assertEqual(self.victim.read_text(encoding="utf-8"), "precious")  # リンクの先は書かない
+        self.assertFalse((wd / "retry.json").is_symlink())
+        d = isolation.fresh_dir(wd / "grade_tmp")
+        self.assertFalse(d.is_symlink())
+        self.assertTrue(self.tmp.exists())  # リンクの先のフォルダを消さない
+        self.assertEqual(list(d.iterdir()), [])
+
 
 @unittest.skipUnless(BWRAP, "bwrap が使えない")
 class GraderIsolation(unittest.TestCase):
@@ -144,6 +158,45 @@ class GraderIsolation(unittest.TestCase):
         self.assertEqual(self.victim.read_text(encoding="utf-8"), "precious")
         self.assertNotEqual(seen["workdir"], "writable")  # 作業フォルダは読み取り専用（採点が他の採点・判定の入力を書き換えない）
         self.assertEqual(seen["home"], "grade_tmp")  # HOME は採点の一時フォルダ（実のホームではない）
+
+    def test_box_has_no_controlling_terminal(self):
+        """採点・solver の隔離の中の候補のコードは、制御端末（/dev/tty）に TIOCSTI で文字を打ち込んで、操作者のシェルへ抜けられない。"""
+        import pty
+        probe = ("import fcntl, os, termios\n"
+                 "try:\n    fd = os.open('/dev/tty', os.O_RDWR); fcntl.ioctl(fd, termios.TIOCSTI, b'X'); print('INJECTED')\n"
+                 "except OSError as e:\n    print('blocked')\n")
+        tmp = Path(tempfile.mkdtemp(prefix="r5-tty-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "wd").mkdir()
+        (tmp / "g").mkdir()
+        write(tmp / "probe.py", probe)
+        child = ("import subprocess, sys\nfrom pathlib import Path\nfrom harness_eval.isolation import grader_sandbox_cmd\n"
+                 f"tmp = Path({str(tmp)!r})\n"
+                 f"c = grader_sandbox_cmd({sys.executable!r} + ' ' + str(tmp / 'probe.py'), tmp / 'wd', tmp / 'g')\n"
+                 "r = subprocess.run(c, capture_output=True, text=True, cwd=tmp / 'wd')\n"
+                 "print('RESULT', r.stdout.strip(), r.stderr.strip()[:200])\n")
+        pid, fd = pty.fork()  # 制御端末を持つ子（ハーネスが端末から起動された状態）
+        if pid == 0:
+            os.chdir(ROOT)
+            os.execv(sys.executable, [sys.executable, "-c", child])
+        out = b""
+        while True:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+        os.waitpid(pid, 0)
+        text = out.decode("utf-8", "replace")
+        self.assertIn("RESULT blocked", text)
+        self.assertNotIn("INJECTED", text)
+        from harness_eval.isolation import TrialPaths, sandbox_cmd
+        from harness_eval.spec import load_profile
+        prof = load_profile(write(tmp / "p.yaml", "id: p\nagent: codex\n"))
+        tp = TrialPaths(tmp, tmp / "h", tmp / "h" / ".codex", tmp / "wd", tmp / "o", tmp / "e")
+        self.assertIn("--new-session", sandbox_cmd([sys.executable, "-c", "pass"], tp, {"PATH": "/usr/bin"}, prof))
 
     def test_unavailable_box_is_recorded_and_blocks_a_decisive_verdict(self):
         """bwrap がない OS では「隔離なし」を記録する。decisive の verdict は結論を出さない。"""

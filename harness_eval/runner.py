@@ -33,7 +33,7 @@ from .costs import empty_usage, solver_call_estimate, usage_summary
 from .graders import JudgeConfig, grade_all, judge_content, rescore
 from .judge_phase import JudgePhase
 from .judging import FAMILIES, JudgeSettings, make_settings
-from .isolation import (ancestor_instructions, build_env, bwrap_problem, copy_credentials, fill, kill_running, make_trial_paths,
+from .isolation import (fresh_dir, ancestor_instructions, build_env, bwrap_problem, copy_credentials, fill, kill_running, make_trial_paths,
                         placeholders, release_home, route_signature, run_install, run_process, sandbox_cmd, sandbox_mode, snapshot)
 from .metrics import summarize
 from .record import EXCLUDED_ERRORS, TrialRecord
@@ -483,8 +483,7 @@ class Runner(JudgePhase):
                 rec.meta["tamper"] = tamper[:10]
             # 決定的な検査を先に行い、LLM 判定は合格した出力の判定入力（最小）だけを積んでおく。判定は全試行のあと（_judge_phase）。
             # 採点の一時ファイルは試行ごとのフォルダに集め、終わったら消す（隠しテストを当てた木を OS の /tmp に残さない）
-            gtmp = tp.root / "grade_tmp"
-            gtmp.mkdir(exist_ok=True)
+            gtmp = fresh_dir(tp.root / "grade_tmp")  # solver が同名のリンクを置いていても、その先を使わない
             try:
                 grade_all(task.graders, rec, tp.workdir, JudgeConfig(enabled=self.opt.llm, run=None, defer=True), task.path.parent,
                           tmp_dir=gtmp, precheck=tamper_result(tamper) if tamper else None)

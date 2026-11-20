@@ -284,7 +284,7 @@ def sandbox_cmd(cmd: list[str], tp: TrialPaths, env: dict[str, str], profile: Pr
         ro.append(os.path.realpath(resolv))
     ph = placeholders(tp, profile)
     ro += [fill(x, ph) for x in profile.sandbox_ro if os.path.exists(fill(x, ph))]
-    args = ["bwrap", "--die-with-parent", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+    args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
             "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", "/home", "--tmpfs", "/workspace"]
     for p in dict.fromkeys(ro):
         args += ["--ro-bind", p, p]
@@ -369,7 +369,7 @@ def grader_sandbox_cmd(cmd: str, workdir: Path, tmp_dir: Path, extra_ro: list[st
     ro += material
     wd, tmp = str(workdir.resolve()), str(tmp_dir.resolve())
     ro = [p for p in dict.fromkeys(ro) if p not in (wd, tmp)]
-    args = ["bwrap", "--die-with-parent", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net",
+    args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net",
             "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", "/home", "--tmpfs", "/workspace"]
     for p in ro:
         args += ["--ro-bind", p, p]
@@ -441,7 +441,29 @@ def open_new(path: Path, mode: str = "wb"):
     if st is not None and not stat.S_ISREG(st.st_mode):
         raise OSError(f"リンク・特殊ファイルには書きません: {path}")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), 0o600)
-    return os.fdopen(fd, mode)
+    return os.fdopen(fd, mode, **({} if "b" in mode else {"encoding": "utf-8"}))
+
+
+def clear_path(path: Path) -> None:
+    """solver が置いたかもしれないリンク・特殊ファイル・フォルダを、リンクの先に触れずに取り除く。"""
+    if os.path.islink(path) or (os.path.lexists(path) and not os.path.isdir(path)):
+        os.unlink(path)
+    elif os.path.isdir(path):
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def replace_text(path: Path, text: str) -> None:
+    """solver が書ける場所へ、ホストがファイルを置く。既にある同名のもの（リンクなど）は先に取り除き、リンクの先は書かない。"""
+    clear_path(path)
+    with open_new(path, "w") as fh:
+        fh.write(text)
+
+
+def fresh_dir(path: Path) -> Path:
+    """solver が書ける場所に、空のフォルダを新しく作る（同名のリンクなどは先に取り除く）。"""
+    clear_path(path)
+    os.mkdir(path)
+    return path
 
 
 def _kill_tree(p: subprocess.Popen) -> None:
