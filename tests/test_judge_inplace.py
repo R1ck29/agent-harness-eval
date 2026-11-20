@@ -102,7 +102,9 @@ class InPlaceJudge(unittest.TestCase):
         return write(self.tmp / "judge" / f"{name}.yaml", f"id: {name}\nagent: codex\nbilling: subscription\n{extra}"
                      f"executable: [{json.dumps(PY)}, {json.dumps(str(FAKE / 'fake_codex.py'))}]\n" + SUFFIX)
 
-    def go(self, *extra, profiles=("claude-baseline", "claude-ds-lite"), task="csv-summary-insight"):
+    def go(self, *extra, profiles=("claude-baseline", "claude-ds-lite"), task="csv-summary-insight", trusted=True):
+        if trusted and any("in_place" in str(x) or "inplace" in str(x) for x in extra):
+            extra = (*extra, "--trust-judge-input")  # in_place は判定入力が信頼できるときだけ（指摘 5）。既定のテストは宣言する
         args = ["run", "--tasks", str(self.ex / "tasks"), "--profiles", *[str(self.ex / "profiles" / f"{n}.yaml") for n in profiles],
                 "--task", task, "--out", str(self.out), "--cache-dir", str(self.cache), "--baseline", "claude-baseline", *extra]
         code, out = run_cli(*args)
@@ -117,6 +119,17 @@ class InPlaceJudge(unittest.TestCase):
         return [r for r in self.argv_rows() if "read-only" in r["argv"] and "-C" not in r["argv"]]
 
     # ---------------------------------------------------------------- その場で使う
+    def test_in_place_needs_the_judge_input_to_be_declared_trusted(self):
+        """#5: 実認証の CODEX_HOME を使う判定は、候補の出力を渡す限りツール経由の読み取りを CLI 側で止められない。
+        判定入力が信頼できると宣言（--trust-judge-input）しない限り、起動前に止める。"""
+        code, out, s = self.go("--judge-profile", f"codex={self.judge}", trusted=False)
+        self.assertEqual(code, 2, out)
+        self.assertIn("--trust-judge-input", out)
+        self.assertEqual(self.judge_calls(), [])
+        code, out, s = self.go("--judge-profile", f"codex={self.judge}")
+        self.assertEqual(code, 0, out)
+        self.assertTrue(s["meta"]["options"]["judge_input_trusted"])
+
     def test_in_place_judge_uses_real_codex_home_without_copying_or_writing(self):
         before = snapshot(self.real)
         code, out, s = self.go("--judge-profile", f"codex={self.judge}")

@@ -313,6 +313,11 @@ AWS の認証ファイルは、プロファイルが Bedrock（`CLAUDE_CODE_USE_
   このロックは 1 つの `run` の中だけです。別の端末で同じ `~/.codex` を使う `codex` や別の `run` を同時に動かさないでください
 - `run` は始める前に `auth.json` の存在と期限を確かめます（値は表示しません）。期限まで 2 時間ない・切れている、または最終更新が 7 日より前なら止まります。
   `codex login`（または一度 `codex` を実行して更新）してからやり直してください
+- **判定入力が信頼できるときだけ使えます**（`--trust-judge-input` が必須。なければ `run` は始まる前に止まります）。`-s read-only` はファイルの**書き込み**を
+  制限するだけで、判定 CLI のツールが実の `CODEX_HOME`（認証）を**読む**ことは、ハーネスからは止められません。判定のプロンプトには解く側の出力が入るため、
+  出力に埋め込まれた指示で認証の中身が判定に出うる、というのがこの経路の限界です。そのため（1）自分で用意した合成データや自分のエージェントの出力など、
+  信頼できる出力だけを判定する、（2）in_place の判定の理由は記録・キャッシュ・報告に残さない（`reason` を空にします）、（3）`summary.json` の
+  `meta.options.judge_input_trusted` に宣言を残します。信頼できない出力を判定するなら、API キー（`inherit_env`）の経路にしてください
 - **限界**: `~/.codex/AGENTS.md` など `CODEX_HOME` に置いた指示ファイルが判定の入力に入るかは、`--ignore-user-config` の説明（`config.toml` を読まない）からは分かりません。
   この版（0.171.0）では実機で確かめていないので、入りうるものとして扱ってください。確かめるには、外側のシェルで 1 回だけ
   `HOME=$(mktemp -d) codex exec --json --ephemeral -s read-only --skip-git-repo-check --ignore-user-config --ignore-rules --disable hooks -C "$(mktemp -d)" "渡されている指示文の見出しだけを列挙して。なければ none"`

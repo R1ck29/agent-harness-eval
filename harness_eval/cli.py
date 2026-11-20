@@ -43,7 +43,7 @@ def _opts(a: argparse.Namespace) -> RunOptions:
         judge_executable=a.judge_executable,
         judge_executables={"codex": a.judge_codex_executable} if a.judge_codex_executable else {},
         max_cost_usd=a.max_cost_usd, monthly_budget_usd=a.monthly_budget_usd,
-        retry_infra=a.retry_infra, retry_wait_s=a.retry_wait_s, judge_profile=a.judge_profile or [], use_cache=not a.no_cache, cache_dir=Path(a.cache_dir), keep=a.keep,
+        retry_infra=a.retry_infra, retry_wait_s=a.retry_wait_s, judge_profile=a.judge_profile or [], trust_judge_input=a.trust_judge_input, use_cache=not a.no_cache, cache_dir=Path(a.cache_dir), keep=a.keep,
         baseline=a.baseline, seed=a.seed)
 
 
@@ -737,6 +737,9 @@ def main(argv: list[str] | None = None) -> int:
                              "実行のプロファイルの id か、実行に使わない YAML のパス（判定役の認証だけ借りる。配布物は使わない）。"
                              "系統ごとに `codex=path.yaml`・`claude_code=path.yaml` と書ける（複数可）。"
                              "既定: 判定エージェントと同じ種類の --baseline、なければ最初の同種プロファイル")
+        sp.add_argument("--trust-judge-input", action="store_true",
+                        help="credentials: in_place の判定に渡す出力が信頼できると宣言する（実の認証ディレクトリを指す判定 CLI のツールを、"
+                             "ハーネスは止められないため。信頼できない出力の判定には使わない）")
         sp.add_argument("--no-cache", action="store_true", help="キャッシュを使わず全試行を実行")
         sp.add_argument("--cache-dir", default=".harness-eval-cache")
         sp.add_argument("--keep", choices=["all", "failed", "none"], default="failed", help="作業ディレクトリを残す範囲（none は生ログも消す）")

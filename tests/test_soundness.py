@@ -47,7 +47,7 @@ def rules(**kw) -> Rules:
 STRONG_JUDGE = {"tier": "decisive", "llm": True, "models": {"codex": "gpt-6.2-astra", "claude_code": "opus"},
                 "strength": {"codex": "strong", "claude_code": "strong"}, "blind": True, "votes": 3, "seed": 0,
                 "plan": {"claude_code": {"families": ["codex", "claude_code"], "same_family": False, "both_families": True}},
-                "calibration": {"items": 10, "agree": 10, "rate": 1.0}}
+                "calibration": {"items": 10, "agree": 10, "rate": 1.0, "pass_items": 5, "fail_items": 5, "agree_pass": 5, "agree_fail": 5}}
 
 
 class TestConclusions(unittest.TestCase):
@@ -177,7 +177,7 @@ class TestJudgeGuards(unittest.TestCase):
         self.assertTrue(any("同系統" in r for r in v["reasons"]))
 
     def test_low_calibration_agreement_is_inconclusive(self):
-        j = {**STRONG_JUDGE, "calibration": {"items": 10, "agree": 6, "rate": 0.6}}
+        j = {**STRONG_JUDGE, "calibration": {"items": 10, "agree": 6, "rate": 0.6, "pass_items": 5, "fail_items": 5, "agree_pass": 3, "agree_fail": 3}}
         v = verdict(self.llm_records(), summary(judge=j), rules())
         self.assertEqual(v["conclusion"], "INCONCLUSIVE")
         self.assertTrue(any("一致率 60%" in r for r in v["reasons"]))

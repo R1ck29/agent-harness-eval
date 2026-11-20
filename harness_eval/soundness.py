@@ -238,7 +238,20 @@ def _judge_checks(j: dict[str, Any], agents: set[str], decided: int, disagreemen
         fail.append(f"判定役と決定的な採点器の一致率 {rate:.0%} が {rules.min_calibration_agreement:.0%} 未満です")
         checks.append(_c("calibration", "fail", f"一致率 {rate:.0%}（{cal.get('agree')}/{items}）< {rules.min_calibration_agreement:.0%}"))
     else:
-        checks.append(_c("calibration", "ok", f"一致率 {rate:.0%}（{cal.get('agree')}/{items}）"))
+        np_, nf = cal.get("pass_items"), cal.get("fail_items")
+        ap, af = cal.get("agree_pass"), cal.get("agree_fail")
+        if np_ is None or nf is None or ap is None or af is None:
+            fail.append("判定役の校正の内訳（合格例・不合格例ごとの一致）が記録されていません")
+            checks.append(_c("calibration", "fail", fail[-1]))
+        elif np_ < 1 or nf < 1:
+            fail.append(f"判定役の校正に合格例・不合格例の両方が必要です（合格例 {np_} 件・不合格例 {nf} 件）。"
+                        "独立した校正項目が足りないため採用判定を保留します")
+            checks.append(_c("calibration", "fail", fail[-1]))
+        elif ap / np_ < rules.min_calibration_agreement or af / nf < rules.min_calibration_agreement:
+            fail.append(f"判定役の一致率が合格例 {ap}/{np_}・不合格例 {af}/{nf} で、どちらかが {rules.min_calibration_agreement:.0%} 未満です")
+            checks.append(_c("calibration", "fail", fail[-1]))
+        else:
+            checks.append(_c("calibration", "ok", f"一致率 {rate:.0%}（{cal.get('agree')}/{items}。合格例 {ap}/{np_}・不合格例 {af}/{nf}）"))
     return fail, prov
 
 

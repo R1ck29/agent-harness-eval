@@ -95,6 +95,8 @@ class JudgeBudgetStopDirect(unittest.TestCase):
         phase.spent = spent
         phase.spent_api = {"codex": spent_api}
         phase.month_remaining = lambda family: month_left
+        phase._identity = lambda family, model: "id"
+        phase._judge_profile = lambda family: SimpleNamespace(credentials=None)
         phase._judge_call = mock.Mock(side_effect=AssertionError("上限に達しているのに判定 CLI を呼んだ"))
         return phase
 

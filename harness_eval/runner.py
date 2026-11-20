@@ -70,6 +70,7 @@ class RunOptions:
     retry_wait_s: float = 20.0
     # 判定の認証・環境変数を借りるプロファイル。id か YAML のパス、系統ごとなら 系統=参照（既定: 自動選択）。複数可
     judge_profile: list[str] = field(default_factory=list)
+    trust_judge_input: bool = False  # credentials: in_place の判定に候補の出力を渡してよいと宣言する（CLI のツールが実認証を読める限界の承知）
     use_cache: bool = True
     cache_dir: Path = Path(".harness-eval-cache")
     keep: str = "failed"  # all / failed / none（作業ディレクトリを残すか）
@@ -213,6 +214,7 @@ class Runner(JudgePhase):
             if p.id not in self.versions:
                 self.versions[p.id] = cli_version(get_adapter(p.agent, p))
         self.routes = {p.id: route_signature(p, dict(os.environ)) for _, p in self.pairs}
+        self._identities: dict[tuple[str, str | None], str] = {}
         self._judge_seq = 0
         self._inplace_locks = {f: threading.Lock() for f in FAMILIES}  # credentials: in_place の判定は同じ系統で同時に 1 本だけ
         self.interrupted = threading.Event()
@@ -597,7 +599,15 @@ class Runner(JudgePhase):
             msg = credentials.preflight(agent)
             if msg:
                 raise SpecError(msg)
-        for agent in sorted({p.agent for p in self.judge_profiles.values() if p and p.credentials == "in_place"}):
+        in_place = sorted({p.agent for p in self.judge_profiles.values() if p and p.credentials == "in_place"})
+        if in_place and not self.opt.trust_judge_input:
+            raise SpecError(
+                f"判定役の認証（credentials: in_place、{', '.join(in_place)}）は、判定 CLI が実の認証ディレクトリを指したまま動きます。"
+                "CLI のツール（ファイルの読み取りなど）がそこを読めないよう止める手段を、ハーネスは持てません。判定入力に候補の出力が入るため、"
+                "出力に埋め込まれた指示で認証の中身が判定の理由・記録に出うる限界があります。判定入力（解く側の出力）が信頼できる"
+                "（自分で用意した合成データ・自分のエージェントの出力）と承知したうえで --trust-judge-input を付けてください。"
+                "信頼できない出力を判定するなら、API キー（inherit_env）か copy_credentials を使ってください")
+        for agent in in_place:
             src = credentials.source_path(agent)
             if src is None or not src.is_file():  # 中身は読まない・出さない（あるかどうかだけ）
                 raise SpecError(f"判定役の認証（credentials: in_place）の {agent} の認証ファイル {src} がありません。先に `{agent} login` してください")
@@ -675,6 +685,7 @@ class Runner(JudgePhase):
                         "judge_profiles": {f: (p.id if p else None) for f, p in self.judge_profiles.items()},
                         "judge_credentials": {f: ("in_place" if p and p.credentials == "in_place" else "copy" if p and p.copy_credentials else "env")
                                               for f, p in self.judge_profiles.items()},
+                        "judge_input_trusted": self.opt.trust_judge_input,
                         "jobs": self.opt.jobs,
                         "max_cost_usd": self.opt.max_cost_usd, "monthly_budget_usd": self.opt.monthly_budget_usd,
                         "month_spent_before_run_usd": self.month_spent, "use_cache": self.opt.use_cache,

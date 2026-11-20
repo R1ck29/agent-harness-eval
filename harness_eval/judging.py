@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import random
 import re
 from dataclasses import dataclass
@@ -25,7 +26,7 @@ TIER_VOTES = {"decisive": 3, "dev": 1}
 # モデルの強さ。ここにないモデル（haiku・mini・不明）は弱い判定役として扱う（明示の上書き --allow-weak-judge が要る）
 STRONG_MODELS = ("opus", "gpt-6.2-astra")
 MID_MODELS = ("sonnet", "gpt-6.2-sol")
-JUDGE_INPUT_VERSION = "2"  # 判定入力（プロンプト・盲検化）の作りを変えたら上げる（判定キャッシュを分けるため）
+JUDGE_INPUT_VERSION = "3"  # 判定入力（プロンプト・盲検化）の作りを変えたら上げる（判定キャッシュを分けるため）
 
 
 def model_strength(model: str | None) -> str:
@@ -98,9 +99,23 @@ def blind(text: str, terms: Iterable[str] = (), paths: Iterable[str] = ()) -> st
     return out
 
 
-def judge_cache_key(prompt: str, family: str, model: str | None, rubric: str, tier: str, vote: int) -> str:
-    """判定キャッシュのキー: 判定入力（盲検化後のプロンプト）+ 判定モデル + ルーブリック + 段階 + 何票目か。"""
-    raw = "\x1f".join([JUDGE_INPUT_VERSION, family, str(model), tier, str(vote),
+def judge_identity(exe: list[str], version: str | None, model: str | None, route: str = "") -> str:
+    """判定役そのものの識別子: 実行ファイル（実体のパス・大きさ・更新時刻）・CLI の版・実効モデル・非秘密の経路設定。
+    どれかが変われば判定キャッシュのキーが変わる（偽の CLI で作った票を実 CLI に切り替えたあとも読む、を防ぐ）。"""
+    parts = []
+    for a in exe:
+        if os.path.isfile(a):
+            st = os.stat(a)
+            parts.append(f"{os.path.realpath(a)}:{st.st_size}:{st.st_mtime_ns}")
+        else:
+            parts.append(a)
+    raw = "\x1f".join(["|".join(parts), str(version), str(model) if model else "(CLI の既定)", route])
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def judge_cache_key(prompt: str, family: str, model: str | None, rubric: str, tier: str, vote: int, identity: str = "") -> str:
+    """判定キャッシュのキー: 判定入力（盲検化後のプロンプト）+ 判定モデル + ルーブリック + 段階 + 何票目か + 判定役の識別子。"""
+    raw = "\x1f".join([JUDGE_INPUT_VERSION, family, str(model), tier, str(vote), identity,
                        hashlib.sha256(rubric.encode()).hexdigest(), hashlib.sha256(prompt.encode()).hexdigest()])
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
@@ -184,6 +199,27 @@ def combine(majorities: dict[str, str]) -> str:
     if "pass" in vals:
         return "judge_disagreement"
     return "fail" if "fail" in vals else "unknown"
+
+
+def combine_rubric(majorities: dict[str, str], negate: bool = False) -> str:
+    """系統ごとの多数決をまとめる。否定型（negate）は各系統の確定したラベル（pass / fail）を反転してから合意を求める
+    （UNKNOWN は反転せず、確定票として扱わない。FAIL と UNKNOWN の組を、反転後に合格にしない）。"""
+    if negate:
+        flip = {"pass": "fail", "fail": "pass"}
+        majorities = {f: flip.get(v, v) for f, v in majorities.items()}
+    return combine(majorities)
+
+
+def dedupe_calibration(items: list[Any], key: Callable[[Any], str]) -> list[Any]:
+    """校正項目から、盲検化後の判定入力が同じものを除く（同じ出力の繰り返しを独立した実績として数えない）。最初の 1 件を残す。"""
+    seen: set[str] = set()
+    out = []
+    for it in items:
+        k = key(it)
+        if k not in seen:
+            seen.add(k)
+            out.append(it)
+    return out
 
 
 def pick_calibration(items: list[Any], n: int, seed: int, answer: Callable[[Any], bool]) -> list[Any]:

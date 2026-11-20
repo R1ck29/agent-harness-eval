@@ -64,10 +64,10 @@ TASKS="--tasks examples/tasks --task csv-summary-format --task csv-summary-insig
 COMMON="$TASKS --profiles $SOLVERS --baseline claude-baseline --trials 1 --calibration-items 2 --max-cost-usd 3 --out $OUT --cache-dir $OUT/cache"
 
 # 1. 見積もり（モデルは呼ばない）
-python -m harness_eval plan $COMMON --judge-profile codex=$P/codex-judge-inplace.yaml
+python -m harness_eval plan $COMMON --judge-profile codex=$P/codex-judge-inplace.yaml --trust-judge-input
 
 # 2. 実行 A: 新既定（dev。別系統の Codex が判定。認証は in_place = 複製なし）
-python -m harness_eval run $COMMON --tier dev --judge-profile codex=$P/codex-judge-inplace.yaml
+python -m harness_eval run $COMMON --tier dev --judge-profile codex=$P/codex-judge-inplace.yaml --trust-judge-input
 
 # 3. 実行 B: 旧既定に相当（haiku・同系統。解く側の試行は A のキャッシュを使う）
 python -m harness_eval run $COMMON --judge-agent claude_code --judge-model haiku --allow-weak-judge \

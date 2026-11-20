@@ -161,6 +161,78 @@ class GraderIsolation(unittest.TestCase):
         self.assertEqual((chk2["status"], inc2), ("warn", []))
 
 
+class NegateAcrossFamilies(unittest.TestCase):
+    """#10: 否定型の評価観点は、系統ごとの確定した多数決に適用してから合意を求める。UNKNOWN は票にしない。"""
+
+    def test_negate_applies_per_family_then_combines(self):
+        from harness_eval.judging import combine_rubric
+        self.assertEqual(combine_rubric({"codex": "fail", "claude_code": "unknown"}, negate=True), "judge_disagreement")
+        self.assertEqual(combine_rubric({"codex": "unknown", "claude_code": "unknown"}, negate=True), "unknown")
+        self.assertEqual(combine_rubric({"codex": "fail", "claude_code": "fail"}, negate=True), "pass")
+        self.assertEqual(combine_rubric({"codex": "pass", "claude_code": "fail"}, negate=True), "judge_disagreement")
+        self.assertEqual(combine_rubric({"codex": "pass", "claude_code": "pass"}, negate=True), "fail")
+        self.assertEqual(combine_rubric({"codex": "fail"}, negate=True), "pass")  # 1 系統（dev）
+        self.assertEqual(combine_rubric({"codex": "pass", "claude_code": "unknown"}, negate=False), "judge_disagreement")
+
+
+class JudgeIdentity(unittest.TestCase):
+    """#11: 判定役の実行ファイル・版・実効モデル・経路が変われば、判定キャッシュのキーが変わる。"""
+
+    def test_key_changes_with_identity(self):
+        from harness_eval.judging import judge_cache_key, judge_identity
+        a = judge_identity(["/usr/bin/python3", __file__], "codex 1.0", "gpt-x", "")
+        b = judge_identity(["/usr/bin/python3", __file__], "codex 1.1", "gpt-x", "")
+        c = judge_identity(["/usr/bin/python3", __file__], "codex 1.0", None, "")
+        d = judge_identity(["/usr/bin/python3", __file__], "codex 1.0", "gpt-x", "OPENAI_BASE_URL#abc12345")
+        e = judge_identity(["/usr/bin/python3", str(ROOT / "tests" / "fake_env.py")], "codex 1.0", "gpt-x", "")
+        self.assertEqual(len({a, b, c, d, e}), 5)
+        self.assertEqual(a, judge_identity(["/usr/bin/python3", __file__], "codex 1.0", "gpt-x", ""))
+        keys = {judge_cache_key("p", "codex", "gpt-x", "r", "dev", 0, i) for i in (a, b, c, d, e)}
+        self.assertEqual(len(keys), 5)
+
+    def test_swapping_the_judge_cli_does_not_reuse_votes(self):
+        from tests.test_judge_pipeline import CLAUDE_J, CODEX_J, JudgePipeline
+        t = JudgePipeline("test_dev_default_cross_family_single_mid_vote")
+        t.setUp()
+        self.addCleanup(t.tearDown)
+        code, out, s, _ = t.go(*CLAUDE_J, *CODEX_J)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(s["usage"]["judge"]["cache_hits"], 0)
+        code, out, s, _ = t.go(*CLAUDE_J, *CODEX_J)  # 同じ判定役 → キャッシュを使う
+        self.assertGreater(s["usage"]["judge"]["cache_hits"], 0)
+        other = t.tmp / "other_codex.py"  # 別の実行ファイル（中身は同じでも別物）
+        shutil.copy(FAKE_DIR / "fake_codex.py", other)
+        code, out, s, _ = t.go(*CLAUDE_J, "--judge-codex-executable", sys.executable, str(other))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(s["usage"]["judge"]["cache_hits"], 0, "別の判定 CLI の票を再利用した")
+
+
+FAKE_DIR = ROOT / "tests" / "fake_agents"
+
+
+class CalibrationIndependence(unittest.TestCase):
+    """#12: 校正は盲検化後の入力で重複を除き、合格例・不合格例の両方の実績を要求する。"""
+
+    def test_dedupe_by_blinded_prompt(self):
+        from harness_eval.judging import dedupe_calibration
+        items = [("r1", {"p": "same", "answer": True}), ("r2", {"p": "same", "answer": True}), ("r3", {"p": "other", "answer": False})]
+        got = dedupe_calibration(items, lambda x: x[1]["p"])
+        self.assertEqual([x[0] for x in got], ["r1", "r3"])
+
+    def test_verdict_needs_both_classes(self):
+        from harness_eval.soundness import Rules, _judge_checks
+        j = {"tier": "decisive", "llm": True, "models": {"codex": "gpt-6.2-astra", "claude_code": "opus"}, "blind": True, "votes": 3,
+             "plan": {"claude_code": {"families": ["codex", "claude_code"]}}}
+        rules = Rules(baseline="b", candidate="c")
+        for cal, ok in (({"items": 6, "agree": 6, "rate": 1.0, "pass_items": 6, "fail_items": 0}, False),
+                        ({"items": 6, "agree": 6, "rate": 1.0, "pass_items": 0, "fail_items": 6}, False),
+                        ({"items": 6, "agree": 6, "rate": 1.0}, False),  # 内訳が記録されていない
+                        ({"items": 6, "agree": 6, "rate": 1.0, "pass_items": 3, "fail_items": 3, "agree_pass": 3, "agree_fail": 3}, True),
+                        ({"items": 6, "agree": 3, "rate": 0.5, "pass_items": 3, "fail_items": 3, "agree_pass": 3, "agree_fail": 0}, False)):
+            fail, _ = _judge_checks({**j, "calibration": cal}, {"claude_code"}, 4, 0, rules, [])
+            self.assertEqual(not fail, ok, (cal, fail))
+
+
 def _rec_of(d):
     from harness_eval.record import TrialRecord
     return TrialRecord.from_dict(d) if hasattr(TrialRecord, "from_dict") else TrialRecord(**{k: v for k, v in d.items() if k in TrialRecord.__dataclass_fields__})
