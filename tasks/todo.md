@@ -48,6 +48,7 @@
 
 ## 続き（11/20 午前・d の実測を外側のシェルで行えるようにする）
 - 判定役専用の `credentials: in_place`（認証を複製せず、本物の CODEX_HOME をその場で使う。codex だけ・判定役だけ）、`--judge-profile` に YAML のパスと `系統=参照`、`examples/judge-profiles/`、費用上限の穴 2 件（履歴のない solver 呼び出しの既定見積もり・JudgeBudgetStop の直接テスト）を追加。グラフは `task-graph-d.json`（前の `task-graph.json` の evidence は人の判断待ちのまま）。
+- 結果（11/20）: 6 ノード（spec-inplace・judge-inplace・judge-profile-cli・budget-gaps・docs-examples・ci-pr）を graph-reviewer が独立に確認。276 passed / 1 skipped、ruff 緑、CI 6 ジョブ緑。例のプロファイルは `examples/profiles/` ではなく `examples/judge-profiles/`（既存テストの glob と `--profiles` のディレクトリ展開に巻き込まれ、in_place が解く側として拒否されるため）。既存の `test_e2e` の `--max-cost-usd 0` は、開始前の門と実行中の budget_stop の 2 経路に分けた。`--disable hooks` を判定の呼び出しに足した（hooks を判定に入れない）。
 - 本物の `~/.codex`・`~/.claude` は触っていない（テストは偽の CODEX_HOME と偽の CLI だけ）。入れ子の claude/codex のモデル呼び出しなし。
 
 ## 外側のシェルで実行するコマンド（d の実測。判定は合計 8 回以内（任意の確認を足して 9 回）・`--max-cost-usd 3`）
