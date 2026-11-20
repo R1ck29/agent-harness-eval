@@ -45,3 +45,40 @@
 - evidence は FAIL（試行 1/2）: 基準 b が「実データで IMPROVED」なのに、実データでは条件（ベースライン合格率 20〜80%）を満たす実行がなく合成データで示している。a・c・d は PASS。pr は evidence に依存するため無効化中。
 - 解除には Riku の判断が要る: (1) b を満たす実データの実行（外側のシェルで。手順は docs/results の b）を行う、または (2) 基準 b を「合成データ可（出所明記）」に人が直す。直したあと `graphctl retry evidence` → 提出 → レビュー → `retry pr` → 検証。
 - レビューで出た軽微な穴（PR の残課題）: 開始前の費用上限の判定は履歴のない solver の呼び出しを $0 と数える（警告は出る）、実行中の JudgeBudgetStop の直接テストなし、a の 8 タスク verdict の生出力が evidence に別名で残っていない。
+
+## 続き（11/20 午前・d の実測を外側のシェルで行えるようにする）
+- 判定役専用の `credentials: in_place`（認証を複製せず、本物の CODEX_HOME をその場で使う。codex だけ・判定役だけ）、`--judge-profile` に YAML のパスと `系統=参照`、`examples/judge-profiles/`、費用上限の穴 2 件（履歴のない solver 呼び出しの既定見積もり・JudgeBudgetStop の直接テスト）を追加。グラフは `task-graph-d.json`（前の `task-graph.json` の evidence は人の判断待ちのまま）。
+- 本物の `~/.codex`・`~/.claude` は触っていない（テストは偽の CODEX_HOME と偽の CLI だけ）。入れ子の claude/codex のモデル呼び出しなし。
+
+## 外側のシェルで実行するコマンド（d の実測。判定は合計 8 回以内（任意の確認を足して 9 回）・`--max-cost-usd 3`）
+前提: `codex login` 済み（ChatGPT のログイン。`~/.codex/auth.json`）、`claude setup-token` で作ったトークンを `CLAUDE_CODE_OAUTH_TOKEN` に入れる（値はファイル・ログに書かない）、`bwrap` がある。ブランチ `feat/sound-eval-defaults` のリポジトリのルートで。
+
+```
+OUT=/tmp/ahe-d                      # リポジトリとホームの外
+mkdir -p "$OUT"
+export CLAUDE_CODE_OAUTH_TOKEN=...  # claude setup-token の出力
+P=examples/judge-profiles
+SOLVERS="$P/claude-baseline-oauth.yaml $P/claude-ds-lite-oauth.yaml"
+TASKS="--tasks examples/tasks --task csv-summary-format --task csv-summary-insight"
+COMMON="$TASKS --profiles $SOLVERS --baseline claude-baseline --trials 1 --calibration-items 2 --max-cost-usd 3 --out $OUT --cache-dir $OUT/cache"
+
+# 1. 見積もり（モデルは呼ばない）
+python -m harness_eval plan $COMMON --judge-profile codex=$P/codex-judge-inplace.yaml
+
+# 2. 実行 A: 新既定（dev。別系統の Codex が判定。認証は in_place = 複製なし）
+python -m harness_eval run $COMMON --tier dev --judge-profile codex=$P/codex-judge-inplace.yaml
+
+# 3. 実行 B: 旧既定に相当（haiku・同系統。解く側の試行は A のキャッシュを使う）
+python -m harness_eval run $COMMON --judge-agent claude_code --judge-model haiku --allow-weak-judge \
+  --judge-profile claude_code=$P/claude-judge-oauth.yaml
+
+# 4. 一致率と判定の費用
+python - <<'PY'
+import json, glob, os
+for f in sorted(glob.glob(os.path.expandvars("$OUT/2*/summary.json")))[-2:]:
+    s = json.load(open(f)); j = s["meta"]["judge"]; u = s["usage"]
+    print(f, j.get("models"), s["meta"]["options"]["judge_credentials"], j.get("calibration"), u["judge"], u["solver"]["cost_usd"], u["judge_share"])
+PY
+```
+- 任意（1 回）: `~/.codex/AGENTS.md` が判定に入るかの確認。`HOME=$(mktemp -d) codex exec --json --ephemeral -s read-only --skip-git-repo-check --ignore-user-config --ignore-rules --disable hooks -C "$(mktemp -d)" "渡されている指示文の見出しだけを列挙して。なければ none"`
+- 結果は docs/results/2026-11-19-sound-eval-defaults.md の「d」に追記する（一致率・費用・in_place が効いたか・AGENTS.md の有無）。`run` が「認証が…期限」で止まったら `codex login` してやり直す。

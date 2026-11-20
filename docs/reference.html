@@ -177,6 +177,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <tr><td><code>isolate_home</code></td><td><code>HOME</code>・<code>USERPROFILE</code> を一時ホームに向ける</td><td><code>true</code></td></tr>
 <tr><td><code>isolation_settings</code></td><td>Claude Code に claude.ai からのスキル・プラグイン同期を止める <code>--settings</code> を渡す</td><td><code>true</code></td></tr>
 <tr><td><code>copy_credentials</code></td><td>本物の認証ファイルを一時ホームに複製する（試行後に削除）。実行の前に期限を確かめ、近ければ止まる。試行の中で更新されたら本物へ書き戻す（5 章）</td><td><code>false</code></td></tr>
+<tr><td><code>credentials</code></td><td>判定役専用。<code>in_place</code> は認証を複製せず、本物の <code>CODEX_HOME</code> をその場で使う（codex だけ。解く側に書くと止まる。<code>copy_credentials</code> とは併用不可）。下の「LLM 判定の認証」を読む</td><td>なし</td></tr>
 </table>
 <p>置換できるもの: <code>{home}</code>（一時ホーム）・<code>{config_dir}</code>（Claude Code は <code>{home}/.claude</code>、Codex は <code>{home}/.codex</code>）・<code>{workdir}</code>・<code>{profile_dir}</code>・<code>{python}</code>。<code>run</code> の中では値が自動で引用されるので、引用符で囲まないでください。<code>install</code> のコピー先は試行ディレクトリの中に限ります（相対パスは一時ホーム基準）。</p>
 
@@ -207,6 +208,9 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 </ul>
 <h3>LLM 判定の認証</h3>
 <p>判定も一時ホームで動くため、プロファイルの <code>env</code>・<code>env_unset</code>・<code>inherit_env</code>・<code>copy_credentials</code>・<code>executable</code> を借ります（配布物と追加引数は借りません）。借りる先は判定役の系統ごとに決めます。<code>--judge-profile</code> がその系統のプロファイルならそれ、そうでなければ同じ種類の <code>--baseline</code>、それもなければ最初の同種プロファイルです。同じ種類のプロファイルがなければ親の環境変数だけで判定します（<code>run</code> が注意を出します）。判定が認証エラーなどで動かなかった試行は <code>judge_error</code> として集計から除きます。</p>
+
+<p><strong>認証をその場で使う（<code>credentials: in_place</code>）</strong>: Codex を ChatGPT のログイン（<code>~/.codex/auth.json</code>）だけで使うときの、判定役専用の経路です。認証ファイルは複製しません。<code>HOME</code> は一時ホームのまま、<code>CODEX_HOME</code> だけ本物を指し、<code>codex exec --json --ephemeral -s read-only --skip-git-repo-check --ignore-user-config --ignore-rules --disable hooks</code> で呼びます。同じ系統では同時に 1 本だけ呼び、<code>run</code> は始める前に <code>auth.json</code> の存在と期限を確かめます（値は表示しません）。<code>CODEX_HOME</code> の <code>AGENTS.md</code> が判定に入るかは実機で確かめていません（README の限界を参照）。</p>
+<p><code>--judge-profile</code> は、実行のプロファイルの id か、実行に使わない YAML のパス（<code>examples/judge-profiles/</code> に例）を受け付けます。系統ごとに <code>codex=path.yaml</code>・<code>claude_code=path.yaml</code> と書け、複数回指定できます。</p>
 
 <h3 id="cheat">ズル対策（試行の隔離・leak・tamper）</h3>
 <table>
@@ -265,7 +269,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <tr><td><code>--judge-family</code></td><td>判定役に使ってよい系統（複数可）</td><td>CLI が見つかった系統すべて</td></tr>
 <tr><td><code>--calibration-items</code></td><td>判定役の校正に使う項目数（<code>calibration</code> のあるタスクの出力から）</td><td>6</td></tr>
 <tr><td><code>--judge-executable</code>・<code>--judge-codex-executable</code></td><td>判定 CLI の実行ファイル。前者は <code>--judge-agent</code> の系統（なければ claude）、後者は codex</td><td>PATH 上の CLI</td></tr>
-<tr><td><code>--judge-profile</code></td><td>LLM 判定の認証を借りるプロファイル</td><td>5 章</td></tr>
+<tr><td><code>--judge-profile</code></td><td>LLM 判定の認証を借りるプロファイル（id か YAML のパス。<code>系統=</code> で系統ごと。複数可）</td><td>5 章</td></tr>
 <tr><td><code>--max-cost-usd</code>・<code>--monthly-budget-usd</code></td><td>実行全体・月の費用上限。<code>--max-cost-usd</code> は判定の費用を含み、実行前の見積もりが超えたら何も実行せずに止まる（終了コード 2）。実行中に達したら以降の試行と判定は <code>budget_stop</code></td><td>なし</td></tr>
 <tr><td><code>--retry-infra</code>・<code>--retry-wait-s</code></td><td>レート制限・過負荷の再試行回数と待ち秒数（回数に比例して延びる）</td><td>1・20</td></tr>
 <tr><td><code>--no-cache</code>・<code>--cache-dir</code></td><td>キャッシュを使わない・置き場所（holdout のタスクを含む実行は指定がなくても使わない）</td><td>使う・<code>.harness-eval-cache</code></td></tr>

@@ -204,31 +204,65 @@ $ python -m harness_eval run --tasks csv-summary-format.yaml csv-summary-insight
 - 両系統の判定が食い違ったときに合格にしないこと
 - 判定キャッシュが効くこと
 
-### 実測の手順（外側のシェルで実行。判定は合計 10 回以内）
+### 実測の手順（外側のシェルで実行。判定は合計 10 回以内・`--max-cost-usd 3`）
 
-同梱の `csv-summary-format` には、校正の項目（file_contains の 2 つと同じことを問う文）を入れてあります。
-`csv-summary-insight` には LLM 判定があります。
-2 タスク × 2 プロファイル × 1 試行では、解く側の呼び出しが 4 回です。
-判定の回数は、新既定が「合格した出力 ≤ 2 件 × 2 系統 × 1 回 + 校正 3 件 × 2 系統 = 10 回以内」、旧既定相当が「≤ 2 + 3 = 5 回」です。
+認証は複製しません。次のとおりです。
+
+| 役 | 認証 | プロファイル（`examples/judge-profiles/`） |
+| --- | --- | --- |
+| 解く側の Claude | `CLAUDE_CODE_OAUTH_TOKEN`（`claude setup-token`。`inherit_env` で名前だけ渡す） | `claude-baseline-oauth.yaml`、`claude-ds-lite-oauth.yaml`（`claude-baseline` / `claude-ds-lite` の d 用コピー） |
+| 判定役の Codex | `~/.codex/auth.json` をその場で使う（`credentials: in_place`。複製・書き戻しなし） | `codex-judge-inplace.yaml` |
+| 判定役の Claude（旧既定に相当） | 同じ `CLAUDE_CODE_OAUTH_TOKEN` | `claude-judge-oauth.yaml` |
+
+判定の回数は次のとおりで、合計 8 回以内です（任意の確認 1 回を足しても 9 回）。
+
+- 2 タスク（`csv-summary-format`・`csv-summary-insight`）× 2 プロファイル × 1 試行なので、解く側の呼び出しは 4 回です
+- 実行 A（新既定の dev。Codex が判定）: ルーブリックの判定 ≤ 2 回（`csv-summary-insight` の 2 出力）+ 校正 ≤ 2 回 = ≤ 4 回
+- 実行 B（旧既定相当。haiku・同系統）: ≤ 2 + ≤ 2 = ≤ 4 回。解く側の試行は実行 A のキャッシュを使うので、解く側は再実行しません
+- 校正の項目は 2 件なので、一致率は 0%・50%・100% のどれかになります。採用判断には使えない、仕組みが実機で動くことの確認です。
+  項目を増やすなら `--trials 2 --calibration-items 3` ですが、判定が最大 14 回になるので、10 回の枠は超えます
 
 ```
-OUT=/srv/harness-eval   # リポジトリやホームの外
-# 新既定（強いモデル・盲検・別系統と両系統一致）。回数を抑えるため 1 系統 1 回（採用判断には使えない設定だが、一致率の測定には足りる）
-python -m harness_eval run --tasks examples/tasks --task csv-summary-format --task csv-summary-insight \
-  --profiles examples/profiles/claude-baseline.yaml examples/profiles/claude-ds-lite.yaml --baseline claude-baseline \
-  --trials 1 --tier decisive --judge-votes 1 --calibration-items 3 --max-cost-usd 3 --out "$OUT"
-# 旧既定に相当（haiku・同系統）。旧版には校正の仕組みがないので新版で設定だけ旧既定にそろえる（盲検は外せない点が旧版と違う）
-python -m harness_eval run --tasks examples/tasks --task csv-summary-format --task csv-summary-insight \
-  --profiles examples/profiles/claude-baseline.yaml examples/profiles/claude-ds-lite.yaml --baseline claude-baseline \
-  --trials 1 --judge-agent claude_code --judge-model haiku --allow-weak-judge --calibration-items 3 --max-cost-usd 3 --out "$OUT"
-# 一致率と判定の費用
-python - <<'EOF'
-import json, glob
-for f in sorted(glob.glob("/srv/harness-eval/2*/summary.json"))[-2:]:
+# 0. 準備（モデルは呼びません）
+OUT=/tmp/ahe-d                      # このリポジトリとホームの外。/srv/harness-eval でもよい
+mkdir -p "$OUT"
+export CLAUDE_CODE_OAUTH_TOKEN=...  # 値はファイルに書かない。claude setup-token の出力
+codex login                         # auth.json の期限が近いと run が止まる。先に更新しておく
+P=examples/judge-profiles
+SOLVERS="$P/claude-baseline-oauth.yaml $P/claude-ds-lite-oauth.yaml"
+TASKS="--tasks examples/tasks --task csv-summary-format --task csv-summary-insight"
+COMMON="$TASKS --profiles $SOLVERS --baseline claude-baseline --trials 1 --calibration-items 2 --max-cost-usd 3 --out $OUT --cache-dir $OUT/cache"
+
+# 1. 見積もり（モデルは呼びません。--version だけ）
+python -m harness_eval plan $COMMON --judge-profile codex=$P/codex-judge-inplace.yaml
+
+# 2. 実行 A: 新既定（dev。別系統の Codex が判定。認証は in_place）
+python -m harness_eval run $COMMON --tier dev --judge-profile codex=$P/codex-judge-inplace.yaml
+
+# 3. 実行 B: 旧既定に相当（haiku・同系統。旧版には校正がないので新版で設定だけそろえる。盲検は外せない点が旧版と違う）
+python -m harness_eval run $COMMON --judge-agent claude_code --judge-model haiku --allow-weak-judge \
+  --judge-profile claude_code=$P/claude-judge-oauth.yaml
+
+# 4. 一致率と判定の費用
+python - <<'PY'
+import json, glob, os
+for f in sorted(glob.glob(os.path.expandvars("$OUT/2*/summary.json")))[-2:]:
     s = json.load(open(f)); j = s["meta"]["judge"]; u = s["usage"]
-    print(f, j.get("models"), j.get("calibration"), u["judge"], u["solver"]["cost_usd"], u["judge_share"])
-EOF
+    print(f, j.get("models"), s["meta"]["options"]["judge_credentials"], j.get("calibration"), u["judge"], u["solver"]["cost_usd"], u["judge_share"])
+PY
 ```
+
+実行 A の前後で、本物の認証ファイルが壊れていないことも確かめます。`ls -l ~/.codex/auth.json`（値は見ない）の更新時刻が変わっていたら、
+Codex 自身が 1 回更新したということで、複製ではないので問題ありません。`codex login status` などで、ログインが有効なままかを見ます。
+
+**任意の確認（1 回。上の枠に含める）**: `~/.codex/AGENTS.md` が判定に入るかを確かめます。README の「判定役の認証をその場で使う」の限界を参照してください。
+
+```
+HOME=$(mktemp -d) codex exec --json --ephemeral -s read-only --skip-git-repo-check --ignore-user-config --ignore-rules --disable hooks \
+  -C "$(mktemp -d)" "渡されている指示文の見出しだけを列挙して。なければ none"
+```
+
+結果は、この節の「実測できなかった理由」の下に、実行 A・B の一致率と費用の表として追記します。
 
 ## この変更の評価で使ったトークンと費用
 

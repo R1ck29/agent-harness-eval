@@ -292,6 +292,28 @@ verdict の検査欄 `integrity` に、無効にした試行・改ざん・隔�
 - それでも試行の中で更新されたら、本物がまだ複製したときのままのときだけ、ロックを取って原子的に書き戻します
 - 会社の評価では、更新の起きない API キー（Codex は `CODEX_API_KEY`、Claude は `ANTHROPIC_API_KEY`）を `inherit_env` で渡すことを勧めます
 
+**判定役の認証をその場で使う（`credentials: in_place`。Codex を ChatGPT のログインで使う場合）**: API キーがなく `~/.codex/auth.json` しかないときの、
+判定役専用の経路です。認証ファイルを複製しないので、複製側の更新で本物の refresh token が使用済みになる事故が起きません。
+`--judge-profile codex=examples/judge-profiles/codex-judge-inplace.yaml` のように、実行には使わないプロファイルを渡します。
+
+- 解く側のプロファイル（`--profiles`）に書くと `SpecError` で止まります（解く側に本物の設定ディレクトリを見せないため）。`claude_code`・`copy_credentials: true` との併用も `SpecError` です
+- `HOME` は一時ホームのままで、`CODEX_HOME` だけ本物（環境変数 `CODEX_HOME`、なければ `~/.codex`）を指します。
+  `codex exec --json --ephemeral -s read-only --skip-git-repo-check --ignore-user-config --ignore-rules --disable hooks` で呼び、
+  利用者の `config.toml`（MCP・モデル・指示）・execpolicy の `.rules`・hooks を判定に入れません
+- 同じ系統の in_place の判定は同時に 1 本だけです（`--jobs` が 2 以上でも順に呼びます。更新の競合を避けるため）。
+  このロックは 1 つの `run` の中だけです。別の端末で同じ `~/.codex` を使う `codex` や別の `run` を同時に動かさないでください
+- `run` は始める前に `auth.json` の存在と期限を確かめます（値は表示しません）。期限まで 2 時間ない・切れている、または最終更新が 7 日より前なら止まります。
+  `codex login`（または一度 `codex` を実行して更新）してからやり直してください
+- **限界**: `~/.codex/AGENTS.md` など `CODEX_HOME` に置いた指示ファイルが判定の入力に入るかは、`--ignore-user-config` の説明（`config.toml` を読まない）からは分かりません。
+  この版（0.171.0）では実機で確かめていないので、入りうるものとして扱ってください。確かめるには、外側のシェルで 1 回だけ
+  `HOME=$(mktemp -d) codex exec --json --ephemeral -s read-only --skip-git-repo-check --ignore-user-config --ignore-rules --disable hooks -C "$(mktemp -d)" "渡されている指示文の見出しだけを列挙して。なければ none"`
+  を呼び、`AGENTS.md` の内容が出るかを見ます。出るなら、その指示が判定に混ざったものとして d の結果を読むか、実測の間だけ `AGENTS.md` を退避するか、API キー（`CODEX_API_KEY` を `inherit_env`）の経路に切り替えてください（認証ファイルを別のフォルダへ複製する方法は、事故の原因なので使いません）
+- Claude は in_place にしません。本物の `~/.claude` を見せると `CLAUDE.md`・設定・フック・プラグインが判定に入るためです。
+  サブスクリプションなら `claude setup-token` で作ったトークンを `CLAUDE_CODE_OAUTH_TOKEN` に入れ、`inherit_env` で渡します（`examples/judge-profiles/claude-judge-oauth.yaml`）
+
+`--judge-profile` には、実行のプロファイルの id のほか、実行に使わない YAML のパスも渡せます（判定役の認証だけ借ります。配布物は使いません）。
+系統ごとに `--judge-profile codex=path.yaml --judge-profile claude_code=path.yaml` と指定できます（系統が合わない YAML は `SpecError`）。
+
 ### 判定役（LLM 判定）
 
 - 決定的な検査（ファイル・正規表現・スクリプトなど）に合格した出力にだけ走ります。見るのはルーブリック（`type: llm`）の基準だけです
@@ -316,6 +338,8 @@ haiku など、段階が求めるより弱いモデルは止めます。`--allow
 それでも、既定のまま弱い・安い判定で採用が決まることはありません。
 LLM 判定が合否を決めた試行があれば、dev の結論は暫定です。関門の `verdict` は、そのとき decisive を求めます（dev なら終了コード 5）。
 実行前の見積もりには、dev と decisive の両方の費用が出ます。
+解く側の呼び出しに履歴（キャッシュの実測）がないときは、$0 とは数えず、タスクの `limits.max_budget_usd`（なければ $0.50）で見積もります。
+`--max-cost-usd` は、この見積もりの合計が上限を超えると、何も実行せずに止まります。
 
 ### 費用
 
