@@ -119,6 +119,24 @@ class InPlaceJudge(unittest.TestCase):
         return [r for r in self.argv_rows() if "read-only" in r["argv"] and "-C" not in r["argv"]]
 
     # ---------------------------------------------------------------- その場で使う
+    def test_config_dir_override_cannot_bypass_the_in_place_gate(self):
+        """judge プロファイルの env で CODEX_HOME を本物に向けても、in_place と同じ扱い（宣言のない実行は止める）。"""
+        bypass = self.judge_profile(extra=f"env: {{CODEX_HOME: {json.dumps(str(self.real))}}}\n", name="codex-judge-bypass")
+        code, out, _ = self.go("--judge-profile", f"codex={bypass}", trusted=False)
+        self.assertEqual(code, 2, out)
+        self.assertIn("CODEX_HOME", out)
+        self.assertEqual(self.judge_calls(), [])
+
+    def test_in_place_failure_records_no_cli_output(self):
+        """判定が失敗しても、in_place の CLI の標準エラー・エラーメッセージは記録・報告に残さない。"""
+        with mock.patch.dict(os.environ, {"FAKE_JUDGE_FAIL": "1"}):
+            code, out, s = self.go("--judge-profile", f"codex={self.judge}", "--no-cache")
+        runs = sorted(d for d in self.out.iterdir() if d.is_dir())
+        blob = out + "".join(p.read_text(encoding="utf-8", errors="replace") for p in runs[-1].glob("*") if p.is_file())
+        self.assertNotIn("LEAK-STDERR-XYZ", blob)
+        self.assertNotIn("LEAK-ERRMSG-XYZ", blob)
+        self.assertIn("judge_error", blob)
+
     def test_in_place_needs_the_judge_input_to_be_declared_trusted(self):
         """#5: 実認証の CODEX_HOME を使う判定は、候補の出力を渡す限りツール経由の読み取りを CLI 側で止められない。
         判定入力が信頼できると宣言（--trust-judge-input）しない限り、起動前に止める。"""

@@ -175,6 +175,8 @@ class JudgePhase:
             raise JudgeUnavailable("判定が 300 秒でタイムアウト")
         text, tokens, cost, jerr = settled or self._settle_judge(adapter, family, model, out)
         if jerr or not text:
+            if in_place:  # 実認証を指す CLI の出力（エラーメッセージ・標準エラー）は記録・報告に載せない。分類だけ残す
+                raise JudgeUnavailable(f"判定が失敗（in_place: CLI の出力は記録しません）{(classify_stderr(err) or '')}".strip())
             raise JudgeUnavailable(f"判定が失敗: {jerr or '応答なし'} {(classify_stderr(err) or '')} {err.strip()[-200:]}".strip())
         return text, tokens, cost
 

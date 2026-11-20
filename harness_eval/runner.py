@@ -613,6 +613,11 @@ class Runner(JudgePhase):
             msg = credentials.preflight(agent)
             if msg:
                 raise SpecError(msg)
+        for f, p in self.judge_profiles.items():  # 設定ディレクトリを env で上書きして in_place の宣言（--trust-judge-input）を迂回させない
+            var = "CODEX_HOME" if f == "codex" else "CLAUDE_CONFIG_DIR"
+            if p and p.credentials != "in_place" and var in p.env:
+                raise SpecError(f"判定役のプロファイル {p.id} が env で {var} を指定しています。実の認証ディレクトリを使う場合は "
+                                "credentials: in_place（と --trust-judge-input）を使ってください（env での上書きは受け付けません）")
         in_place = sorted({p.agent for p in self.judge_profiles.values() if p and p.credentials == "in_place"})
         if in_place and not self.opt.trust_judge_input:
             raise SpecError(
