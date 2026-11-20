@@ -127,7 +127,8 @@ def summarize_hits(res: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------- tamper
-TEST_FILE = re.compile(r"(^|/)(tests?/.+|test_[^/]+\.py|[^/]+_test\.py|[^/]+\.(test|spec)\.[cm]?[jt]sx?|conftest\.py)$")
+TEST_FILE = re.compile(r"(^|/)(tests?/.+|__tests__/.+|tests?\.py|test_[^/]+\.py|[^/]+_tests?\.py|[^/]+_test\.go"
+                       r"|[^/]+\.(test|spec)\.[cm]?[jt]sx?|conftest\.py)$")
 CONFIG_FILE = re.compile(r"(^|/)(pytest\.ini|tox\.ini|setup\.cfg|pyproject\.toml|package\.json|\.github/workflows/.+"
                          r"|(jest|vitest)\.config\.[cm]?[jt]s|noxfile\.py)$")
 TEST_LINE = re.compile(r"^\s*(def test|async def test|class Test|assert\b|self\.assert|expect\(|it\(|test\(|describe\()")
@@ -174,6 +175,9 @@ def tamper_check(before: dict[str, str], workdir: Path) -> list[dict[str, str]]:
             moved = new_contents.get(before[path])
             found.append({"kind": "test_file_renamed" if moved else "test_file_removed", "path": path,
                           "line": f"-> {moved}" if moved else ""})
+    for path in sorted(before):  # 消えていないのに監視できなくなった（大きすぎる・UTF-8 でない）既存のテストファイル
+        if TEST_FILE.search(path) and path not in after and (Path(workdir) / path).exists():
+            found.append({"kind": "test_file_unwatched", "path": path, "line": "読めない・大きすぎるため内容を確認できない"})
     for path in sorted(after):
         old = before.get(path, "")
         if old == after[path]:
@@ -192,6 +196,9 @@ def tamper_check(before: dict[str, str], workdir: Path) -> list[dict[str, str]]:
                 body = [ln for ln in removed if ln.strip() and not ln.strip().startswith(("#", "//"))]
                 if body:
                     found.append({"kind": "test_body_modified", "path": path, "line": f"changed: {body[0].strip()[:160]}"})
+                elif not after[path].startswith(old.rstrip()) and not _skip_added_here(added):
+                    # 行を消さない弱め方（先頭に return・assert の前に代入・autouse の差し替え）: 末尾への追記ではない変更
+                    found.append({"kind": "test_body_modified", "path": path, "line": f"inserted before the end: {(added or [''])[0].strip()[:160]}"})
         for ln in added:
             if SKIP_ADD.search(ln) and _skip_target(after[path], old, ln) in (None, "<existing>"):
                 found.append({"kind": "skip_added", "path": path, "line": ln.strip()[:160]})
@@ -200,6 +207,11 @@ def tamper_check(before: dict[str, str], workdir: Path) -> list[dict[str, str]]:
                 if NARROW.search(ln):
                     found.append({"kind": "test_config_narrowed", "path": path, "line": ln.strip()[:160]})
     return found
+
+
+def _skip_added_here(added: list[str]) -> bool:
+    """足した行が skip / xfail だけなら、別の検査（skip_added）が扱うので、ここでは数えない。"""
+    return bool(added) and all(SKIP_ADD.search(ln) for ln in added)
 
 
 def _changed_lines(old: str, new: str) -> tuple[list[str], list[str]]:

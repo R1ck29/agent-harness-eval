@@ -35,6 +35,30 @@ class TestBodyTamper(unittest.TestCase):
         self.t.write_text("def test_x():\n    assert True\n", encoding="utf-8")
         self.assertIn("test_body_modified", self.kinds())
 
+    def test_insertion_only_weakening_is_detected(self):
+        """行を消さない弱め方（先頭に return・assert の前に代入）も、追記ではない変更として検出する。"""
+        self.t.write_text("def test_x():\n    return\n    assert add(2, 2) == 4\n", encoding="utf-8")
+        self.assertIn("test_body_modified", self.kinds())
+        self.t.write_text("def test_x():\n    add = lambda a, b: 4\n    assert add(2, 2) == 4\n", encoding="utf-8")
+        self.assertIn("test_body_modified", self.kinds())
+
+    def test_an_edited_file_that_is_no_longer_watched_is_flagged(self):
+        """監視できなくなった（大きすぎる・UTF-8 でない）既存のテストファイルは、消えていなくても検出する。"""
+        self.t.write_text(self.t.read_text(encoding="utf-8") + "# " + "x" * 600_000 + "\n", encoding="utf-8")
+        self.assertIn("test_file_unwatched", self.kinds())
+
+    def test_more_test_file_name_patterns_are_watched(self):
+        for rel in ("tests.py", "pkg/foo_tests.py", "__tests__/a.js", "foo_test.go"):
+            d = Path(tempfile.mkdtemp(prefix="r5b-pat-"))
+            self.addCleanup(shutil.rmtree, d, True)
+            f = d / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("assert 1 == 1\n", encoding="utf-8")
+            before = capture_tests(d)
+            self.assertIn(rel, before, rel)
+            f.write_text("assert True\n", encoding="utf-8")
+            self.assertTrue(tamper_check(before, d), rel)
+
     def test_appending_new_tests_and_new_files_is_allowed(self):
         self.t.write_text(self.t.read_text(encoding="utf-8") + "\n\ndef test_y():\n    assert add(1, 1) == 2\n", encoding="utf-8")
         (self.wd / "tests" / "test_new.py").write_text("def test_z():\n    assert 1\n", encoding="utf-8")
