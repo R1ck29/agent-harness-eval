@@ -12,8 +12,10 @@ leak が見つかった試行は INVALID（合格にも不合格にも数えな�
 """
 from __future__ import annotations
 
+import ast
 import difflib
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -199,6 +201,8 @@ def tamper_check(before: dict[str, str], workdir: Path) -> list[dict[str, str]]:
                 elif not after[path].startswith(old.rstrip()) and not _skip_added_here(added):
                     # 行を消さない弱め方（先頭に return・assert の前に代入・autouse の差し替え）: 末尾への追記ではない変更
                     found.append({"kind": "test_body_modified", "path": path, "line": f"inserted before the end: {(added or [''])[0].strip()[:160]}"})
+                elif path.endswith(".py") and (name := _redefined_python_name(old, after[path])):
+                    found.append({"kind": "test_body_modified", "path": path, "line": f"redefined: {name}"})
         for ln in added:
             if SKIP_ADD.search(ln) and _skip_target(after[path], old, ln) in (None, "<existing>"):
                 found.append({"kind": "skip_added", "path": path, "line": ln.strip()[:160]})
@@ -207,6 +211,27 @@ def tamper_check(before: dict[str, str], workdir: Path) -> list[dict[str, str]]:
                 if NARROW.search(ln):
                     found.append({"kind": "test_config_narrowed", "path": path, "line": ln.strip()[:160]})
     return found
+
+
+def _python_definitions(nodes: Iterable[ast.AST], scope: tuple[str, ...] = ()) -> Iterable[tuple[str, ...]]:
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            name = (*scope, node.name)
+            yield name
+            if isinstance(node, ast.ClassDef):
+                yield from _python_definitions(node.body, name)
+        else:
+            yield from _python_definitions(ast.iter_child_nodes(node), scope)
+
+
+def _redefined_python_name(old: str, new: str) -> str | None:
+    """同じスコープに既存の定義を追記すると、Python は後の定義で上書きする。"""
+    try:
+        before = Counter(_python_definitions(ast.parse(old).body))
+        after = Counter(_python_definitions(ast.parse(new).body))
+    except SyntaxError:
+        return None
+    return next((".".join(name) for name in before if after[name] > before[name]), None)
 
 
 def _skip_added_here(added: list[str]) -> bool:

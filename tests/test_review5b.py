@@ -64,6 +64,19 @@ class TestBodyTamper(unittest.TestCase):
         (self.wd / "tests" / "test_new.py").write_text("def test_z():\n    assert 1\n", encoding="utf-8")
         self.assertEqual(self.kinds(), [])
 
+    def test_appending_a_replacement_test_is_detected(self):
+        self.t.write_text(self.before["tests/test_a.py"] + "\n\ndef test_x():\n    assert True\n", encoding="utf-8")
+        self.assertIn("test_body_modified", self.kinds())
+
+    def test_method_redefinition_is_checked_within_its_class(self):
+        original = "class TestA:\n    def test_x(self):\n        assert False\n"
+        self.t.write_text(original, encoding="utf-8")
+        self.before = capture_tests(self.wd)
+        self.t.write_text(original + "\n    def test_x(self):\n        assert True\n", encoding="utf-8")
+        self.assertIn("test_body_modified", self.kinds())
+        self.t.write_text(original + "\nclass TestB:\n    def test_x(self):\n        assert True\n", encoding="utf-8")
+        self.assertEqual(self.kinds(), [])
+
 
 class TestNoLlmCacheAndVerdict(unittest.TestCase):
     """#7: --no-llm の結果を LLM 判定ありの実行で再利用しない。未実施の必須条件がある結果は採用不可。"""
@@ -106,6 +119,12 @@ class TestCmpPassedNull(unittest.TestCase):
         legacy = self.base(passed=True)
         del legacy["cmp_passed"]
         self.assertTrue(outcome(TrialRecord.from_dict(legacy)))
+
+    def test_explicit_null_stays_excluded_with_judge_disagreement(self):
+        d = self.base(cmp_passed=None, passed=True, grader_results=[{"type": "llm", "status": "judge_disagreement"}])
+        self.assertIsNone(outcome(TrialRecord.from_dict(d)))
+        d["cmp_passed"] = True
+        self.assertFalse(outcome(TrialRecord.from_dict(d)))
 
     def test_skill_only_task_does_not_count_as_an_improvement(self):
         recs = runs({f"t{i}": (2, 2) for i in range(8)}, 4)
@@ -167,12 +186,19 @@ class TestInPlaceBudgetInsideLock(unittest.TestCase):
     """#14: 直列に待つ in_place の判定は、ロックの中で起動の直前に残額を確認し、費用を計上してから次を許可する。"""
 
     def test_waiting_votes_do_not_launch_after_the_cap(self):
+        self.check_waiting_votes(timed_out=False)
+
+    def test_timed_out_votes_settle_usage_before_releasing_lock(self):
+        self.check_waiting_votes(timed_out=True)
+
+    def check_waiting_votes(self, timed_out: bool) -> None:
         import json
         import threading
         from collections import defaultdict
         from types import SimpleNamespace
         from unittest import mock
         from harness_eval.judge_phase import JudgeBudgetStop, JudgePhase
+        from harness_eval.graders import JudgeUnavailable
         from harness_eval.runner import Runner
         from harness_eval.isolation import ProcResult
         from harness_eval.spec import Profile
@@ -209,7 +235,7 @@ class TestInPlaceBudgetInsideLock(unittest.TestCase):
                      {"type": "turn.completed", "usage": {"input_tokens": 2000, "cached_input_tokens": 1500, "output_tokens": 50}}]
             Path(stdout_path).write_text("\n".join(json.dumps(x) for x in lines), encoding="utf-8")
             Path(stderr_path).write_text("", encoding="utf-8")
-            return ProcResult(0, False, 100)
+            return ProcResult(0, timed_out, 100)
 
         results = []
 
@@ -219,6 +245,8 @@ class TestInPlaceBudgetInsideLock(unittest.TestCase):
                 results.append("ran")
             except JudgeBudgetStop:
                 results.append("stopped")
+            except JudgeUnavailable:
+                results.append("unavailable")
 
         with mock.patch("harness_eval.judge_phase.run_process", fake_run), \
                 mock.patch("harness_eval.judge_phase.credentials.source_path", return_value=real / "auth.json"):
@@ -227,7 +255,11 @@ class TestInPlaceBudgetInsideLock(unittest.TestCase):
             [t.join() for t in threads]
         # 1 回 $0.00165 < 上限 $0.002、2 回で超える。待っていた残りは起動しない
         self.assertEqual(len(launched), 2, results)
-        self.assertEqual(sorted(results), ["ran", "ran", "stopped", "stopped"])
+        self.assertCountEqual(results, ["unavailable" if timed_out else "ran"] * 2 + ["stopped"] * 2)
+        self.assertEqual(p.judge_usage["input"], 4000)
+        self.assertEqual(p.judge_usage["calls"], 2)
+        self.assertAlmostEqual(p.judge_usage["cost_usd"], p.spent)
+        self.assertEqual(len(p.ledger.read_text(encoding="utf-8").splitlines()), 2)
 
 
 class TestRetryUsageCounted(unittest.TestCase):

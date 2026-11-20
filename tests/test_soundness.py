@@ -20,7 +20,7 @@ def rec(task: str, profile: str, passed: bool, trial: int = 0, agent: str = "cla
     return TrialRecord(run_id="r", task_id=task, profile_id=profile, agent=agent, trial=trial, cache_key="k",
                        task_hash="h", profile_hash="p", cli_version=None, passed=passed and valid and error is None,
                        cmp_passed=(passed and error is None) if valid else None, valid=valid, error=error,
-                       grader_results=graders)
+                       grader_results=graders, meta={"grader_isolation": "bwrap"})
 
 
 def runs(spec: dict[str, tuple[int, int]], trials: int, **kw) -> list[TrialRecord]:

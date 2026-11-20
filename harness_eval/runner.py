@@ -493,7 +493,7 @@ class Runner(JudgePhase):
             if tamper:
                 rec.meta["tamper"] = tamper[:10]
             # 決定的な検査を先に行い、LLM 判定は合格した出力の判定入力（最小）だけを積んでおく。判定は全試行のあと（_judge_phase）。
-            # 採点の一時ファイルは試行ごとのフォルダに集め、終わったら消す（隠しテストを当てた木を OS の /tmp に残さない）
+            # コマンドごとの一時フォルダを試行内に作り、採点後に消す
             gtmp = fresh_dir(tp.root / "grade_tmp")  # solver が同名のリンクを置いていても、その先を使わない
             try:
                 grade_all(task.graders, rec, tp.workdir, JudgeConfig(enabled=self.opt.llm, run=None, defer=True), task.path.parent,

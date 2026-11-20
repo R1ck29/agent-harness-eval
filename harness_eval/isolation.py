@@ -16,6 +16,7 @@ Codex は OS の一時ディレクトリ配下の CODEX_HOME だと補助バイ�
 """
 from __future__ import annotations
 
+from contextlib import ExitStack
 import hashlib
 import os
 import platform
@@ -172,16 +173,6 @@ def fill(s: str, ph: dict[str, str], quote: bool = False) -> str:
     return out
 
 
-def _declares_bedrock(profile: Profile) -> bool:
-    """Bedrock を使うと、プロファイル自身が宣言しているか（env に書く、または inherit_env に書いて親の環境で有効）。"""
-    if profile.agent != "claude_code":
-        return False
-    v = profile.env.get("CLAUDE_CODE_USE_BEDROCK")
-    if v is None and "CLAUDE_CODE_USE_BEDROCK" in profile.inherit_env:
-        v = os.environ.get("CLAUDE_CODE_USE_BEDROCK")
-    return str(v or "").strip().lower() not in ("", "0", "false")
-
-
 def build_env(profile: Profile, tp: TrialPaths, config_env: str) -> dict[str, str]:
     """試行の環境変数。親の環境からは許可リスト（BASE_ENV）と inherit_env に書いたものだけを渡す。"""
     dropped = set(INHERITED_UNSET) | set(profile.env_unset)
@@ -192,20 +183,20 @@ def build_env(profile: Profile, tp: TrialPaths, config_env: str) -> dict[str, st
     if tp.tmp is not None:  # 試行の一時ファイルは試行ディレクトリの中に（OS の /tmp に残さない。試行のあとに消す）
         for k in ("TMPDIR", "TEMP", "TMP"):
             env[k] = str(tp.tmp)
-    real_home = Path.home()
     if profile.isolate_home:
         env["HOME"] = str(tp.home)
         env["USERPROFILE"] = str(tp.home)
-        # ホームを差し替えても AWS（Bedrock）の認証情報ファイルは本物を参照させる。ただしプロファイルが Bedrock を明示したときだけ
-        # （未宣言のプロファイルに実の AWS 認証を渡さない。env_unset で外した変数も戻さない）
-        if _declares_bedrock(profile):
-            for var, rel in (("AWS_SHARED_CREDENTIALS_FILE", ".aws/credentials"), ("AWS_CONFIG_FILE", ".aws/config")):
-                if var not in env and var not in dropped and (real_home / rel).is_file():
-                    env[var] = str(real_home / rel)
     env[config_env] = str(tp.config_dir)
     ph = placeholders(tp, profile)
     for k, v in profile.env.items():
         env[k] = fill(v, ph)
+    bedrock = env.get("CLAUDE_CODE_USE_BEDROCK", "").strip().lower() not in ("", "0", "false")
+    if profile.isolate_home and profile.agent == "claude_code" and bedrock:
+        # 実行環境で Bedrock が有効なときだけ AWS の設定ファイルを補う。
+        real_home = Path.home()
+        for var, rel in (("AWS_SHARED_CREDENTIALS_FILE", ".aws/credentials"), ("AWS_CONFIG_FILE", ".aws/config")):
+            if var not in env and var not in dropped and (real_home / rel).is_file():
+                env[var] = str(real_home / rel)
     return env
 
 
@@ -320,7 +311,7 @@ def grader_env(workdir: Path, tmp_dir: Path, record_path: Path) -> dict[str, str
     return env
 
 
-def _grader_material(cmd: str, extra_ro: list[str]) -> tuple[list[str], list[str]]:
+def _grader_material(cmd: str, extra_ro: list[str], workdir: Path, resolved_workdir: Path) -> tuple[list[str], list[str]]:
     """採点コマンドが参照する評価資材（採点スクリプト・正解データなど。コマンドに書かれた実在する絶対パスと、明示した ro）と、
     `{task_dir}/../checks/x.py` のように `..` で戻る道筋のために隔離の中に作る空のフォルダ（中身は見せない）。"""
     try:
@@ -330,14 +321,24 @@ def _grader_material(cmd: str, extra_ro: list[str]) -> tuple[list[str], list[str
     home = Path.home().resolve()
     out: list[str] = []
     dirs: list[str] = []
+    workdirs = {workdir.absolute(), resolved_workdir}
     for t in [*toks, *extra_ro]:
-        if not os.path.isabs(t) or not os.path.exists(t):
+        path = Path(t)
+        if not path.is_absolute():
             continue
-        r = Path(t).resolve()
+        if path.anchor == "//":
+            path = Path("/") / path.relative_to("//")
+        # 作業ツリー内のリンクを解決するのはマウント後のシェルだけ。
+        # 「..」でツリーを出入りする表記も、ホストの bind 元にしない。
+        if any(Path(os.path.normpath(prefix)).is_relative_to(w) for prefix in (path, *path.parents) for w in workdirs):
+            continue
+        if not path.exists():
+            continue
+        r = path.resolve()
         if r == home or r == Path(r.anchor) or r in home.parents:  # ホームそのもの・その親・ルートは見せない
             continue
         out.append(str(r))
-        parts = Path(t).parts
+        parts = path.parts
         for i, part in enumerate(parts):
             if part == "..":
                 dirs.append(os.path.normpath(os.path.join(*parts[:i])))
@@ -367,9 +368,9 @@ def grader_sandbox_cmd(cmd: str, workdir: Path, tmp_dir: Path, extra_ro: list[st
     for prefix in (*py, str(Path(os.path.realpath(sys.executable)).parents[1])):  # Python 本体と venv（秘密は置かれない）
         if Path(prefix).resolve() != home:
             ro.append(os.path.realpath(prefix))  # 実体のパスで bind する（リンクの名前では bind しない）
-    material, dirs = _grader_material(cmd, extra_ro or [])
-    ro += material
     wd, tmp = str(workdir.resolve()), str(tmp_dir.resolve())
+    material, dirs = _grader_material(cmd, extra_ro or [], workdir, Path(wd))
+    ro += material
     ro = [p for p in dict.fromkeys(ro) if p not in (wd, tmp)]
     args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net",
             "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", "/home", "--tmpfs", "/workspace"]
@@ -509,17 +510,14 @@ class ProcResult:
 
 def run_process(cmd: list[str], cwd: Path, env: dict[str, str], stdin_text: str | None,
                 stdout_path: Path, stderr_path: Path, timeout_s: int) -> ProcResult:
-    """stdout/stderr はファイルに直接書く（大量出力でもパイプが詰まらない）。
-    タイムアウト時は子プロセスごと終了させる。"""
+    """子の stdout/stderr をパイプで読み、親がログへ保存する。タイムアウト時も回収済みの出力を保存する。"""
     t0 = time.monotonic()
     kw: dict = {"start_new_session": True} if os.name != "nt" else {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined]
-    try:
-        out_f, err_f = open_new(stdout_path), open_new(stderr_path)
-    except OSError as e:
-        return ProcResult(None, False, 0, launch_error=f"{type(e).__name__}: {e}")
-    with out_f as out, err_f as err:
+    with ExitStack() as stack:
         try:
-            p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=out, stderr=err,
+            out = stack.enter_context(open_new(stdout_path))
+            err = stack.enter_context(open_new(stderr_path))
+            p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL, **kw)
         except OSError as e:
             return ProcResult(None, False, 0, launch_error=f"{type(e).__name__}: {e}")
@@ -527,12 +525,19 @@ def run_process(cmd: list[str], cwd: Path, env: dict[str, str], stdin_text: str 
             _RUNNING.add(p)
         try:
             # communicate は標準入力の書き込みとタイムアウトを同時に扱う（子が入力を読まなくても詰まらない）
-            p.communicate(stdin_text.encode("utf-8") if stdin_text is not None else None, timeout=timeout_s)
+            stdout, stderr = p.communicate(stdin_text.encode("utf-8") if stdin_text is not None else None, timeout=timeout_s)
             timed_out = False
         except subprocess.TimeoutExpired:
             _kill_tree(p)
             timed_out = True
+            try:
+                stdout, stderr = p.communicate(timeout=5)
+            except subprocess.TimeoutExpired as partial:
+                # 子孫がパイプを持ったままの場合も、回収済みの出力を残して戻る。
+                stdout, stderr = partial.output, partial.stderr
         finally:
             with _RUNNING_LOCK:
                 _RUNNING.discard(p)
+        out.write(stdout or b"")
+        err.write(stderr or b"")
     return ProcResult(p.returncode, timed_out, int((time.monotonic() - t0) * 1000))

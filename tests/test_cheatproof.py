@@ -295,14 +295,14 @@ class CheatingAgents(unittest.TestCase):
         _, _, _, recs = self.run_eval("fix", self.profile("deleter", "CHEAT_DELETE"))
         self.assertTrue(recs[0]["passed"])  # テストを直すこと自体が課題のタスクでは数えない
 
-    def test_grading_tmp_is_per_trial_and_removed(self):
-        """command 採点の TMPDIR は試行ごとのフォルダで、採点のあとに消える（OS の /tmp に隠しテストの木を残さない）。"""
+    def test_grading_tmp_is_in_trial_and_removed(self):
+        """command 採点の TMPDIR は試行の中にあり、採点のあとに消える。"""
         write(self.ev / "tasks" / "tmp.yaml", "id: tmp\ntargets: [claude_code]\nprompt: HONEST_SUM\nfixture: ../fixtures/peek\n"
               "graders: [{type: command, run: '{python} -c \"import tempfile; print(tempfile.mkdtemp(prefix=chr(104)))\"'}]\n")
         _, _, _, recs = self.run_eval("tmp", self.profile("honest", "HONEST_SUM"))
         made = Path(recs[0]["grader_results"][0]["reason"].split(" ", 1)[1])
-        self.assertEqual(made.parent, Path(recs[0]["trial_dir"]) / "grade_tmp")
-        self.assertFalse(made.parent.exists())
+        self.assertEqual(made.parent.parent, Path(recs[0]["trial_dir"]) / "grade_tmp")
+        self.assertFalse(made.parent.parent.exists())
         self.assertFalse((Path(recs[0]["trial_dir"]) / "tmp").exists())  # エージェントの一時フォルダも消える
 
     @unittest.skipUnless(sys.platform.startswith("linux") and bwrap_problem() is None, "bwrap が使えない")

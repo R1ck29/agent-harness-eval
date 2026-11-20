@@ -13,6 +13,7 @@ import hashlib
 import os
 import random
 import re
+import shutil
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
@@ -99,16 +100,20 @@ def blind(text: str, terms: Iterable[str] = (), paths: Iterable[str] = ()) -> st
     return out
 
 
-def judge_identity(exe: list[str], version: str | None, model: str | None, route: str = "") -> str:
-    """判定役そのものの識別子: 実行ファイル（実体のパス・大きさ・更新時刻）・CLI の版・実効モデル・非秘密の経路設定。
-    どれかが変われば判定キャッシュのキーが変わる（偽の CLI で作った票を実 CLI に切り替えたあとも読む、を防ぐ）。"""
+def judge_identity(exe: list[str], version: str | None, model: str | None, route: str = "", path: str | None = None) -> str:
+    """判定役の識別子: PATH で見つけた実行ファイルと引数のファイルの実体・内容、CLI の版、実効モデル、非秘密の経路設定。"""
     parts = []
-    for a in exe:
-        if os.path.isfile(a):
-            st = os.stat(a)
-            parts.append(f"{os.path.realpath(a)}:{st.st_size}:{st.st_mtime_ns}")
-        else:
+    for i, a in enumerate(exe):
+        file = (shutil.which(a, path=path) or a) if i == 0 else a
+        if not os.path.isfile(file):
             parts.append(a)
+            continue
+        real = os.path.realpath(file)
+        digest = hashlib.sha256()
+        with open(real, "rb") as fh:
+            while chunk := fh.read(1024 * 1024):
+                digest.update(chunk)
+        parts.append(f"{real}:{digest.hexdigest()}")
     raw = "\x1f".join(["|".join(parts), str(version), str(model) if model else "(CLI の既定)", route])
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
@@ -210,14 +215,18 @@ def combine_rubric(majorities: dict[str, str], negate: bool = False) -> str:
     return combine(majorities)
 
 
-def dedupe_calibration(items: list[Any], key: Callable[[Any], str]) -> list[Any]:
-    """校正項目から、盲検化後の判定入力が同じものを除く（同じ出力の繰り返しを独立した実績として数えない）。最初の 1 件を残す。"""
-    seen: set[str] = set()
+def dedupe_calibration(items: list[Any], key: Callable[[Any], str], answer: Callable[[Any], bool]) -> list[Any] | None:
+    """同じ盲検入力は 1 件にまとめる。正解が矛盾する場合は校正できないため None を返す。"""
+    seen: dict[str, bool] = {}
     out = []
     for it in items:
         k = key(it)
-        if k not in seen:
-            seen.add(k)
+        label = answer(it)
+        if k in seen:
+            if seen[k] != label:
+                return None
+        else:
+            seen[k] = label
             out.append(it)
     return out
 

@@ -1,6 +1,7 @@
 """PR #5 の独立レビュー（Codex）の指摘に対するテスト。指摘番号は XREVIEW-AHE5-astra.md のもの。"""
 import json
 import os
+import shlex
 import shutil
 import socket
 import sys
@@ -21,6 +22,86 @@ from tests.test_cheatproof import write  # noqa: E402
 BWRAP = sys.platform.startswith("linux") and bwrap_problem() is None
 
 
+class GraderIsolationRecords(unittest.TestCase):
+    def test_decisive_needs_isolation_for_executed_command_grades(self):
+        from tests.test_soundness import rules, runs, summary
+        from harness_eval.soundness import verdict
+
+        recs = runs({f"t{i}": (2, 4) for i in range(8)}, 4)
+        rec = recs[0]
+        for status, mode, expected in [
+            ("pass", None, "INCONCLUSIVE"),
+            ("fail", "unknown", "INCONCLUSIVE"),
+            ("pass", "none", "INCONCLUSIVE"),
+            ("pass", "bwrap", "IMPROVED"),
+            ("not_run", None, "IMPROVED"),
+            (None, None, "IMPROVED"),
+        ]:
+            with self.subTest(status=status, mode=mode):
+                rec.grader_results = [{"type": "command", "status": status}] if status else [{"type": "regex", "status": "pass"}]
+                rec.meta = {} if mode is None else {"grader_isolation": mode}
+                self.assertEqual(verdict(recs, summary(), rules())["conclusion"], expected)
+
+    def test_commands_each_get_fresh_home_and_temp(self):
+        from harness_eval.graders import JudgeConfig, grade_all
+        from harness_eval.spec import Grader
+        from tests.test_soundness import rec
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            workdir, scratch = root / "workdir", root / "grade_tmp"
+            workdir.mkdir()
+            scratch.mkdir()
+            trial = rec("task", "candidate", True)
+            homes = []
+
+            def run(cmd, **kwargs):
+                env = kwargs["env"]
+                home = Path(env["HOME"])
+                tmp = Path(env["TMPDIR"])
+                self.assertTrue(home.is_dir())
+                self.assertTrue(tmp.is_dir())
+                self.assertFalse((home / "settings").exists())
+                self.assertFalse((tmp / "cache").exists())
+                (home / "settings").touch()
+                (tmp / "cache").touch()
+                homes.append(home)
+                return isolation.subprocess.CompletedProcess(cmd, 0, "", "")
+
+            graders = [Grader(type="command", params={"run": "true"}) for _ in range(2)]
+            for mode in ("bwrap", "none"):
+                with self.subTest(mode=mode), mock.patch("harness_eval.graders.grader_isolation", return_value=mode), \
+                        mock.patch("harness_eval.graders.subprocess.run", side_effect=run):
+                    homes.clear()
+                    grade_all(graders, trial, workdir, JudgeConfig(enabled=False), tmp_dir=scratch)
+                    self.assertEqual([g["status"] for g in trial.grader_results], ["pass", "pass"], trial.grader_results)
+                    self.assertEqual(len(set(homes)), 2)
+                    self.assertEqual(list(scratch.iterdir()), [])
+
+    @unittest.skipIf(os.name == "nt", "シンボリックリンクの作成に権限が要る")
+    def test_workdir_paths_do_not_add_host_bind_mounts(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            workdir, scratch = root / "workdir", root / "grade_tmp"
+            (workdir / "subdir").mkdir(parents=True)
+            scratch.mkdir()
+            private = write(root / "private" / "sentinel.txt", "fixture only")
+            trusted = write(root / "trusted.txt", "task material")
+            (workdir / "candidate").symlink_to(private)
+            cmd = "cat " + shlex.quote(str(workdir / "candidate"))
+            args = isolation.grader_sandbox_cmd(cmd, workdir, scratch, [str(workdir / "subdir" / ".." / "candidate"), str(trusted)])
+            self.assertNotIn(str(private), args)
+            self.assertIn(str(trusted), args)
+            for candidate, target in [
+                ("/" + str(workdir / "candidate"), private),
+                (str(workdir / "subdir" / ".." / ".." / "workdir" / ".." / "trusted.txt"), trusted),
+                (str(root / "private" / ".." / "workdir" / ".." / "trusted.txt"), trusted),
+            ]:
+                with self.subTest(candidate=candidate):
+                    args = isolation.grader_sandbox_cmd("cat " + shlex.quote(candidate), workdir, scratch, [candidate])
+                    self.assertNotIn(str(target), args)
+
+
 class AwsFiles(unittest.TestCase):
     """#4: AWS の認証ファイルは、プロファイルが Bedrock（または AWS のファイル）を明示したときだけ渡す。"""
 
@@ -31,10 +112,11 @@ class AwsFiles(unittest.TestCase):
         write(self.home / ".aws" / "credentials", "[default]\n")
         write(self.home / ".aws" / "config", "[default]\n")
 
-    def env_for(self, yaml_text, agent="claude_code"):
+    def env_for(self, yaml_text, agent="claude_code", parent_env=None):
         prof = load_profile(write(self.tmp / "p.yaml", f"id: p\nagent: {agent}\n{yaml_text}"))
         tp = make_trial_paths(self.tmp / "trial", ".claude" if agent == "claude_code" else ".codex")
-        with mock.patch.object(Path, "home", return_value=self.home), mock.patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True):
+        with mock.patch.object(Path, "home", return_value=self.home), \
+                mock.patch.dict(os.environ, {"PATH": "/usr/bin", **(parent_env or {})}, clear=True):
             return build_env(prof, tp, "CLAUDE_CONFIG_DIR" if agent == "claude_code" else "CODEX_HOME")
 
     def test_undeclared_profiles_get_no_aws_files(self):
@@ -56,6 +138,13 @@ class AwsFiles(unittest.TestCase):
     def test_codex_never_gets_them_even_with_bedrock_env(self):
         env = self.env_for("env: {CLAUDE_CODE_USE_BEDROCK: '1'}\n", agent="codex")
         self.assertNotIn("AWS_SHARED_CREDENTIALS_FILE", env)
+
+    def test_unset_bedrock_flag_does_not_supply_aws_files(self):
+        env = self.env_for("inherit_env: [CLAUDE_CODE_USE_BEDROCK]\nenv_unset: [CLAUDE_CODE_USE_BEDROCK]\n",
+                           parent_env={"CLAUDE_CODE_USE_BEDROCK": "1"})
+        self.assertNotIn("CLAUDE_CODE_USE_BEDROCK", env)
+        self.assertNotIn("AWS_SHARED_CREDENTIALS_FILE", env)
+        self.assertNotIn("AWS_CONFIG_FILE", env)
 
 
 @unittest.skipUnless(BWRAP, "bwrap が使えない")
@@ -94,6 +183,20 @@ class HostWritesDoNotFollowLinks(unittest.TestCase):
         res = isolation.run_process([sys.executable, "-c", "print('x')"], self.tmp, dict(os.environ), None, out, err, 20)
         self.assertEqual(self.victim.read_text(encoding="utf-8"), "precious")
         self.assertIsNotNone(res.launch_error)
+
+    @unittest.skipIf(os.name == "nt", "POSIX のパイプ記述子を確認する")
+    def test_solver_output_is_piped_and_saved_on_timeout(self):
+        out, err = self.tmp / "stdout.jsonl", self.tmp / "stderr.txt"
+        probe = (
+            "import os, stat, sys, time\n"
+            "for fd in (1, 2):\n"
+            "    print(stat.S_ISFIFO(os.fstat(fd).st_mode), file=sys.stderr if fd == 2 else sys.stdout, flush=True)\n"
+            "time.sleep(60)\n"
+        )
+        res = isolation.run_process([sys.executable, "-c", probe], self.tmp, dict(os.environ), None, out, err, 1)
+        self.assertTrue(res.timed_out)
+        self.assertEqual(out.read_text(encoding="utf-8"), "True\n")
+        self.assertEqual(err.read_text(encoding="utf-8"), "True\n")
 
     @unittest.skipIf(os.name == "nt", "シンボリックリンクの作成に権限が要る")
     def test_snapshot_skips_special_files_and_links(self):
@@ -157,7 +260,7 @@ class GraderIsolation(unittest.TestCase):
         self.assertNotEqual(seen["net"], "connected")  # ネットワークなし
         self.assertEqual(self.victim.read_text(encoding="utf-8"), "precious")
         self.assertNotEqual(seen["workdir"], "writable")  # 作業フォルダは読み取り専用（採点が他の採点・判定の入力を書き換えない）
-        self.assertEqual(seen["home"], "grade_tmp")  # HOME は採点の一時フォルダ（実のホームではない）
+        self.assertTrue(seen["home"].startswith("ahe-grade-"))  # HOME はコマンドごとの一時フォルダ
 
     @unittest.skipIf(os.name == "nt", "シンボリックリンクの作成に権限が要る")
     def test_symlinked_python_prefix_is_bound_by_real_path_and_linked(self):
@@ -263,6 +366,41 @@ class JudgeIdentity(unittest.TestCase):
         keys = {judge_cache_key("p", "codex", "gpt-x", "r", "dev", 0, i) for i in (a, b, c, d, e)}
         self.assertEqual(len(keys), 5)
 
+    @unittest.skipIf(os.name == "nt", "POSIX の実行ファイル検索を検証する")
+    def test_path_executable_content_changes_even_with_same_size_and_mtime(self):
+        from harness_eval.judging import judge_identity
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"PATH": d}):
+            exe = write(Path(d) / "fake-judge", "#!/bin/sh\necho pass\n")
+            exe.chmod(0o755)
+            before = judge_identity(["fake-judge"], "v1", None)
+            self.assertEqual(before, judge_identity([str(exe)], "v1", None))
+            st = exe.stat()
+            write(exe, "#!/bin/sh\necho fail\n")
+            os.utime(exe, ns=(st.st_atime_ns, st.st_mtime_ns))
+            self.assertNotEqual(before, judge_identity(["fake-judge"], "v1", None))
+
+    @unittest.skipIf(os.name == "nt", "POSIX の実行ファイル検索を検証する")
+    def test_profile_path_placeholder_locates_the_judge_for_cache_identity(self):
+        from harness_eval.judge_phase import JudgePhase
+        from harness_eval.spec import Profile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            exe = write(root / "bin" / "fake-judge", "#!/bin/sh\necho pass\n")
+            exe.chmod(0o755)
+            phase = JudgePhase()
+            phase.judge_profiles = {"codex": Profile("j", "codex", root / "judge.yaml", env={"PATH": "{profile_dir}/bin"})}
+            phase.judge_versions = {}
+            phase._judge_exe = lambda _: [exe.name]
+            phase._identities = {}
+            before = phase._identity("codex", None)
+            st = exe.stat()
+            write(exe, "#!/bin/sh\necho fail\n")
+            os.utime(exe, ns=(st.st_atime_ns, st.st_mtime_ns))
+            phase._identities.clear()
+            self.assertNotEqual(before, phase._identity("codex", None))
+
     def test_swapping_the_judge_cli_does_not_reuse_votes(self):
         from tests.test_judge_pipeline import CLAUDE_J, CODEX_J, JudgePipeline
         t = JudgePipeline("test_dev_default_cross_family_single_mid_vote")
@@ -289,7 +427,7 @@ class CalibrationIndependence(unittest.TestCase):
     def test_dedupe_by_blinded_prompt(self):
         from harness_eval.judging import dedupe_calibration
         items = [("r1", {"p": "same", "answer": True}), ("r2", {"p": "same", "answer": True}), ("r3", {"p": "other", "answer": False})]
-        got = dedupe_calibration(items, lambda x: x[1]["p"])
+        got = dedupe_calibration(items, lambda x: x[1]["p"], lambda x: x[1]["answer"])
         self.assertEqual([x[0] for x in got], ["r1", "r3"])
 
     def test_verdict_needs_both_classes(self):
@@ -304,6 +442,32 @@ class CalibrationIndependence(unittest.TestCase):
                         ({"items": 6, "agree": 3, "rate": 0.5, "pass_items": 3, "fail_items": 3, "agree_pass": 3, "agree_fail": 0}, False)):
             fail, _ = _judge_checks({**j, "calibration": cal}, {"claude_code"}, 4, 0, rules, [])
             self.assertEqual(not fail, ok, (cal, fail))
+
+    def test_conflicting_blinded_answers_invalidate_calibration_and_verdict(self):
+        from types import SimpleNamespace
+        from harness_eval.judge_phase import JudgePhase
+        from harness_eval.soundness import verdict
+        from tests.test_soundness import STRONG_JUDGE, rules, runs, summary
+
+        recs = runs({f"t{i}": (2, 4) for i in range(8)}, 4, llm="pass")
+        phase = JudgePhase()
+        phase.judge = SimpleNamespace(calibration_items=10, seed=0)
+        phase._blind_terms = lambda: (["solver-a", "solver-b"], [])
+        phase.judge_one = mock.Mock(side_effect=lambda _, it: "pass" if it["answer"] else "fail")
+
+        def item(content, answer):
+            return {"kind": "calibration", "criteria": "Accuracy", "focus": "final", "content": content, "answer": answer}
+
+        # 十分な一致例があっても、盲検化後に同一になる入力の正解が矛盾していたら校正できない。
+        recs[0].judge_inputs = [item("solver-a sample", True), item("solver-b sample", False)]
+        recs[0].judge_inputs += [item(f"distinct {i}", i % 2 == 0) for i in range(10)]
+        phase._calibrate(recs)
+
+        self.assertTrue(phase.calibration.get("conflicting_answers"))
+        phase.judge_one.assert_not_called()
+        v = verdict(recs, summary(judge={**STRONG_JUDGE, "calibration": phase.calibration}, llm=True), rules())
+        self.assertEqual(v["conclusion"], "INCONCLUSIVE")
+        self.assertTrue(any("矛盾" in reason for reason in v["reasons"]), v["reasons"])
 
 
 def _rec_of(d):

@@ -8,6 +8,7 @@ import json
 import os
 import random
 import shutil
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +18,7 @@ from . import credentials
 from .adapters import classify_stderr, get_adapter
 from .costs import add_usage, judge_call_estimate, token_cost
 from .graders import JUDGE_PROMPT, JudgeUnavailable, parse_verdict
-from .isolation import build_env, copy_credentials, make_trial_paths, parent_env_names, release_home, route_signature, run_process
+from .isolation import build_env, copy_credentials, fill, make_trial_paths, parent_env_names, release_home, route_signature, run_process
 from .judging import (FAMILIES, TIER_MODELS, blind, combine_rubric, dedupe_calibration, judge_cache_key, judge_identity, majority,
                       make_settings, pick_calibration)
 from .record import TrialRecord
@@ -108,9 +109,13 @@ class JudgePhase:
         k = (family, model)
         if k not in self._identities:
             adapter = get_adapter(family, self.judge_profiles.get(family), executable=self._judge_exe(family))
+            prof = self._judge_profile(family)
+            path = os.defpath if "PATH" in prof.env_unset else os.environ.get("PATH", os.defpath)
+            if "PATH" in prof.env:
+                path = fill(prof.env["PATH"], {"profile_dir": str(prof.base_dir), "python": sys.executable})
             self._identities[k] = judge_identity(list(adapter.exe), self.judge_versions.get(family), model,
-                                                 route_signature(self._judge_profile(family), dict(os.environ))
-                                                 + ("|in_place" if self._judge_profile(family).credentials == "in_place" else ""))
+                                                 route_signature(prof, dict(os.environ))
+                                                 + ("|in_place" if prof.credentials == "in_place" else ""), path=path)
         return self._identities[k]
 
     def _judge_over_budget(self, family: str) -> bool:
@@ -164,7 +169,7 @@ class JudgePhase:
                 pr = run_process(cmd, tp.workdir, env, prompt, tp.stdout, tp.stderr, 300)
                 out = tp.stdout.read_text(encoding="utf-8", errors="replace") if tp.stdout.exists() else ""
                 err = tp.stderr.read_text(encoding="utf-8", errors="replace") if tp.stderr.exists() else ""
-                if in_place and not pr.launch_error and not pr.timed_out:
+                if not pr.launch_error and (in_place or pr.timed_out):
                     settled = self._settle_judge(adapter, family, model, out)  # 費用を計上してから次の呼び出しを許可する
         finally:
             release_home(tp, self.opt.log)
@@ -301,8 +306,12 @@ class JudgePhase:
                                 "note": "LLM 判定が合否を決めた試行がないため校正は不要"}
             return
         # 盲検化後の判定入力と評価観点が同じ項目は 1 件に数える（同じ出力の繰り返しを独立した実績にしない）
-        pool = dedupe_calibration(items, lambda x: self._judge_prompt(*x))
-        chosen = pick_calibration(pool, self.judge.calibration_items, self.judge.seed, lambda x: bool(x[1]["answer"]))
+        answer = lambda x: bool(x[1]["answer"])
+        pool = dedupe_calibration(items, lambda x: self._judge_prompt(*x), answer)
+        if pool is None:
+            self.calibration = {"needed": True, "items": 0, "agree": 0, "rate": None, "available": len(items), "conflicting_answers": True}
+            return
+        chosen = pick_calibration(pool, self.judge.calibration_items, self.judge.seed, answer)
         agree = done = 0
         by: dict[str, int] = {}
         n_class = {"pass": 0, "fail": 0}

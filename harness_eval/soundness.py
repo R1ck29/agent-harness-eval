@@ -126,12 +126,11 @@ def invalid_reason(r: TrialRecord) -> str | None:
 def outcome(r: TrialRecord) -> bool | None:
     """比較に使う合否（配布物がないと通らない判定を除いた合否。旧形式は全判定の合否）。
     判定役の不一致（judge_disagreement）がある試行は、記録の合否にかかわらず合格として数えない。"""
+    if r.cmp_passed is None and not r.cmp_legacy:
+        return None
     if any(g.get("type") == "llm" and g.get("status") == "judge_disagreement" for g in r.grader_results or []):
         return False
-    if r.cmp_passed is not None:
-        return bool(r.cmp_passed)
-    # 現行形式の明示的な null は「配布物専用の条件を外すと比較できる判定がない」= 比較から外す。旧形式（フィールドなし）だけ全判定の合否
-    return bool(r.passed) if r.cmp_legacy else None
+    return bool(r.passed if r.cmp_passed is None else r.cmp_passed)
 
 
 def llm_decided(r: TrialRecord) -> bool:
@@ -233,7 +232,10 @@ def _judge_checks(j: dict[str, Any], agents: set[str], decided: int, disagreemen
         checks.append(_c("judge_disagreement", "warn", f"判定不一致 {disagreements} 件（合格として数えていません）"))
     cal = j.get("calibration") or {}
     items, rate = int(cal.get("items") or 0), cal.get("rate")
-    if items < rules.min_calibration_items or rate is None:
+    if cal.get("conflicting_answers"):
+        fail.append("同じ盲検入力の正解が合格と不合格で矛盾しているため、判定役を校正できません")
+        checks.append(_c("calibration", "fail", fail[-1]))
+    elif items < rules.min_calibration_items or rate is None:
         fail.append(f"判定役の校正が不足しています（校正項目 {items} 件、必要 {rules.min_calibration_items} 件）")
         checks.append(_c("calibration", "fail", f"校正項目 {items} 件 < {rules.min_calibration_items} 件。"
                          "決定的な採点器を持つタスクに calibration を書いてください"))
@@ -269,13 +271,15 @@ def _integrity(recs: list[TrialRecord], cand: str, inconclusive: list[str], rule
     cand_open_leak = [r for r in leak if r.profile_id == cand and (r.meta or {}).get("sandbox") != "bwrap"]
     parts = [f"答え・試行の外の参照（INVALID） {len(leak)} 件", f"見えているテストの改ざん（不合格） {len(tamper)} 件",
              f"隔離なしの試行 {open_} 件" + (f"（記録なし {unknown} 件）" if unknown else "")]
-    open_grader = sum(1 for r in recs if (r.meta or {}).get("grader_isolation") == "none")
+    open_grader = sum(1 for r in recs if (r.meta or {}).get("grader_isolation") != "bwrap"
+                      and any(g.get("type") == "command" and g.get("status") not in ("not_run", "skipped_prior_fail")
+                              for g in r.grader_results or []))
     if open_grader:
-        parts.append(f"隔離なしの採点 {open_grader} 件（候補のコードがホストの権限で動いた）")
+        parts.append(f"隔離なし・未確認の採点 {open_grader} 件")
     msg = "、".join(parts)
     if open_grader and (rules is None or rules.required_tier == "decisive"):
-        inconclusive.append(f"採点コマンドを隔離せずに実行した試行が {open_grader} 件あります（bwrap のない OS）。候補のコードが採点の中で"
-                            "ホストの権限で動き、結果を操作・認証を読めたかもしれないため、decisive では結論を出しません（Linux + bwrap で実行し直してください）")
+        inconclusive.append(f"採点コマンドの隔離が確認できない試行が {open_grader} 件あります。候補コードがホストの権限で"
+                            "動いた可能性があるため、decisive では結論を保留します（Linux + bwrap で実行し直してください）")
         return _c("integrity", "fail", inconclusive[-1] + f"（{msg}）")
     if cand_open_leak:
         inconclusive.append(f"隔離なしの試行で、候補が評価の答え・試行の外を参照しました（{len(cand_open_leak)} 件）。"

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -137,10 +136,10 @@ def grade_one(g: Grader, rec: TrialRecord, workdir: Path, task_dir: Path | None 
             ph["task_dir"] = str(task_dir)
         cmd = fill(str(p["run"]), ph, quote=True)
         mode = grader_isolation()
-        rec.meta["grader_isolation"] = mode  # "none" なら候補のコードがホストの権限で動いた（verdict が decisive では結論を出さない）
-        own_tmp = tmp_dir is None
-        gtmp = Path(tempfile.mkdtemp(prefix="ahe-grade-")) if own_tmp else tmp_dir
-        try:
+        if rec.meta.get("grader_isolation") != "none":
+            rec.meta["grader_isolation"] = mode
+        with tempfile.TemporaryDirectory(prefix="ahe-grade-", dir=tmp_dir) as d:
+            gtmp = Path(d)
             rec_path = gtmp / "record_for_grader.json"  # 試行ルートではなく採点の一時フォルダ（solver から見えない・採点のあとに消える）
             with open_new(rec_path, "w") as fh:
                 fh.write(json.dumps(rec.to_dict(), ensure_ascii=False))
@@ -154,9 +153,6 @@ def grade_one(g: Grader, rec: TrialRecord, workdir: Path, task_dir: Path | None 
                                        timeout=int(p.get("timeout_s", 120)), stdin=subprocess.DEVNULL)
             except subprocess.TimeoutExpired:
                 return False, "採点コマンドがタイムアウト"
-        finally:
-            if own_tmp:
-                shutil.rmtree(gtmp, ignore_errors=True)
         tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
         return r.returncode == 0, f"exit={r.returncode} {tail[0][:200]}"
     raise ValueError(t)
