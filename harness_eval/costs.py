@@ -17,6 +17,9 @@ TOKEN_KINDS = ("input", "cache_read", "cache_write", "output")
 # CLI が足す固定の指示（system prompt など）をすべてキャッシュなしの入力として数え、出力は推論を含めて多めに取る
 JUDGE_ASSUMED_OVERHEAD_TOKENS = 12_000
 JUDGE_ASSUMED_OUTPUT_TOKENS = {"claude_code": 300, "codex": 1_500}
+# 履歴のない解く側の 1 呼び出しの見積もり: タスクの max_budget_usd（CLI が 1 呼び出しに課す上限）があればそれ、なければこの既定。
+# 開始前の --max-cost-usd の判定で $0 と数えないための、上限寄りの仮定（実測が残れば置き換わる）
+DEFAULT_SOLVER_CALL_USD = 0.50
 CHARS_PER_TOKEN = 1.0  # 日本語を含む判定入力は 1 文字 ≒ 1 トークン以下（上限寄り）
 
 
@@ -102,6 +105,11 @@ def usage_summary(records: Iterable[Any], judge_usage: dict[str, Any] | None, pr
         "tier": tier,
         "prices": {"fetched_at": p["fetched_at"], "sources": p["sources"]},
     }
+
+
+def solver_call_estimate(max_budget_usd: float | None) -> float:
+    """履歴のない解く側 1 呼び出しの見積もり（上限寄り）。"""
+    return float(max_budget_usd) if max_budget_usd else DEFAULT_SOLVER_CALL_USD
 
 
 def judge_call_estimate(model: str | None, family: str, prompt_chars: int,

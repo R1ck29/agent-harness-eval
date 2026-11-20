@@ -1,0 +1,13 @@
+# 判定役（LLM 判定）専用。--profiles ではなく --judge-profile に渡す（解く側に書くと SpecError）:
+#   --judge-profile codex=examples/judge-profiles/codex-judge-inplace.yaml
+#
+# Codex を ChatGPT のログイン（~/.codex/auth.json。API キーなし）で使う場合の経路。認証ファイルを複製せず、本物の CODEX_HOME をその場で使う。
+# 試行の一時ホームには複製しないので、複製側が refresh token を使い切って本物が使えなくなる事故が起きない。
+#   - HOME は一時ホームのまま。CODEX_HOME だけ本物（環境変数 CODEX_HOME があればそれ、なければ ~/.codex）を指す
+#   - codex exec --json --ephemeral -s read-only --skip-git-repo-check --ignore-user-config --ignore-rules --disable hooks で呼ぶ
+#     （config.toml の MCP・モデル・指示、execpolicy の .rules、hooks を判定に入れない。~/.codex/AGENTS.md は README の限界を参照）
+#   - 同じ系統の判定は同時に 1 本だけ。実行前に auth.json の期限を確かめる（中身は表示しない）。期限が近ければ止まる → `codex login`
+id: codex-judge-inplace
+agent: codex
+credentials: in_place
+billing: subscription

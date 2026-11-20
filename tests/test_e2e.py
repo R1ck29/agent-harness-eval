@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
 from harness_eval.cli import main  # noqa: E402
+from harness_eval.runner import Runner  # noqa: E402
 from fake_env import SUFFIX  # noqa: E402
 
 FAKE = ROOT / "tests" / "fake_agents"
@@ -166,10 +167,20 @@ class E2E(unittest.TestCase):
         self.assertTrue(recs["to"]["valid"])  # タイムアウトは失敗として数える（除外しない）
         self.assertFalse(recs["to"]["passed"])
 
-        # 予算上限: 0 ドルなら新規試行は実行されない（集計からも除外）
+        # 予算上限: 0 ドルなら新規試行は実行されない。履歴のない呼び出しはタスクの上限（既定の見積もり）で数えるので、
+        # 開始前の門が先に止める（何も実行しない）
+        runs_before = len(self.runs())
         code, out = run_cli("run", "--tasks", str(self.ex / "tasks" / "arithmetic-no-skill.yaml"), "--profiles",
                             str(self.ex / "profiles" / "claude-baseline.yaml"), "--out", str(self.out),
                             "--no-cache", "--max-cost-usd", "0", "--no-llm")
+        self.assertEqual(code, 2, out)
+        self.assertIn("止めました", out)
+        self.assertEqual(len(self.runs()), runs_before)
+        # 門を通した（見積もりを 0 にした）あとの、実行中の上限: 新規試行は実行されず budget_stop（集計からも除外）
+        with mock.patch.object(Runner, "estimated_total", return_value=0.0):
+            code, out = run_cli("run", "--tasks", str(self.ex / "tasks" / "arithmetic-no-skill.yaml"), "--profiles",
+                                str(self.ex / "profiles" / "claude-baseline.yaml"), "--out", str(self.out),
+                                "--no-cache", "--max-cost-usd", "0", "--no-llm")
         last = self.runs()[-1]
         rec = json.loads((last / "trials.jsonl").read_text().splitlines()[0])
         self.assertEqual(rec["error"]["type"], "budget_stop")

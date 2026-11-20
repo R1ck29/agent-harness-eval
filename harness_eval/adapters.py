@@ -112,7 +112,7 @@ class ClaudeAdapter(_Adapter):
             cmd += ["--settings", json.dumps(CLAUDE_ISOLATION_SETTINGS)]
         return cmd + (profile.extra_args if extra_args is None else extra_args)
 
-    def judge_cmd(self, model: str | None) -> list[str]:
+    def judge_cmd(self, model: str | None, in_place: bool = False) -> list[str]:
         cmd = self.exe + ["-p", "--output-format", "json", "--max-turns", "1",
                           "--tools", "", "--no-session-persistence",
                           "--settings", json.dumps(CLAUDE_ISOLATION_SETTINGS)]
@@ -251,8 +251,12 @@ class CodexAdapter(_Adapter):
             cmd += ["-m", profile.model]
         return cmd + (profile.extra_args if extra_args is None else extra_args) + ["-"]
 
-    def judge_cmd(self, model: str | None) -> list[str]:
+    def judge_cmd(self, model: str | None, in_place: bool = False) -> list[str]:
         cmd = self.exe + ["exec", "--json", "--skip-git-repo-check", "--ephemeral", "-s", "read-only"]
+        if in_place:
+            # 本物の CODEX_HOME を指すので、利用者の config.toml（MCP・モデル・指示）・execpolicy の .rules・hooks を判定に入れない。
+            # AGENTS.md は止める手段を確認できていない（README の限界）
+            cmd += ["--ignore-user-config", "--ignore-rules", "--disable", "hooks"]
         return cmd + (["-m", model] if model else []) + ["-"]
 
     def parse_judge(self, stdout: str) -> tuple[str | None, float | None, str | None]:

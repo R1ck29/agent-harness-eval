@@ -29,7 +29,7 @@ from typing import Any, Callable
 from . import __version__, credentials
 from .adapters import classify_stderr, get_adapter
 from .cheatproof import capture_tests, leak_check, summarize_hits, tamper_check, tamper_result
-from .costs import empty_usage, usage_summary
+from .costs import empty_usage, solver_call_estimate, usage_summary
 from .graders import JudgeConfig, grade_all, judge_content, rescore
 from .judge_phase import JudgePhase
 from .judging import FAMILIES, JudgeSettings, make_settings
@@ -37,7 +37,7 @@ from .isolation import (ancestor_instructions, build_env, bwrap_problem, copy_cr
                         placeholders, release_home, route_signature, run_install, run_process, sandbox_cmd, sandbox_mode, snapshot)
 from .metrics import summarize
 from .record import EXCLUDED_ERRORS, TrialRecord
-from .spec import NO_SPLIT, ROUTE_VARS, Profile, SpecError, Task, split_mixing
+from .spec import NO_SPLIT, ROUTE_VARS, Profile, SpecError, Task, load_profile, reject_in_place, split_mixing
 
 NOT_RUN_ERRORS = {"budget_stop"}
 
@@ -68,7 +68,8 @@ class RunOptions:
     ledger: Path | None = None  # 費用台帳（既定: 出力先/spend.jsonl）
     retry_infra: int = 1
     retry_wait_s: float = 20.0
-    judge_profile: str | None = None  # 判定の認証・環境変数を借りるプロファイル id（既定: 自動選択）
+    # 判定の認証・環境変数を借りるプロファイル。id か YAML のパス、系統ごとなら 系統=参照（既定: 自動選択）。複数可
+    judge_profile: list[str] = field(default_factory=list)
     use_cache: bool = True
     cache_dir: Path = Path(".harness-eval-cache")
     keep: str = "failed"  # all / failed / none（作業ディレクトリを残すか）
@@ -189,6 +190,7 @@ def cache_key(task: Task, profile: Profile, version: str | None, trial: int, opt
 class Runner(JudgePhase):
     def __init__(self, tasks: list[Task], profiles: list[Profile], opt: RunOptions, out_dir: Path):
         self.opt = opt
+        reject_in_place(profiles)  # credentials: in_place は判定役専用。解く側に本物の設定ディレクトリを見せない
         self.pairs = select_pairs(tasks, profiles, opt)
         mixing = split_mixing(list({t.id: t for t, _ in self.pairs}.values()))
         if mixing:
@@ -212,6 +214,7 @@ class Runner(JudgePhase):
                 self.versions[p.id] = cli_version(get_adapter(p.agent, p))
         self.routes = {p.id: route_signature(p, dict(os.environ)) for _, p in self.pairs}
         self._judge_seq = 0
+        self._inplace_locks = {f: threading.Lock() for f in FAMILIES}  # credentials: in_place の判定は同じ系統で同時に 1 本だけ
         self.interrupted = threading.Event()
         self.ledger = Path(opt.ledger or Path(out_dir) / "spend.jsonl").resolve()
         self.needs_judge = opt.llm and any(uses_llm(t) or t.calibration for t, _ in self.pairs)
@@ -297,18 +300,40 @@ class Runner(JudgePhase):
                                                       inherit_env=list(ROUTE_VARS[f]))
                 for f in (self.judge.used_families() if self.judge else [])]
 
+    def _judge_refs(self) -> list[tuple[str | None, str]]:
+        """--judge-profile の指定を (系統 or None, 参照) にする。`codex=参照` は系統つき、`参照` だけなら参照先の系統。"""
+        refs = self.opt.judge_profile
+        refs = [refs] if isinstance(refs, str) else list(refs or [])
+        out: list[tuple[str | None, str]] = []
+        for r in refs:
+            fam, sep, ref = r.partition("=")
+            out.append((fam, ref) if sep and fam in FAMILIES else (None, r))
+        return out
+
+    @staticmethod
+    def _load_judge_ref(profiles: list[Profile], ref: str) -> Profile:
+        """参照は、実行のプロファイルの id か、実行のプロファイルにない YAML のパス（判定役の認証だけ借りる。配布物は使わない）。"""
+        hit = [p for p in profiles if p.id == ref]
+        if hit:
+            return hit[0]
+        if Path(ref).is_file():
+            return load_profile(Path(ref))
+        raise SpecError(f"--judge-profile '{ref}' は、実行のプロファイルの id でも YAML のパスでもありません")
+
     def _pick_judge_profile(self, profiles: list[Profile], family: str) -> Profile | None:
-        """LLM 判定の認証（env・env_unset・copy_credentials・executable）を借りるプロファイル。
+        """LLM 判定の認証（env・env_unset・copy_credentials / credentials・executable）を借りるプロファイル。
         指定がなければ、判定の系統と同じ種類の基準プロファイル → 最初の同種プロファイルの順。配布物（install）は使わない。"""
+        mismatch = None
+        for fam, ref in self._judge_refs():
+            p = self._load_judge_ref(profiles, ref)
+            if fam is not None and p.agent != fam:
+                raise SpecError(f"--judge-profile '{fam}={ref}' は {p.agent} 用のプロファイルです（系統 {fam} ではありません）")
+            if p.agent == family:
+                return p
+            mismatch = mismatch or (ref, p.agent)
+        if mismatch and self.opt.judge_agent:
+            raise SpecError(f"--judge-profile '{mismatch[0]}' は {mismatch[1]} 用です（--judge-agent {self.opt.judge_agent}）")
         same = [p for p in profiles if p.agent == family]
-        if self.opt.judge_profile:
-            hit = [p for p in profiles if p.id == self.opt.judge_profile]
-            if not hit:
-                raise SpecError(f"--judge-profile '{self.opt.judge_profile}' がプロファイルにありません")
-            if hit[0].agent == family:
-                return hit[0]
-            if self.opt.judge_agent:
-                raise SpecError(f"--judge-profile '{self.opt.judge_profile}' は {hit[0].agent} 用です（--judge-agent {self.opt.judge_agent}）")
         base = [p for p in same if p.id == self.opt.baseline]
         return (base or same or [None])[0]
 
@@ -325,10 +350,10 @@ class Runner(JudgePhase):
                     continue
                 calls += 1
                 c = hist.get((p.id, t.id)) or hist.get((p.id, None))
-                if c is None:
+                if c is None:  # 履歴がなくても $0 とは数えない（開始前の --max-cost-usd の判定をすり抜けないため）
                     unknown += 1
-                else:
-                    est += c
+                    c = solver_call_estimate(t.max_budget_usd)
+                est += c
             rows.append((t.id, p.id))
         return {"pairs": len(rows), "trials_total": len(rows) * self.opt.trials, "agent_calls": calls,
                 "cache_hits": hits, "estimated_cost_usd": est, "unknown_cost_calls": unknown,
@@ -572,6 +597,13 @@ class Runner(JudgePhase):
             msg = credentials.preflight(agent)
             if msg:
                 raise SpecError(msg)
+        for agent in sorted({p.agent for p in self.judge_profiles.values() if p and p.credentials == "in_place"}):
+            src = credentials.source_path(agent)
+            if src is None or not src.is_file():  # 中身は読まない・出さない（あるかどうかだけ）
+                raise SpecError(f"判定役の認証（credentials: in_place）の {agent} の認証ファイル {src} がありません。先に `{agent} login` してください")
+            msg = credentials.preflight(agent, in_place=True)
+            if msg:
+                raise SpecError(msg)
 
     def run(self) -> tuple[Path, list[TrialRecord], dict[str, Any]]:
         self.preflight()
@@ -641,6 +673,8 @@ class Runner(JudgePhase):
                         "tier": self.opt.tier, "judge_agent": self.opt.judge_agent, "judge_models": self.opt.judge_models,
                         "judge_votes": self.opt.judge_votes, "allow_weak_judge": self.opt.allow_weak_judge,
                         "judge_profiles": {f: (p.id if p else None) for f, p in self.judge_profiles.items()},
+                        "judge_credentials": {f: ("in_place" if p and p.credentials == "in_place" else "copy" if p and p.copy_credentials else "env")
+                                              for f, p in self.judge_profiles.items()},
                         "jobs": self.opt.jobs,
                         "max_cost_usd": self.opt.max_cost_usd, "monthly_budget_usd": self.opt.monthly_budget_usd,
                         "month_spent_before_run_usd": self.month_spent, "use_cache": self.opt.use_cache,

@@ -70,8 +70,9 @@ MIN_HOLDOUT_TASKS = 20  # これ未満の holdout では promote の区間・検
 LIMIT_KEYS = {"max_turns", "timeout_s", "max_budget_usd"}
 PROFILE_KEYS = {"id", "description", "agent", "model", "executable", "isolate_home",
                 "install", "env", "env_unset", "extra_args", "permission_mode",
-                "codex_sandbox", "pricing", "hash_paths", "copy_credentials",
+                "codex_sandbox", "pricing", "hash_paths", "copy_credentials", "credentials",
                 "isolation_settings", "billing", "inherit_env", "sandbox", "sandbox_ro"}
+CREDENTIAL_MODES = ("in_place",)  # 判定役（--judge-profile）専用。解く側のプロファイルに書くと Runner が止める
 SANDBOXES = ("bwrap", "off")  # bwrap: Linux で試行を隔離する（既定）／ off: 隔離しない（結果に記録し、verdict が警告する）
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 BILLINGS = ("api", "subscription")  # api: 呼び出しごとに課金（Bedrock・API キー）／ subscription: 定額（呼び出しごとの請求なし）
@@ -199,6 +200,7 @@ class Profile:
     pricing: dict[str, float] | None = None
     hash_paths: list[str] = field(default_factory=list)
     copy_credentials: bool = False
+    credentials: str | None = None  # "in_place": 判定役だけ。認証を複製せず、その場の本物の設定ディレクトリを使う（CREDENTIAL_MODES）
     billing: str = "api"
     inherit_env: list[str] = field(default_factory=list)  # 親の環境から試行に渡す変数（名前だけ。許可リストに足す）
     sandbox: str = "bwrap"  # SANDBOXES
@@ -404,6 +406,17 @@ def load_profile(path: Path) -> Profile:
     sbx = {False: "off", True: "bwrap"}.get(sbx, sbx) if isinstance(sbx, bool) else sbx  # YAML は off を false と読む
     if sbx not in SANDBOXES:
         raise SpecError(f"{path}: sandbox は {' / '.join(SANDBOXES)}")
+    cred = d.get("credentials")
+    if cred is not None:
+        if cred not in CREDENTIAL_MODES:
+            raise SpecError(f"{path}: credentials は {' / '.join(CREDENTIAL_MODES)}（判定役専用。認証を複製せず、その場の本物を使う）")
+        if d["agent"] != "codex":
+            raise SpecError(f"{path}: credentials: in_place は codex だけです。claude_code の判定役は inherit_env: [CLAUDE_CODE_OAUTH_TOKEN] で"
+                            "認証を渡します（本物の ~/.claude を見せると CLAUDE.md・設定・フック・プラグインが判定に入るため）")
+        if d.get("copy_credentials"):
+            raise SpecError(f"{path}: credentials: in_place と copy_credentials: true は同時に使えません")
+        if not d.get("isolate_home", True):
+            raise SpecError(f"{path}: credentials: in_place には isolate_home: true（既定）が要ります（本物の HOME を判定に見せないため）")
     sandbox = d.get("codex_sandbox", "workspace-write")
     if sandbox not in ("read-only", "workspace-write", "danger-full-access"):
         raise SpecError(f"{path}: codex_sandbox は read-only / workspace-write / danger-full-access")
@@ -415,7 +428,7 @@ def load_profile(path: Path) -> Profile:
         extra_args=[str(x) for x in (d.get("extra_args") or [])],
         permission_mode=d.get("permission_mode"), codex_sandbox=sandbox, pricing=pricing,
         hash_paths=_str_list(path, "hash_paths", d.get("hash_paths")),
-        copy_credentials=bool(d.get("copy_credentials", False)),
+        copy_credentials=bool(d.get("copy_credentials", False)), credentials=cred,
         isolation_settings=bool(d.get("isolation_settings", True)), billing=billing, inherit_env=inherit,
         sandbox=sbx, sandbox_ro=_str_list(path, "sandbox_ro", d.get("sandbox_ro")), raw=d,
     )
@@ -447,6 +460,14 @@ def load_tasks(paths: list[str]) -> list[Task]:
     if dup:
         raise SpecError(f"タスク id が重複: {sorted(dup)}")
     return tasks
+
+
+def reject_in_place(profiles: list[Profile]) -> None:
+    """credentials: in_place は判定役だけ。解く側に本物の設定ディレクトリ（AGENTS.md・認証）を見せないため、解く側に使うと止める。"""
+    bad = [p.id for p in profiles if p.credentials == "in_place"]
+    if bad:
+        raise SpecError(f"credentials: in_place のプロファイル {bad} は判定役専用です（--judge-profile で渡す）。"
+                        "解く側（--profiles・自己改善・収集）には使えません。解く側の認証は inherit_env か copy_credentials で渡します")
 
 
 def load_profiles(paths: list[str]) -> list[Profile]:

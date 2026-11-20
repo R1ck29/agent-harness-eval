@@ -3,6 +3,7 @@
 実行前の判定費用の見積もりもここ。"""
 from __future__ import annotations
 
+import contextlib
 import json
 import random
 import shutil
@@ -11,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import credentials
 from .adapters import classify_stderr, get_adapter
 from .costs import add_usage, judge_call_estimate, token_cost
 from .graders import JUDGE_PROMPT, JudgeUnavailable, parse_verdict
@@ -97,17 +99,27 @@ class JudgePhase:
                        env=dict(src.env) if src else {}, env_unset=list(src.env_unset) if src else [],
                        # 借りるプロファイルがなければ、これまでどおり親の環境で判定する（判定役は評価対象ではなく、入力は標準入力だけ）
                        inherit_env=list(src.inherit_env) if src else parent_env_names(),
-                       copy_credentials=src.copy_credentials if src else False,
+                       copy_credentials=src.copy_credentials if src else False, credentials=src.credentials if src else None,
                        isolate_home=src.isolate_home if src else True)
+        in_place = prof.credentials == "in_place"
         with self.lock:
             self._judge_seq += 1
             n = self._judge_seq
         tp = make_trial_paths(self.run_dir / "judge" / str(n), adapter.config_dirname)
         try:
             env = build_env(prof, tp, adapter.config_env)
-            if prof.copy_credentials:
+            if in_place:
+                # 認証は複製しない: HOME は一時ホームのまま、設定ディレクトリだけ本物を指す（本物への書き込みは CLI 自身の更新だけ）。
+                # 更新（refresh）の競合を避けるため、同じ系統では同時に 1 本だけ呼ぶ
+                real = credentials.source_path(family)
+                if real is None:
+                    raise JudgeUnavailable(f"{family} は credentials: in_place に対応していません")
+                env[adapter.config_env] = str(real.parent)
+            elif prof.copy_credentials:
                 copy_credentials(prof.agent, tp)
-            pr = run_process(adapter.judge_cmd(model), tp.workdir, env, prompt, tp.stdout, tp.stderr, 300)
+            cmd = adapter.judge_cmd(model, in_place=True) if in_place else adapter.judge_cmd(model)
+            with self._inplace_locks[family] if in_place else contextlib.nullcontext():
+                pr = run_process(cmd, tp.workdir, env, prompt, tp.stdout, tp.stderr, 300)
             out = tp.stdout.read_text(encoding="utf-8", errors="replace") if tp.stdout.exists() else ""
             err = tp.stderr.read_text(encoding="utf-8", errors="replace") if tp.stderr.exists() else ""
         finally:

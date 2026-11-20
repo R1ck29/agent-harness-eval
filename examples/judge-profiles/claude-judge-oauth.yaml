@@ -1,0 +1,9 @@
+# 判定役（LLM 判定）用。--judge-profile に渡す:
+#   --judge-profile claude_code=examples/judge-profiles/claude-judge-oauth.yaml
+#
+# Claude をサブスクリプション（Pro / Max）で使う場合: 端末で `claude setup-token` → `export CLAUDE_CODE_OAUTH_TOKEN=<トークン>` してから実行する。
+# 値はここに書かない（名前だけ）。本物の ~/.claude は使わない（CLAUDE.md・設定・フック・プラグインが判定に入るため）。
+id: claude-judge-oauth
+agent: claude_code
+inherit_env: [CLAUDE_CODE_OAUTH_TOKEN]
+billing: subscription

@@ -16,7 +16,7 @@ from .credentials import describe as describe_credentials, inspect as inspect_cr
 from .isolation import ancestor_instructions, bwrap_problem, dropped_vars, missing_inherited, route_variables, sandbox_mode
 from .metrics import EFFICIENCY_METRICS, HARD_CATEGORIES, gate, holdout_comparisons, promote, promote_efficiency
 from .report import render
-from .costs import resolve
+from .costs import DEFAULT_SOLVER_CALL_USD, resolve
 from .judging import infer_family
 from .runner import HOLDOUT_LEDGER, RunOptions, Runner, load_run
 from .soundness import Rules, default_baseline, run_verdicts
@@ -43,7 +43,7 @@ def _opts(a: argparse.Namespace) -> RunOptions:
         judge_executable=a.judge_executable,
         judge_executables={"codex": a.judge_codex_executable} if a.judge_codex_executable else {},
         max_cost_usd=a.max_cost_usd, monthly_budget_usd=a.monthly_budget_usd,
-        retry_infra=a.retry_infra, retry_wait_s=a.retry_wait_s, judge_profile=a.judge_profile, use_cache=not a.no_cache, cache_dir=Path(a.cache_dir), keep=a.keep,
+        retry_infra=a.retry_infra, retry_wait_s=a.retry_wait_s, judge_profile=a.judge_profile or [], use_cache=not a.no_cache, cache_dir=Path(a.cache_dir), keep=a.keep,
         baseline=a.baseline, seed=a.seed)
 
 
@@ -95,7 +95,7 @@ def cmd_plan(a) -> int:
 def _print_estimate(p: dict, runner: Runner) -> None:
     """実行前の見積もり: 解く側（solver）と判定側（judge）を分けて、段階（dev / decisive）ごとに。"""
     print(f"  解く側（solver）の概算: ${p['solver']['estimated_cost_usd']:.4f}"
-          f"（履歴がなく見積もれない呼び出し {p['solver']['unknown_cost_calls']} 回）")
+          f"（履歴がなく、タスクの max_budget_usd か既定 ${DEFAULT_SOLVER_CALL_USD:.2f} で数えた呼び出し {p['solver']['unknown_cost_calls']} 回）")
     if not p["judge"]:
         print("  判定側（judge）: LLM 判定なし（費用 0）")
         return
@@ -732,8 +732,11 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--monthly-budget-usd", type=float, help="月の予算。--out 配下の今月の実績を引いた残りをこの実行の上限にする")
         sp.add_argument("--retry-infra", type=int, default=1, help="レート制限・過負荷で落ちた試行の再試行回数")
         sp.add_argument("--retry-wait-s", type=float, default=20.0, help="再試行までの待ち秒数（回数に比例して延びる）")
-        sp.add_argument("--judge-profile", help="LLM 判定の認証・環境変数（env / copy_credentials / executable）を借りるプロファイル id。"
-                                                 "既定: 判定エージェントと同じ種類の --baseline、なければ最初の同種プロファイル")
+        sp.add_argument("--judge-profile", action="append", metavar="[系統=]プロファイル",
+                        help="LLM 判定の認証・環境変数（env / copy_credentials / credentials: in_place / executable）を借りるプロファイル。"
+                             "実行のプロファイルの id か、実行に使わない YAML のパス（判定役の認証だけ借りる。配布物は使わない）。"
+                             "系統ごとに `codex=path.yaml`・`claude_code=path.yaml` と書ける（複数可）。"
+                             "既定: 判定エージェントと同じ種類の --baseline、なければ最初の同種プロファイル")
         sp.add_argument("--no-cache", action="store_true", help="キャッシュを使わず全試行を実行")
         sp.add_argument("--cache-dir", default=".harness-eval-cache")
         sp.add_argument("--keep", choices=["all", "failed", "none"], default="failed", help="作業ディレクトリを残す範囲（none は生ログも消す）")

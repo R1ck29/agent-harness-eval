@@ -113,8 +113,8 @@ def describe(info: dict[str, Any]) -> str:
     return "、".join(parts)
 
 
-def preflight(agent: str, path: Path | None = None, now: float | None = None) -> str | None:
-    """試行の中で更新が起きそうなら、止める理由（利用者への案内つき）。問題なければ None。"""
+def preflight(agent: str, path: Path | None = None, now: float | None = None, in_place: bool = False) -> str | None:
+    """試行の中で更新が起きそうなら、止める理由（利用者への案内つき）。問題なければ None。in_place: 判定役が本物をその場で使う場合の文面。"""
     path = path or source_path(agent)
     if path is None:
         return None
@@ -131,8 +131,9 @@ def preflight(agent: str, path: Path | None = None, now: float | None = None) ->
     how = ("`codex login` するか、一度 `codex` を実行して更新してから" if agent == "codex"
            else "一度 `claude` を実行してログインを更新してから")
     key = "CODEX_API_KEY" if agent == "codex" else "ANTHROPIC_API_KEY"
-    return (f"{agent} の認証（{path.name}）が{why}。このまま複製すると試行の中で更新が起き、本物の認証が使えなくなります"
-            f"（refresh token は使い回せないため）。{how}やり直してください。会社の評価では API キー（{key}）を inherit_env で"
+    risk = ("判定の途中で本物がその場で更新されます（同時に別のプロセスが使うと refresh token が使用済みになり、使えなくなります）"
+            if in_place else "このまま複製すると試行の中で更新が起き、本物の認証が使えなくなります（refresh token は使い回せないため）")
+    return (f"{agent} の認証（{path.name}）が{why}。{risk}。{how}やり直してください。会社の評価では API キー（{key}）を inherit_env で"
             "渡す経路を勧めます")
 
 

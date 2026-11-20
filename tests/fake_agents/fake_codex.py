@@ -26,6 +26,17 @@ if "read-only" in args and "-C" not in args:  # LLM 判定（judge_cmd）: 対�
         with open(os.environ["FAKE_JUDGE_PROMPT_LOG"], "a", encoding="utf-8") as f:
             f.write(json.dumps({"family": "codex", "model": args[args.index("-m") + 1] if "-m" in args else None,
                                 "prompt": prompt}, ensure_ascii=False) + "\n")
+    ov = os.environ.get("FAKE_JUDGE_OVERLAP_DIR")  # 判定の同時実行の検出: 入口で印を O_EXCL で作り、少し待って消す。先客がいれば OVERLAP を記録
+    if ov:
+        mark = Path(ov) / "inflight"
+        try:
+            os.close(os.open(mark, os.O_CREAT | os.O_EXCL))
+        except FileExistsError:
+            (Path(ov) / "OVERLAP").write_text("x", encoding="utf-8")
+        else:
+            import time
+            time.sleep(0.15)
+            mark.unlink()
     print(json.dumps({"type": "thread.started", "thread_id": "judge"}))
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": f"{verdict}\n偽の判定"}}, ensure_ascii=False))
     print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 2000, "cached_input_tokens": 1500, "output_tokens": 50}}))
