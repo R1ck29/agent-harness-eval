@@ -323,27 +323,37 @@ def _grader_material(cmd: str, extra_ro: list[str], workdir: Path, resolved_work
     home = Path.home().resolve()
     out: list[str] = []
     dirs: list[str] = []
-    workdirs = {workdir.absolute(), resolved_workdir}
+    workdirs = {Path(os.path.abspath(workdir)), resolved_workdir}
     for t in [*toks, *extra_ro]:
         path = Path(t)
         if not path.is_absolute():
             continue
         if path.anchor == "//":
             path = Path("/") / path.relative_to("//")
-        # 作業ツリー内のリンクを解決するのはマウント後のシェルだけ。
-        # 「..」でツリーを出入りする表記も、ホストの bind 元にしない。
-        if any(Path(os.path.normpath(prefix)).is_relative_to(w) for prefix in (path, *path.parents) for w in workdirs):
-            continue
-        if not path.exists():
-            continue
-        r = path.resolve()
-        if r == home or r == Path(r.anchor) or r in home.parents:  # ホームそのもの・その親・ルートは見せない
-            continue
-        out.append(str(r))
-        parts = path.parts
-        for i, part in enumerate(parts):
+        # Check each prefix before traversing it, including paths that leave the workdir with "..".
+        r = Path(path.anchor)
+        parents_to_create: list[str] = []
+        mode = stat.S_IFDIR
+        for part in path.parts[1:]:
+            if not stat.S_ISDIR(mode):
+                break
             if part == "..":
-                dirs.append(os.path.normpath(os.path.join(*parts[:i])))
+                parents_to_create.append(str(r))
+                r = r.parent
+            else:
+                r = r / part
+            if any(r.is_relative_to(w) for w in workdirs):
+                break
+            try:
+                mode = r.lstat().st_mode
+            except OSError:
+                break
+            if stat.S_ISLNK(mode):
+                break
+        else:
+            if r != Path(r.anchor) and r != home and r not in home.parents:
+                out.append(str(r))
+                dirs.extend(parents_to_create)
     return out, dirs
 
 

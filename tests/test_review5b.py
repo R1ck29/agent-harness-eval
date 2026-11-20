@@ -68,11 +68,23 @@ class TestBodyTamper(unittest.TestCase):
         self.t.write_text(self.before["tests/test_a.py"] + "\n\ndef test_x():\n    assert True\n", encoding="utf-8")
         self.assertIn("test_body_modified", self.kinds())
 
+    def test_appending_an_assignment_to_an_existing_test_is_detected(self) -> None:
+        original = self.before["tests/test_a.py"]
+        for assignment in ("test_x = other", "test_x, unrelated = other, None"):
+            with self.subTest(assignment=assignment):
+                self.t.write_text(original + f"\n\ndef other():\n    pass\n{assignment}\n", encoding="utf-8")
+                findings = tamper_check(self.before, self.wd)
+                self.assertTrue(any(f["kind"] == "test_body_modified" and "test_x" in f["line"] for f in findings))
+
     def test_method_redefinition_is_checked_within_its_class(self):
         original = "class TestA:\n    def test_x(self):\n        assert False\n"
         self.t.write_text(original, encoding="utf-8")
         self.before = capture_tests(self.wd)
         self.t.write_text(original + "\n    def test_x(self):\n        assert True\n", encoding="utf-8")
+        self.assertIn("test_body_modified", self.kinds())
+        self.t.write_text(original + "\n    other = test_x\n    test_x = other\n", encoding="utf-8")
+        self.assertIn("test_body_modified", self.kinds())
+        self.t.write_text(original + "\nTestA.test_x = TestA.test_x\n", encoding="utf-8")
         self.assertIn("test_body_modified", self.kinds())
         self.t.write_text(original + "\nclass TestB:\n    def test_x(self):\n        assert True\n", encoding="utf-8")
         self.assertEqual(self.kinds(), [])
@@ -245,6 +257,7 @@ class TestInPlaceBudgetInsideLock(unittest.TestCase):
                          "cache_hits": 0, "by_model": {}}
         p.judge_profiles = {"codex": Profile(id="j", agent="codex", path=tmp / "j.yaml", credentials="in_place", billing="subscription")}
         p._judge_exe = lambda family: [sys.executable, "-c", "pass"]
+        p._judge_adapters = {"codex": p._resolve_judge_adapter("codex")}
         launched = []
 
         def fake_run(cmd, cwd, env, stdin_text, stdout_path, stderr_path, timeout_s):

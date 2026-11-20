@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from . import __version__, credentials
-from .adapters import classify_stderr, get_adapter
+from .adapters import ClaudeAdapter, CodexAdapter, classify_stderr, get_adapter
 from .cheatproof import capture_tests, leak_check, summarize_hits, tamper_check, tamper_result
 from .costs import add_usage, empty_usage, solver_call_estimate, solver_cost, usage_summary
 from .graders import JudgeConfig, grade_all, judge_content, rescore
@@ -54,7 +54,7 @@ def _solver_accounting_lines(path: Path) -> Iterator[str]:
                     while line and not line.endswith(b"\n"):
                         line = fh.readline(64 * 1024)
 
-CACHE_SCHEMA = "7"  # 試行レコードの形式を変えたら上げる（古いキャッシュを使わないため）。7: 隔離・leak・tamper・環境変数の許可リスト
+CACHE_SCHEMA = "8"  # 8: 採点資材のリンク拒否・テスト名の再代入の検出・ログ解析上限
 
 
 @dataclass
@@ -238,11 +238,15 @@ class Runner(JudgePhase):
         self.judge: JudgeSettings | None = None
         self.judge_profiles: dict[str, Profile | None] = {}
         self.judge_versions: dict[str, str | None] = {}
+        self._judge_adapters: dict[str, ClaudeAdapter | CodexAdapter] = {}
         if self.needs_judge:
             fams = [opt.judge_agent] if opt.judge_agent else list(opt.judge_families or FAMILIES)
             for f in fams:
                 self.judge_profiles[f] = self._pick_judge_profile(profiles, f)
-                self.judge_versions[f] = cli_version(get_adapter(f, self.judge_profiles[f], executable=self._judge_exe(f)))
+                adapter = self._resolve_judge_adapter(f)
+                if adapter is not None:
+                    self._judge_adapters[f] = adapter
+                self.judge_versions[f] = cli_version(adapter) if adapter is not None else None
             available = [f for f, v in self.judge_versions.items() if v is not None]
             self.judge = make_settings(opt.tier, {p.agent for _, p in self.pairs}, available, opt.judge_agent, opt.judge_models,
                                        opt.judge_votes, opt.allow_weak_judge, opt.seed, opt.calibration_items)

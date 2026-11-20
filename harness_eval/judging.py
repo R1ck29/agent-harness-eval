@@ -113,7 +113,7 @@ def judge_identity(exe: list[str], version: str | None, model: str | None, route
         with open(real, "rb") as fh:
             while chunk := fh.read(1024 * 1024):
                 digest.update(chunk)
-        parts.append(f"{real}:{digest.hexdigest()}")
+        parts.append(f"{os.path.abspath(file)}:{real}:{digest.hexdigest()}")
     raw = "\x1f".join(["|".join(parts), str(version), str(model) if model else "(CLI の既定)", route])
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 

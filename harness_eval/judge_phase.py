@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from . import credentials
-from .adapters import classify_stderr, get_adapter
+from .adapters import ClaudeAdapter, CodexAdapter, classify_stderr, get_adapter
 from .costs import add_usage, judge_call_estimate, token_cost
 from .graders import JUDGE_PROMPT, JudgeUnavailable, parse_verdict
 from .isolation import build_env, copy_credentials, fill, make_trial_paths, parent_env_names, release_home, route_signature, run_process
@@ -104,18 +104,33 @@ class JudgePhase:
                        copy_credentials=src.copy_credentials if src else False, credentials=src.credentials if src else None,
                        isolate_home=src.isolate_home if src else True)
 
+    def _resolve_judge_adapter(self, family: str) -> ClaudeAdapter | CodexAdapter | None:
+        src = self.judge_profiles.get(family)
+        requested = self._judge_exe(family) or (src.executable if src else None)
+        adapter = get_adapter(family, executable=requested)
+        prof = self._judge_profile(family)
+        path = os.defpath if "PATH" in prof.env_unset else os.environ.get("PATH", os.defpath)
+        if "PATH" in prof.env:
+            path = fill(prof.env["PATH"], {"profile_dir": str(prof.base_dir), "python": sys.executable})
+        found = shutil.which(adapter.exe[0] if requested else adapter.command, path=path)
+        if found is None:
+            return None
+        entry = Path(found)
+        # Preserve the selected shim name while resolving relative or symlinked parent directories.
+        adapter.exe[0] = str(entry.parent.resolve() / entry.name)
+        return adapter
+
     def _identity(self, family: str, model: str | None) -> str:
         """判定役の識別子（実行ファイル・CLI の版・実効モデル・非秘密の経路設定）。判定キャッシュのキーに入れる。"""
         k = (family, model)
         if k not in self._identities:
-            adapter = get_adapter(family, self.judge_profiles.get(family), executable=self._judge_exe(family))
+            adapter = self._judge_adapters.get(family)
+            if adapter is None:
+                raise JudgeUnavailable(f"判定役の CLI が見つかりません: {family}")
             prof = self._judge_profile(family)
-            path = os.defpath if "PATH" in prof.env_unset else os.environ.get("PATH", os.defpath)
-            if "PATH" in prof.env:
-                path = fill(prof.env["PATH"], {"profile_dir": str(prof.base_dir), "python": sys.executable})
             self._identities[k] = judge_identity(list(adapter.exe), self.judge_versions.get(family), model,
                                                  route_signature(prof, dict(os.environ))
-                                                 + ("|in_place" if prof.credentials == "in_place" else ""), path=path)
+                                                 + ("|in_place" if prof.credentials == "in_place" else ""))
         return self._identities[k]
 
     def _judge_over_budget(self, family: str) -> bool:
@@ -143,7 +158,7 @@ class JudgePhase:
     def _judge_call(self, family: str, model: str | None, prompt: str) -> tuple[str, dict[str, Any], float | None]:
         """判定 CLI を 1 回呼ぶ（認証だけ借りた判定専用の一時ホーム。配布物・追加引数は使わない）。(応答, トークン, 公開価格での費用)。"""
         prof = self._judge_profile(family)
-        adapter = get_adapter(family, self.judge_profiles.get(family), executable=self._judge_exe(family))
+        adapter = self._judge_adapters[family]
         in_place = prof.credentials == "in_place"
         with self.lock:
             self._judge_seq += 1

@@ -101,6 +101,25 @@ class GraderIsolationRecords(unittest.TestCase):
                     args = isolation.grader_sandbox_cmd("cat " + shlex.quote(candidate), workdir, scratch, [candidate])
                     self.assertNotIn(str(target), args)
 
+    @unittest.skipIf(os.name == "nt", "シンボリックリンクの作成に権限が要る")
+    def test_grader_ignores_a_workdir_alias_without_resolving_its_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            workdir = root / "workdir"
+            material = write(workdir / "candidate.txt", "workdir fixture")
+            alias = root / "alias"
+            alias.symlink_to(workdir, target_is_directory=True)
+            candidate = alias / material.name
+            original_resolve = Path.resolve
+
+            def resolve(path: Path, *args, **kwargs) -> Path:
+                self.assertNotEqual(path, candidate)
+                return original_resolve(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "resolve", resolve):
+                self.assertEqual(isolation._grader_material(f"cat {shlex.quote(str(candidate))}",
+                                                            [str(candidate)], workdir, workdir), ([], []))
+
 
 class AwsFiles(unittest.TestCase):
     """#4: AWS の認証ファイルは、プロファイルが Bedrock（または AWS のファイル）を明示したときだけ渡す。"""
@@ -210,7 +229,7 @@ class HostWritesDoNotFollowLinks(unittest.TestCase):
             "sys.stdout.flush(); sys.stderr.flush()\n"
             "while min(out.stat().st_size, err.stat().st_size) < size:\n"
             "    time.sleep(0.01)\n"
-            "print('usage record')\n"
+            "sys.stdout.buffer.write(b'usage record\\n')\n"
         )
         res = isolation.run_process([sys.executable, "-c", probe, str(out), str(err), str(size)], self.tmp,
                                     dict(os.environ), None, out, err, 5)
@@ -221,7 +240,7 @@ class HostWritesDoNotFollowLinks(unittest.TestCase):
 
     def test_timeout_preserves_usage_when_child_does_not_read_stdin(self) -> None:
         out, err = self.tmp / "stdout.jsonl", self.tmp / "stderr.txt"
-        probe = "import time; print('usage record', flush=True); time.sleep(60)"
+        probe = "import sys, time; sys.stdout.buffer.write(b'usage record\\n'); sys.stdout.buffer.flush(); time.sleep(60)"
         res = isolation.run_process([sys.executable, "-c", probe], self.tmp, dict(os.environ), "x" * (1024 * 1024),
                                     out, err, 1)
         self.assertTrue(res.timed_out)
@@ -422,6 +441,7 @@ class JudgeIdentity(unittest.TestCase):
             phase.judge_profiles = {"codex": Profile("j", "codex", root / "judge.yaml", env={"PATH": "{profile_dir}/bin"})}
             phase.judge_versions = {}
             phase._judge_exe = lambda _: [exe.name]
+            phase._judge_adapters = {"codex": phase._resolve_judge_adapter("codex")}
             phase._identities = {}
             before = phase._identity("codex", None)
             st = exe.stat()
@@ -445,6 +465,64 @@ class JudgeIdentity(unittest.TestCase):
         code, out, s, _ = t.go(*CLAUDE_J, "--judge-codex-executable", sys.executable, str(other))
         self.assertEqual(code, 0, out)
         self.assertEqual(s["usage"]["judge"]["cache_hits"], 0, "別の判定 CLI の票を再利用した")
+
+    def test_judge_probe_and_vote_use_one_absolute_executable_for_relative_path(self) -> None:
+        from harness_eval.runner import cli_version
+        from tests.test_judge_pipeline import CLAUDE_J, JudgePipeline
+
+        t = JudgePipeline("test_dev_default_cross_family_single_mid_vote")
+        t.setUp()
+        self.addCleanup(t.tearDown)
+        python = Path(sys.executable)
+        expected_executable = python.parent.resolve() / python.name
+        relative_bin = os.path.relpath(python.parent)
+        cfg = write(t.tmp / "judge.yaml", f"id: codex-judge\nagent: codex\nenv: {{PATH: {json.dumps(relative_bin)}}}\n")
+        with mock.patch("harness_eval.runner.cli_version", wraps=cli_version) as probe, \
+                mock.patch("harness_eval.judge_phase.run_process", wraps=isolation.run_process) as launch:
+            code, out, s, _ = t.go(*CLAUDE_J, "--judge-codex-executable", python.name, str(FAKE_DIR / "fake_codex.py"),
+                                   "--judge-profile", f"codex={cfg}")
+        self.assertEqual(code, 0, out)
+        self.assertGreater(s["usage"]["judge"]["calls"], 0)
+        judge_probes = [call.args[0].exe for call in probe.call_args_list if call.args[0].agent == "codex"]
+        self.assertEqual(len(judge_probes), 1)
+        self.assertEqual(Path(judge_probes[0][0]), expected_executable)
+        self.assertTrue(launch.call_args_list)
+        for call in launch.call_args_list:
+            self.assertEqual(Path(call.args[0][0]), expected_executable)
+
+    def test_missing_forced_judge_is_recorded_as_unavailable(self) -> None:
+        from tests.test_judge_pipeline import JudgePipeline
+
+        t = JudgePipeline("test_dev_default_cross_family_single_mid_vote")
+        t.setUp()
+        self.addCleanup(t.tearDown)
+        code, out, _, records = t.go("--judge-agent", "codex", "--judge-codex-executable", str(t.tmp / "missing-codex"))
+        self.assertEqual(code, 0, out)
+        self.assertTrue(records)
+        self.assertTrue(all((rec["error"] or {}).get("type") == "judge_error" for rec in records))
+
+    @unittest.skipIf(os.name == "nt", "シンボリックリンクの作成に権限が要る")
+    def test_judge_resolution_preserves_the_shim_name_after_a_symlinked_parent(self) -> None:
+        from harness_eval.judge_phase import JudgePhase
+        from harness_eval.spec import Profile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            nested = root / "real" / "nested"
+            nested.mkdir(parents=True)
+            alias = root / "alias"
+            alias.symlink_to(nested, target_is_directory=True)
+            target = write(root / "fake-target", "#!/bin/sh\nexit 0\n")
+            target.chmod(0o755)
+            shim = nested.parent / "bin" / "fake-judge"
+            shim.parent.mkdir()
+            shim.symlink_to(target)
+            phase = JudgePhase()
+            phase.judge_profiles = {"codex": Profile("j", "codex", root / "judge.yaml", env={"PATH": str(alias / ".." / "bin")})}
+            phase._judge_exe = lambda _: [shim.name]
+            adapter = phase._resolve_judge_adapter("codex")
+            self.assertIsNotNone(adapter)
+            self.assertEqual(adapter.exe, [str(shim)])
 
 
 FAKE_DIR = ROOT / "tests" / "fake_agents"

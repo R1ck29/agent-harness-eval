@@ -213,25 +213,38 @@ def tamper_check(before: dict[str, str], workdir: Path) -> list[dict[str, str]]:
     return found
 
 
-def _python_definitions(nodes: Iterable[ast.AST], scope: tuple[str, ...] = ()) -> Iterable[tuple[str, ...]]:
+def _python_bindings(nodes: Iterable[ast.AST], scope: tuple[str, ...] = (), *, assignments: bool = False) -> Iterable[tuple[str, ...]]:
     for node in nodes:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             name = (*scope, node.name)
             yield name
             if isinstance(node, ast.ClassDef):
-                yield from _python_definitions(node.body, name)
-        else:
-            yield from _python_definitions(ast.iter_child_nodes(node), scope)
+                yield from _python_bindings(node.body, name, assignments=assignments)
+        elif assignments and isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+            if not isinstance(node, ast.AnnAssign) or node.value is not None:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    for part in ast.walk(target):
+                        if isinstance(part, (ast.Name, ast.Attribute)) and isinstance(part.ctx, ast.Store):
+                            attrs: list[str] = []
+                            while isinstance(part, ast.Attribute):
+                                attrs.append(part.attr)
+                                part = part.value
+                            if isinstance(part, ast.Name):
+                                yield (*scope, part.id, *reversed(attrs))
+        elif not isinstance(node, ast.Lambda):
+            yield from _python_bindings(ast.iter_child_nodes(node), scope, assignments=assignments)
 
 
 def _redefined_python_name(old: str, new: str) -> str | None:
-    """同じスコープに既存の定義を追記すると、Python は後の定義で上書きする。"""
+    """既存の定義が、同じスコープで後から定義や代入により上書きされたか調べる。"""
     try:
-        before = Counter(_python_definitions(ast.parse(old).body))
-        after = Counter(_python_definitions(ast.parse(new).body))
+        baseline = ast.parse(old).body
+        before = Counter(_python_bindings(baseline, assignments=True))
+        after = Counter(_python_bindings(ast.parse(new).body, assignments=True))
     except SyntaxError:
         return None
-    return next((".".join(name) for name in before if after[name] > before[name]), None)
+    return next((".".join(name) for name in _python_bindings(baseline) if after[name] > before[name]), None)
 
 
 def _skip_added_here(added: list[str]) -> bool:
