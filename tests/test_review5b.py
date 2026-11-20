@@ -132,9 +132,6 @@ class TestAllInvalidTask(unittest.TestCase):
         self.assertTrue(any("wiped" in x for x in v["reasons"]), v["reasons"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestSolverCostSettledOnce(unittest.TestCase):
     """#13: pricing のない Codex 試行も、公開価格で呼び出しごとに費用を確定し、予算・台帳・集計に同じ額を渡す。"""
@@ -243,3 +240,7 @@ class TestRetryUsageCounted(unittest.TestCase):
         u = usage_summary([], None, {}, "dev", retry)
         self.assertEqual((u["solver"]["calls"], u["solver"]["input"], u["solver"]["cost_usd"]), (1, 100, 0.05))
         self.assertAlmostEqual(u["total_cost_usd"], 0.05)
+
+
+if __name__ == "__main__":
+    unittest.main()

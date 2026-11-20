@@ -107,3 +107,5 @@ PY
 
 - 見送り（理由つき）: 提案「別 run との認証競合を検出する安定したロック」は、`auth.json` 本体を置き換える CLI の更新と別にロックファイルを作る必要があり、本物の `~/.codex` に新しいファイルを置かない方針と衝突するため見送り（README の運用条件に「単独実行」を明記済み）。
 - 隔離された採点が見せるもの: 採点コマンドに書いた実在する絶対パスと `command` グレーダーの `ro:` だけ。`{task_dir}` や `/tmp` のような広いパスを書くとその範囲が見える（タスク作者の責任）。
+- 独立レビューの残り（PR の残課題）: 費用が分からない呼び出し（価格表にないモデル）は上限の計算に入らず、上限到達後の起動を止められない（以前からの制約）。tamper はテストファイル名のパターンと「末尾への追記以外の変更」で検出するため、パターンに合わない名前のテストは監視しない。`--no-llm` の結果は `gate`/`promote_decision` の単独実行では弾いていない（verdict だけが INCONCLUSIVE にする）。
+- 一時ディレクトリ（レビュアーが作ったもの。削除は未実施）: `/workspace/verify-layer-work/{rev-sbx-x1,exp-judge-trust,vi-export,vi-parent,vi-scripts,vi-scratch,rv-new,rv-old,rv-scripts}`・`/tmp/rev-sbx-*`・`/tmp/jt_*`。
