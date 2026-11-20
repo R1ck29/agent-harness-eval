@@ -176,7 +176,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <tr><td><code>pricing</code></td><td><code>input_per_mtok</code>・<code>cached_input_per_mtok</code>・<code>output_per_mtok</code>（Codex の概算費用用）</td><td>なし</td></tr>
 <tr><td><code>isolate_home</code></td><td><code>HOME</code>・<code>USERPROFILE</code> を一時ホームに向ける</td><td><code>true</code></td></tr>
 <tr><td><code>isolation_settings</code></td><td>Claude Code に claude.ai からのスキル・プラグイン同期を止める <code>--settings</code> を渡す</td><td><code>true</code></td></tr>
-<tr><td><code>copy_credentials</code></td><td>本物の認証ファイルを一時ホームに複製する（試行後に削除）。実行の前に期限を確かめ、近ければ止まる。試行の中で更新されたら本物へ書き戻す（5 章）</td><td><code>false</code></td></tr>
+<tr><td><code>copy_credentials</code></td><td>本物の認証ファイルを一時ホームに複製する（試行後に削除）。実行の前に期限を確かめ、近ければ止まる。本物へは書き戻さない（5 章）</td><td><code>false</code></td></tr>
 <tr><td><code>credentials</code></td><td>判定役専用。<code>in_place</code> は認証を複製せず、本物の <code>CODEX_HOME</code> をその場で使う（codex だけ。解く側に書くと止まる。<code>copy_credentials</code> とは併用不可）。下の「LLM 判定の認証」を読む</td><td>なし</td></tr>
 </table>
 <p>置換できるもの: <code>{home}</code>（一時ホーム）・<code>{config_dir}</code>（Claude Code は <code>{home}/.claude</code>、Codex は <code>{home}/.codex</code>）・<code>{workdir}</code>・<code>{profile_dir}</code>・<code>{python}</code>。<code>run</code> の中では値が自動で引用されるので、引用符で囲まないでください。<code>install</code> のコピー先は試行ディレクトリの中に限ります（相対パスは一時ホーム基準）。</p>
@@ -203,7 +203,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <p>試行の中の CLI が複製したログインを更新（refresh）すると、更新用のトークンは使い回せないため、本物のログインが使えなくなります（2026-11-19 に Codex の <code>auth.json</code> で実際に起きました）。そのため次のようにしています。</p>
 <ul>
 <li><code>run</code> は試行を始める前に本物の認証ファイルの期限を確かめます。アクセストークンの期限まで 2 時間ない・切れている、または Codex の最終更新（<code>last_refresh</code>）が 7 日より前なら、試行の中で更新が起きるので止まります（終了コード 2）。<code>codex login</code>（または一度 <code>codex</code> を実行して更新）してからやり直します。<code>doctor</code> は期限と最終更新からの日数を表示します（値は表示しません）。</li>
-<li>複製はロックの中で行い、内容のハッシュを覚えます。試行のあとで複製が変わっていれば（試行の中で更新された）、本物がまだ複製したときのままのときだけ、ロックを取って原子的に書き戻します（同じフォルダの一時ファイルから置き換え）。本物が先に変わっていれば書き戻しません。どちらも <code>run</code> のログに出ます。</li>
+<li>複製はロックの中で行い、試行のあとは捨てるだけです。複製は solver が書き換えられるので、本物へは書き戻しません（戻すと solver が本物のログインを書き換えられるため）。更新が要る期限なら、上の事前確認で止まります。</li>
 <li>会社の評価では、更新の起きない API キー（Codex は <code>CODEX_API_KEY</code>、Claude は <code>ANTHROPIC_API_KEY</code>）を <code>inherit_env</code> で渡してください。</li>
 </ul>
 <h3>LLM 判定の認証</h3>

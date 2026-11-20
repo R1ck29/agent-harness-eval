@@ -143,7 +143,7 @@ class TrialPaths:
     stdout: Path
     stderr: Path
     tmp: Path | None = None
-    lent: list = field(default_factory=list)  # 複製した認証ファイル（credentials.Lent）。試行のあと release_home で返す
+    lent: list = field(default_factory=list)  # 複製した認証ファイル（credentials.Lent）。試行のあと release_home で捨てる（書き戻さない）
 
 
 def make_trial_paths(root: Path, config_dirname: str) -> TrialPaths:
@@ -197,31 +197,20 @@ def build_env(profile: Profile, tp: TrialPaths, config_env: str) -> dict[str, st
 
 
 def copy_credentials(agent: str, tp: TrialPaths) -> None:
-    """copy_credentials: true のとき、本物の認証ファイルを一時ホームに複製する（ロックの中で。試行のあと release_home で返す）。"""
+    """copy_credentials: true のとき、本物の認証ファイルを一時ホームに複製する（ロックの中で。試行のあと release_home で捨てる。書き戻さない）。"""
     lent = credentials.lend(agent, tp.config_dir)
     if lent is not None:
         tp.lent.append(lent)
 
 
 def release_home(tp: TrialPaths, log=None) -> list[str]:
-    """試行の一時ホームと一時フォルダを消す。その前に、試行の中で更新された認証ファイルを本物へ書き戻す（ロック付き・原子的）。
-    戻り値: 起きたこと（"written_back" / "conflict"）の一覧。"""
-    events = []
-    for lent in tp.lent:
-        try:
-            ev = credentials.give_back(lent)
-        except OSError as e:
-            ev = f"error: {type(e).__name__}"
-        if ev:
-            events.append(ev)
-            if log:
-                log(f"  注意: 試行の中で {lent.agent} の認証が更新されました → "
-                    + ("本物へ書き戻しました" if ev == "written_back" else f"本物へは書き戻していません（{ev}。本物が先に更新されていました）"))
+    """試行の一時ホームと一時フォルダを消す。複製した認証は捨てるだけ（本物へは書き戻さない。solver が書ける複製を本物へ戻すと、
+    solver が本物のログインを書き換えられるため）。戻り値は常に空（呼び出し側の互換）。"""
     tp.lent.clear()
     shutil.rmtree(tp.home, ignore_errors=True)
     if tp.tmp is not None:
         shutil.rmtree(tp.tmp, ignore_errors=True)
-    return events
+    return []
 
 
 # ---------------------------------------------------------------- 隔離（bubblewrap）

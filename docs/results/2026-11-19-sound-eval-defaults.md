@@ -310,7 +310,7 @@ d の実測を行えば、判定キャッシュに残る実測値から 1 回あ
 - peeker を候補にした `verdict` は `INCONCLUSIVE`、終了コード 3。検査欄の `integrity` が fail、`errors` に「leak 2」が出る
 - 検出の単体テスト: leak 検査 13 件（試行の外のパス・評価の名前・上位ディレクトリ・カナリア・上流への通信・実のホーム・Windows 区切りなど）、tamper 検査 9 件（削除・改名・アサーション削除・skip・設定の絞り込みを検出。テストの追加と仕様変更に伴う修正は検出しない）
 - 隔離（bwrap）: この環境では bwrap が動き（`bwrap_problem()` は None）、`test_sandbox_hides_answers_and_other_runs` で答えと他の試行の結果が見えないことを確認。bwrap がなければ実行前に止まる（`test_bwrap_missing_stops_before_any_trial`）
-- 認証: 期限が近いと実行前に止まる・試行中の更新を原子的に書き戻す・トークンの値を表示しない（`Credentials` 4 件。本物の認証ファイルには触れず、`CODEX_HOME` を一時フォルダに向けている）
+- 認証: 期限が近いと実行前に止まる・複製は本物へ書き戻さない（2026-11-20 のレビューで書き戻しを廃止）・トークンの値を表示しない（`Credentials` 4 件。本物の認証ファイルには触れず、`CODEX_HOME` を一時フォルダに向けている）
 - 全体: 253 passed / 1 skipped（skip は実 CLI を呼ぶ確認で、`HARNESS_EVAL_REAL_CLI=1` のときだけ動く）、ruff は All checks passed
 
 ### 見つかって直した CI の回帰

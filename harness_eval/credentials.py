@@ -1,4 +1,4 @@
-"""copy_credentials: true のときの認証ファイルの貸し出し（複製）と返却（書き戻し）。
+"""copy_credentials: true のときの認証ファイルの貸し出し（複製のみ。本物への書き戻しはしない）。
 
 不具合（2026-11-19）: 試行の中の Codex が複製した auth.json を更新（refresh）すると、refresh token は使い回せないため、
 本物の ~/.codex/auth.json の refresh token が使用済みになり、次から「refresh token was already used」で全滅する。
@@ -7,9 +7,8 @@
 1. 実行の前に本物の認証ファイルの期限を確かめる（preflight）。アクセストークンの期限が近い・切れている、または最終更新
    （Codex の last_refresh）が古いときは、試行の中で更新が起きるので、実行を止めて利用者に更新を促す
    （`codex login`、または一度 `codex` を実行して更新）。中身は表示しない（期限と時刻だけ）
-2. 複製はロックの中で行い、複製した内容のハッシュを覚える。試行のあと、複製が変わっていれば（= 試行の中で更新された）、
-   本物がまだ複製したときのままのときだけ、ロックを取って原子的に（同じフォルダの一時ファイル → os.replace）書き戻す。
-   本物がすでに変わっていれば書き戻さない（別の試行・利用者が更新した。新しい方を残す）
+2. 複製はロックの中で行い、試行のあとは捨てるだけ。**書き戻しはしない**（2026-11-20 のレビュー: 複製は solver が書けるので、
+   戻すと solver が本物のログインを書き換えられる。更新が要るなら 1 の事前確認で止め、利用者が `codex login` する）
 3. 会社では API キー（Codex: CODEX_API_KEY、Claude: ANTHROPIC_API_KEY）を inherit_env で渡す経路を勧める（更新が起きない）
 """
 from __future__ import annotations
@@ -18,7 +17,6 @@ import base64
 import hashlib
 import json
 import os
-import shutil
 import threading
 import time
 from dataclasses import dataclass
@@ -191,24 +189,3 @@ def lend(agent: str, dst_dir: Path) -> Lent | None:
         except OSError:
             pass
     return Lent(agent, src, dst, hashlib.sha256(data).hexdigest())
-
-
-def give_back(lent: Lent) -> str | None:
-    """試行の中で複製が更新されていれば、本物へ書き戻す。戻り値: None（更新なし）/ "written_back" / "conflict"（本物が先に変わった）。"""
-    new = _sha(lent.dst)
-    if new is None or new == lent.digest:
-        return None
-    with _FileLock(lent.src):
-        if _sha(lent.src) != lent.digest:
-            return "conflict"
-        tmp = lent.src.with_name(f".{lent.src.name}.ahe-{os.getpid()}-{threading.get_ident()}.tmp")
-        try:
-            shutil.copyfile(lent.dst, tmp)
-            try:
-                os.chmod(tmp, lent.src.stat().st_mode & 0o777)
-            except OSError:
-                pass
-            os.replace(tmp, lent.src)
-        finally:
-            tmp.unlink(missing_ok=True)
-    return "written_back"

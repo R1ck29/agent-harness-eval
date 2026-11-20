@@ -410,25 +410,19 @@ class Credentials(unittest.TestCase):
         write(self.tmp / "real-claude" / ".credentials.json", json.dumps({"claudeAiOauth": {"expiresAt": (time.time() - 5) * 1000}}))
         self.assertIn("claude", credentials.preflight("claude_code"))
 
-    def test_refresh_in_trial_is_written_back_atomically_or_not_at_all(self):
+    def test_lent_copy_is_never_written_back_to_the_real_login(self):
+        """solver が変更できる複製を本物の認証へ戻さない（壊れた JSON・別トークンでも）。"""
         self.auth(10 * 3600)
-        original = (self.real / "auth.json").read_text(encoding="utf-8")
+        original = (self.real / "auth.json").read_bytes()
         trial = self.tmp / "trial"
         trial.mkdir()
-        lent = credentials.lend("codex", trial)
-        self.assertIsNone(credentials.give_back(lent))  # 更新なし → 何もしない
-        self.assertEqual((self.real / "auth.json").read_text(encoding="utf-8"), original)
-        lent = credentials.lend("codex", trial)
-        write(trial / "auth.json", '{"tokens": {"refresh_token": "rt-2"}}')  # 試行の中で更新された
-        self.assertEqual(credentials.give_back(lent), "written_back")
-        self.assertIn("rt-2", (self.real / "auth.json").read_text(encoding="utf-8"))
+        self.assertFalse(hasattr(credentials, "give_back"))
+        for tampered in ('{"tokens": {"refresh_token": "rt-2"}}', "not json {{{", ""):
+            lent = credentials.lend("codex", trial)
+            write(trial / "auth.json", tampered)
+            self.assertIsNotNone(lent)
+            self.assertEqual((self.real / "auth.json").read_bytes(), original)
         self.assertEqual([p.name for p in self.real.iterdir()], ["auth.json"])  # 一時ファイル・ロックファイルを残さない
-        # 本物が先に変わっていたら（別の試行・利用者が更新した）書き戻さない
-        lent = credentials.lend("codex", trial)
-        write(trial / "auth.json", '{"tokens": {"refresh_token": "rt-3"}}')
-        write(self.real / "auth.json", '{"tokens": {"refresh_token": "rt-9"}}')
-        self.assertEqual(credentials.give_back(lent), "conflict")
-        self.assertIn("rt-9", (self.real / "auth.json").read_text(encoding="utf-8"))
 
     def run_codex(self, *extra_env):
         ex = self.tmp / "examples"
@@ -438,13 +432,14 @@ class Credentials(unittest.TestCase):
         return run_cli("run", "--tasks", str(ex / "tasks" / "arithmetic-no-skill.yaml"), "--profiles", str(prof),
                        "--out", str(self.tmp / "out"), "--no-cache", "--no-llm")
 
-    def test_run_writes_back_a_refresh_and_stops_on_expiry(self):
+    def test_run_never_writes_back_a_refresh_and_stops_on_expiry(self):
         self.auth(10 * 3600)
+        original = (self.real / "auth.json").read_bytes()
         with mock.patch.dict(os.environ, {"FAKE_REFRESH_AUTH": "1"}):
             code, out = self.run_codex()
         self.assertEqual(code, 0, out)
-        self.assertIn("本物へ書き戻しました", out)
-        self.assertIn("rt-2", (self.real / "auth.json").read_text(encoding="utf-8"))  # 本物の refresh token は新しいものになった
+        self.assertNotIn("書き戻しました", out)
+        self.assertEqual((self.real / "auth.json").read_bytes(), original)  # 試行の中で複製が更新されても本物は変わらない
         self.auth(-60)
         code, out = self.run_codex()
         self.assertEqual(code, 2, out)  # 期限切れの認証は複製しない（試行の中の更新で本物が失効するため）

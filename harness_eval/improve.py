@@ -415,7 +415,7 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
             log(f"事前検査で見送りました（理由 {len(built['problems'])} 件）。理由を返して作り直させます（{n + 1}/{o.retries} 回目）")
     finally:
         if tp is not None:
-            release_home(tp, log)  # 試行の中で更新された認証は本物へ書き戻す
+            release_home(tp, log)
         shutil.rmtree(root, ignore_errors=True)  # 依頼文・トランスクリプトの写しと認証の複製を残さない
     return write_candidate(o, built, report, log)
 

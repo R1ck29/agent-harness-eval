@@ -263,7 +263,7 @@ def convert(text: str, exe: list[str], model: str | None, profile: Profile | Non
         pr = run_process(cmd, tp.workdir, env, prompt, tp.stdout, tp.stderr, 600)
         out = tp.stdout.read_text(encoding="utf-8", errors="replace") if tp.stdout.exists() else ""
     finally:
-        release_home(tp)  # 試行の中で更新された認証は本物へ書き戻してから消す
+        release_home(tp)
         shutil.rmtree(tp.root, ignore_errors=True)  # 応答は架空化済みだが、念のため残さない
     if pr.launch_error or pr.timed_out:
         return None, None, "起動失敗またはタイムアウト"

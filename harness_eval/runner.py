@@ -407,7 +407,7 @@ class Runner(JudgePhase):
         try:
             return self._execute_in(task, profile, trial, key, adapter, tdir, tp)
         finally:
-            # 一時ホームは認証情報の複製を含みうるので、例外・中断（Ctrl-C）でも必ず消す（試行の中で更新された認証は先に書き戻す）
+            # 一時ホームは認証情報の複製を含みうるので、例外・中断（Ctrl-C）でも必ず消す
             release_home(tp, self.opt.log)
 
     def _execute_in(self, task: Task, profile: Profile, trial: int, key: str, adapter, tdir: Path, tp) -> TrialRecord:
