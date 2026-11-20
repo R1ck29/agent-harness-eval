@@ -29,7 +29,7 @@ from typing import Any, Callable
 from . import __version__, credentials
 from .adapters import classify_stderr, get_adapter
 from .cheatproof import capture_tests, leak_check, summarize_hits, tamper_check, tamper_result
-from .costs import empty_usage, solver_call_estimate, usage_summary
+from .costs import add_usage, empty_usage, solver_call_estimate, solver_cost, usage_summary
 from .graders import JudgeConfig, grade_all, judge_content, rescore
 from .judge_phase import JudgePhase
 from .judging import FAMILIES, JudgeSettings, make_settings
@@ -240,6 +240,7 @@ class Runner(JudgePhase):
             agents = {p.agent for _, p in self.pairs} | set(self.judge.used_families() if self.judge else [])
             self.month_spent = {a: month_spent(self.ledger, a) for a in sorted(agents)}
         self.judge_usage = empty_usage()
+        self.retry_usage = empty_usage()  # 再試行で捨てた解く側の呼び出しの使量（最後の試行の記録だけでは数えられない）
         self.judge_usage.update({"cache_hits": 0, "by_model": {}})
         self.calibration: dict[str, Any] | None = None
         missing = [a for a, p in (self.judge.plan if self.judge else {}).items() if not p["families"]]
@@ -274,6 +275,14 @@ class Runner(JudgePhase):
             if billing == "api":
                 self.spent_api[agent] += usd
             append_spend(self.ledger, usd, self.run_id, agent, billing)
+
+    @staticmethod
+    def _settle_cost(rec: TrialRecord, profile: Profile) -> tuple[float | None, str | None]:
+        """1 回の呼び出しの費用: 公開価格で換算できればそれ（price_table）、できなければ CLI の推定、どちらもなければ不明のまま。"""
+        cost, src = solver_cost(rec, profile.model)
+        if src == "price_table":
+            return cost, "price_table"
+        return rec.cost_usd, rec.cost_source
 
     def month_remaining(self, agent: str) -> float | None:
         if self.month_spent is None or self.opt.monthly_budget_usd is None:
@@ -571,6 +580,8 @@ class Runner(JudgePhase):
                 sink(rec)
                 return rec
             rec = self._execute(task, profile, trial, key)
+            # 呼び出しごとに費用を 1 度だけ確定し、予算・台帳・集計（usage）に同じ額を渡す（pricing のない Codex 試行も公開価格で換算）
+            rec.cost_usd, rec.cost_source = self._settle_cost(rec, profile)
             self._spend(rec.cost_usd, profile.agent, profile.billing)
             if self.interrupted.is_set():  # Ctrl-C で止めた試行は結果ではない（失敗として数えず、キャッシュもしない）
                 rec.valid, rec.passed, rec.score, rec.failure_tags = False, False, None, []
@@ -578,6 +589,8 @@ class Runner(JudgePhase):
             retryable = not rec.valid and (rec.error or {}).get("type") in ("rate_limit", "overloaded")
             if retryable and attempt < self.opt.retry_infra:
                 attempt += 1
+                with self.lock:
+                    add_usage(self.retry_usage, rec.tokens, rec.cost_usd)
                 self.opt.log(f"  再試行 {attempt}/{self.opt.retry_infra}: {task.id}/{profile.id}#{trial} ({rec.error})")
                 self.interrupted.wait(self.opt.retry_wait_s * attempt)  # Ctrl-C ですぐ抜ける
                 continue
@@ -708,7 +721,7 @@ class Runner(JudgePhase):
         }
         summary["meta"] = meta
         summary["usage"] = usage_summary(records, self.judge_usage, {p.id: p.model for _, p in self.pairs},
-                                         self.judge.tier if self.judge else None)
+                                         self.judge.tier if self.judge else None, self.retry_usage)
         (self.run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         return self.run_dir, records, summary
 

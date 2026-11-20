@@ -1,4 +1,5 @@
 """PR #5 の独立レビュー（Codex）の指摘 #6〜#9 のテスト（判定の完全性）。指摘番号は XREVIEW-AHE5-astra.md のもの。"""
+import shutil
 import sys
 import tempfile
 import unittest
@@ -109,3 +110,112 @@ class TestAllInvalidTask(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSolverCostSettledOnce(unittest.TestCase):
+    """#13: pricing のない Codex 試行も、公開価格で呼び出しごとに費用を確定し、予算・台帳・集計に同じ額を渡す。"""
+
+    def test_codex_without_pricing_is_costed_in_budget_ledger_and_summary(self):
+        import json
+        import shutil
+        from test_cheatproof import run_cli, write
+        tmp = Path(tempfile.mkdtemp(prefix="r5b-cost-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        ex = tmp / "examples"
+        shutil.copytree(ROOT / "examples", ex)
+        prof = write(ex / "profiles" / "codex-priced.yaml",
+                     f"id: codex-priced\nagent: codex\nmodel: gpt-6.2-sol\nsandbox: off\nexecutable: [{json.dumps(sys.executable)}, "
+                     f"{json.dumps(str(ROOT / 'tests' / 'fake_agents' / 'fake_codex.py'))}]\n")
+        out = tmp / "out"
+        code, text = run_cli("run", "--tasks", str(ex / "tasks" / "arithmetic-no-skill.yaml"), "--profiles", str(prof), "--out", str(out),
+                             "--no-cache", "--no-llm", "--cache-dir", str(tmp / "cache"))
+        self.assertEqual(code, 0, text)
+        run = sorted(d for d in out.iterdir() if (d / "summary.json").is_file())[-1]
+        rec = json.loads((run / "trials.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        s = json.loads((run / "summary.json").read_text(encoding="utf-8"))
+        want = (500 * 2 + 1500 * 0.10 + 100 * 10) / 1e6  # 偽 codex の使用量（入力 2000・キャッシュ読み 1500・出力 100）を gpt-6.2-sol の公開価格で
+        self.assertAlmostEqual(rec["cost_usd"], want, places=9)
+        self.assertEqual(rec["cost_source"], "price_table")
+        ledger = [json.loads(x) for x in (out / "spend.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertAlmostEqual(sum(x["usd"] for x in ledger), want, places=9)
+        self.assertAlmostEqual(s["meta"]["spent_usd_this_run"], want, places=9)
+        self.assertAlmostEqual(s["usage"]["solver"]["cost_usd"], want, places=9)  # 予算・台帳・集計が同じ額
+
+
+class TestInPlaceBudgetInsideLock(unittest.TestCase):
+    """#14: 直列に待つ in_place の判定は、ロックの中で起動の直前に残額を確認し、費用を計上してから次を許可する。"""
+
+    def test_waiting_votes_do_not_launch_after_the_cap(self):
+        import json
+        import threading
+        from collections import defaultdict
+        from types import SimpleNamespace
+        from unittest import mock
+        from harness_eval.judge_phase import JudgeBudgetStop, JudgePhase
+        from harness_eval.runner import Runner
+        from harness_eval.isolation import ProcResult
+        from harness_eval.spec import Profile
+
+        tmp = Path(tempfile.mkdtemp(prefix="r5b-lock-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        real = tmp / "real-codex"
+        real.mkdir()
+        (real / "auth.json").write_text("{}", encoding="utf-8")
+        p = type("P", (JudgePhase,), {"_spend": Runner._spend})()
+        p.opt = SimpleNamespace(max_cost_usd=0.002, use_cache=False, cache_dir=tmp / "cache", log=None)
+        p.run_dir = tmp / "run"
+        p.judge = SimpleNamespace(tier="dev")
+        p.lock = threading.Lock()
+        p.spent, p.spent_api = 0.0, defaultdict(float)
+        p.ledger, p.run_id, p.month_spent = tmp / "spend.jsonl", "r", None
+        p.month_remaining = lambda family: None
+        p._judge_billing = lambda family: "subscription"
+        p._judge_seq = 0
+        p._identities = {}
+        p._inplace_locks = {"codex": threading.Lock(), "claude_code": threading.Lock()}
+        p.judge_versions = {"codex": "x"}
+        p.judge_usage = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0, "cost_usd": 0.0, "cost_unknown": 0, "calls": 0,
+                         "cache_hits": 0, "by_model": {}}
+        p.judge_profiles = {"codex": Profile(id="j", agent="codex", path=tmp / "j.yaml", credentials="in_place", billing="subscription")}
+        p._judge_exe = lambda family: [sys.executable, "-c", "pass"]
+        launched = []
+
+        def fake_run(cmd, cwd, env, stdin_text, stdout_path, stderr_path, timeout_s):
+            import time
+            launched.append(1)
+            time.sleep(0.1)
+            lines = [{"type": "item.completed", "item": {"type": "agent_message", "text": "PASS\nok"}},
+                     {"type": "turn.completed", "usage": {"input_tokens": 2000, "cached_input_tokens": 1500, "output_tokens": 50}}]
+            Path(stdout_path).write_text("\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+            Path(stderr_path).write_text("", encoding="utf-8")
+            return ProcResult(0, False, 100)
+
+        results = []
+
+        def vote(i):
+            try:
+                p._judge_vote("codex", "gpt-6.2-sol", f"prompt {i}", "rubric", 0)
+                results.append("ran")
+            except JudgeBudgetStop:
+                results.append("stopped")
+
+        with mock.patch("harness_eval.judge_phase.run_process", fake_run), \
+                mock.patch("harness_eval.judge_phase.credentials.source_path", return_value=real / "auth.json"):
+            threads = [threading.Thread(target=vote, args=(i,)) for i in range(4)]
+            [t.start() for t in threads]
+            [t.join() for t in threads]
+        # 1 回 $0.00165 < 上限 $0.002、2 回で超える。待っていた残りは起動しない
+        self.assertEqual(len(launched), 2, results)
+        self.assertEqual(sorted(results), ["ran", "ran", "stopped", "stopped"])
+
+
+class TestRetryUsageCounted(unittest.TestCase):
+    """提案: 再試行で捨てた呼び出しの使量も solver の使用量に足す（judge との費用比較が正確になる）。"""
+
+    def test_usage_summary_adds_retry_usage(self):
+        from harness_eval.costs import add_usage, empty_usage, usage_summary
+        retry = empty_usage()
+        add_usage(retry, {"input": 100, "output": 10}, 0.05)
+        u = usage_summary([], None, {}, "dev", retry)
+        self.assertEqual((u["solver"]["calls"], u["solver"]["input"], u["solver"]["cost_usd"]), (1, 100, 0.05))
+        self.assertAlmostEqual(u["total_cost_usd"], 0.05)

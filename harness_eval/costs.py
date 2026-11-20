@@ -78,7 +78,7 @@ def solver_cost(rec: Any, profile_model: str | None) -> tuple[float | None, str]
 
 
 def usage_summary(records: Iterable[Any], judge_usage: dict[str, Any] | None, profile_models: dict[str, str | None],
-                  tier: str | None) -> dict[str, Any]:
+                  tier: str | None, retry_usage: dict[str, Any] | None = None) -> dict[str, Any]:
     """summary.json の usage: solver / judge 別のトークン（入力・キャッシュ読み・キャッシュ書き・出力）と公開価格での費用、判定の割合。
     キャッシュから再利用した試行は、この実行では呼んでいないので数えない（from_cache_trials に件数だけ出す）。"""
     solver = empty_usage()
@@ -93,6 +93,9 @@ def usage_summary(records: Iterable[Any], judge_usage: dict[str, Any] | None, pr
         c, src = solver_cost(r, profile_models.get(r.profile_id))
         sources[src] = sources.get(src, 0) + 1
         add_usage(solver, r.tokens, c)
+    for k, v in (retry_usage or {}).items():  # 再試行で捨てた呼び出し（最後の記録に残らないが、使量と費用は出ている）
+        if k in solver and isinstance(v, (int, float)):
+            solver[k] += v
     judge = dict(judge_usage or empty_usage())
     total = solver["cost_usd"] + judge["cost_usd"]
     p = prices()

@@ -113,6 +113,28 @@ class JudgePhase:
                                                  + ("|in_place" if self._judge_profile(family).credentials == "in_place" else ""))
         return self._identities[k]
 
+    def _judge_over_budget(self, family: str) -> bool:
+        """費用の上限（--max-cost-usd・月の予算）に達しているか。"""
+        with self.lock:
+            over = self.opt.max_cost_usd is not None and self.spent >= self.opt.max_cost_usd
+        rem = self.month_remaining(family)
+        return over or (rem is not None and self.spent_api[family] >= rem)
+
+    def _settle_judge(self, adapter: Any, family: str, model: str | None, out: str) -> tuple[str | None, dict[str, Any], float | None, str | None]:
+        """判定 1 回の応答を読み、トークン・費用を使量・予算・台帳に計上する。(応答, トークン, 費用, 失敗理由)。"""
+        text, cli_cost, jerr = adapter.parse_judge(out)
+        tokens = adapter.judge_tokens(out)
+        cost = token_cost(tokens, model, family)
+        if cost is None:
+            cost = cli_cost
+        with self.lock:
+            add_usage(self.judge_usage, tokens, cost)
+            bm = self.judge_usage["by_model"].setdefault(f"{family}:{model}", {"calls": 0, "cost_usd": 0.0})
+            bm["calls"] += 1
+            bm["cost_usd"] += cost or 0.0
+        self._spend(cost, family, self._judge_billing(family))
+        return text, tokens, cost, jerr
+
     def _judge_call(self, family: str, model: str | None, prompt: str) -> tuple[str, dict[str, Any], float | None]:
         """判定 CLI を 1 回呼ぶ（認証だけ借りた判定専用の一時ホーム。配布物・追加引数は使わない）。(応答, トークン, 公開価格での費用)。"""
         prof = self._judge_profile(family)
@@ -134,10 +156,16 @@ class JudgePhase:
             elif prof.copy_credentials:
                 copy_credentials(prof.agent, tp)
             cmd = adapter.judge_cmd(model, in_place=True) if in_place else adapter.judge_cmd(model)
+            settled = None
             with self._inplace_locks[family] if in_place else contextlib.nullcontext():
+                if in_place and self._judge_over_budget(family):
+                    # 直列に待っていた間に、先の判定が残額を使い切ったかもしれない: 起動の直前に、ロックの中で確認する
+                    raise JudgeBudgetStop("費用の上限に到達したため判定を実行していません")
                 pr = run_process(cmd, tp.workdir, env, prompt, tp.stdout, tp.stderr, 300)
-            out = tp.stdout.read_text(encoding="utf-8", errors="replace") if tp.stdout.exists() else ""
-            err = tp.stderr.read_text(encoding="utf-8", errors="replace") if tp.stderr.exists() else ""
+                out = tp.stdout.read_text(encoding="utf-8", errors="replace") if tp.stdout.exists() else ""
+                err = tp.stderr.read_text(encoding="utf-8", errors="replace") if tp.stderr.exists() else ""
+                if in_place and not pr.launch_error and not pr.timed_out:
+                    settled = self._settle_judge(adapter, family, model, out)  # 費用を計上してから次の呼び出しを許可する
         finally:
             release_home(tp, self.opt.log)
             shutil.rmtree(tp.root, ignore_errors=True)
@@ -145,17 +173,7 @@ class JudgePhase:
             raise JudgeUnavailable(f"判定 CLI を起動できません: {pr.launch_error}")
         if pr.timed_out:
             raise JudgeUnavailable("判定が 300 秒でタイムアウト")
-        text, cli_cost, jerr = adapter.parse_judge(out)
-        tokens = adapter.judge_tokens(out)
-        cost = token_cost(tokens, model, family)
-        if cost is None:
-            cost = cli_cost
-        with self.lock:
-            add_usage(self.judge_usage, tokens, cost)
-            bm = self.judge_usage["by_model"].setdefault(f"{family}:{model}", {"calls": 0, "cost_usd": 0.0})
-            bm["calls"] += 1
-            bm["cost_usd"] += cost or 0.0
-        self._spend(cost, family, self._judge_billing(family))
+        text, tokens, cost, jerr = settled or self._settle_judge(adapter, family, model, out)
         if jerr or not text:
             raise JudgeUnavailable(f"判定が失敗: {jerr or '応答なし'} {(classify_stderr(err) or '')} {err.strip()[-200:]}".strip())
         return text, tokens, cost
@@ -173,10 +191,7 @@ class JudgePhase:
                 return {**hit, "cached": True}
             except (OSError, json.JSONDecodeError):
                 pass
-        with self.lock:
-            over = self.opt.max_cost_usd is not None and self.spent >= self.opt.max_cost_usd
-        rem = self.month_remaining(family)
-        if over or (rem is not None and self.spent_api[family] >= rem):
+        if self._judge_over_budget(family):
             raise JudgeBudgetStop("費用の上限に到達したため判定を実行していません")
         text, tokens, cost = self._judge_call(family, model, prompt)
         status, reason = parse_verdict(text)

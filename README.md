@@ -175,7 +175,7 @@ python -m harness_eval run --tasks examples/tasks --profiles "examples/profiles/
 リリース前・モデル移行時には次を使います。`--max-cost-usd 5` は**この run が追跡できる費用だけ**の上限で、
 先の doctor・スモークの費用は含みません。判定の費用は含みます。実行前の見積もりが上限を超えると、何も実行せずに止まります（終了コード 2）。
 プロバイダー側の厳密な支出制限ではなく、並列実行では超過し得ます。
-`pricing` のない Codex など不明な費用は上限計算に入りません（[費用の制限](docs/guide.html#cost)）。
+試行ごとの費用は呼び出しの終了時に一度だけ確定し、予算・台帳・集計に同じ額を渡します（`pricing` のない Codex も、トークンとモデルが分かれば公開価格で換算します。分からないものだけ上限計算に入りません。[費用の制限](docs/guide.html#cost)）。
 
 ```bash
 python -m harness_eval run --tasks examples/tasks --profiles "examples/profiles/claude-*.yaml" --trials 3 --baseline claude-baseline --max-cost-usd 5 --out "$OUT"
@@ -311,7 +311,7 @@ AWS の認証ファイルは、プロファイルが Bedrock（`CLAUDE_CODE_USE_
 - `HOME` は一時ホームのままで、`CODEX_HOME` だけ本物（環境変数 `CODEX_HOME`、なければ `~/.codex`）を指します。
   `codex exec --json --ephemeral -s read-only --skip-git-repo-check --ignore-user-config --ignore-rules --disable hooks` で呼び、
   利用者の `config.toml`（MCP・モデル・指示）・execpolicy の `.rules`・hooks を判定に入れません
-- 同じ系統の in_place の判定は同時に 1 本だけです（`--jobs` が 2 以上でも順に呼びます。更新の競合を避けるため）。
+- 同じ系統の in_place の判定は同時に 1 本だけです（`--jobs` が 2 以上でも順に呼びます。更新の競合を避けるため）。待っている判定は、起動の直前（ロックの中）に費用の残額を確かめ、先の判定の費用を計上してから次を起動します（上限に達していれば起動しません）。
   このロックは 1 つの `run` の中だけです。別の端末で同じ `~/.codex` を使う `codex` や別の `run` を同時に動かさないでください
 - `run` は始める前に `auth.json` の存在と期限を確かめます（値は表示しません）。期限まで 2 時間ない・切れている、または最終更新が 7 日より前なら止まります。
   `codex login`（または一度 `codex` を実行して更新）してからやり直してください
