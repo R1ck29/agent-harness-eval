@@ -89,11 +89,11 @@ PY
 
 | 指摘 | 対応 | コミット | テスト |
 |---|---|---|---|
-| 1 CRITICAL 採点の隔離 | command グレーダーを bwrap（実ホーム・他試行・未参照の評価資材・認証なし、ネットワークなし、作業フォルダ ro、環境変数は許可リスト、`--new-session`）で実行。bwrap のない OS は `grader_isolation: none` を記録し、decisive の verdict は INCONCLUSIVE | f460257, 8d828cd | `test_review5.py::GraderIsolation`（箱の中身・none の記録と verdict・pty で TIOCSTI が効かない） |
+| 1 CRITICAL 採点の隔離 | command グレーダーを bwrap（実ホーム・他試行・未参照の評価資材・認証なし、ネットワークなし、作業フォルダ ro、環境変数は許可リスト、`--new-session`）で実行。bwrap のない OS は `grader_isolation: none` を記録し、decisive の verdict は INCONCLUSIVE | f460257, 8d828cd, 37fac5c | `test_review5.py::GraderIsolation`（箱の中身・none の記録と verdict・pty で TIOCSTI が効かない） |
 | 2 CRITICAL solver の書ける範囲 | bwrap に渡すのは一時ホームと作業フォルダだけ（試行ルートのログ・採点記録は見えず書けない）。ホストの書き込みはリンクをたどらない（`open_new`・`replace_text`・`fresh_dir`・`snapshot` はリンク・FIFO を読まない） | f460257, 8d828cd | `SolverWriteScope`・`HostWritesDoNotFollowLinks` |
 | 3 CRITICAL 認証の書き戻し | `give_back` を廃止。複製は捨てるだけ。更新が要る期限なら事前確認で止める | 16f42ac | `test_cheatproof.py::Credentials`（壊れた JSON・空・別トークンでも本物は不変） |
 | 4 AWS ファイル | プロファイルが Bedrock を明示したときだけ。`env_unset` は戻さない | f460257 | `AwsFiles` |
-| 5 in_place の判定 | `--trust-judge-input` が必須（なければ起動前に SpecError）。in_place の判定の理由は記録しない。README に限界 | 8f75b92 | `test_judge_inplace.py::test_in_place_needs_the_judge_input_to_be_declared_trusted` |
+| 5 in_place の判定 | `--trust-judge-input` が必須（なければ起動前に SpecError）。in_place の判定の理由は記録しない。README に限界。`env` での `CODEX_HOME` 上書きによる迂回・失敗時の CLI 出力も止める | 8f75b92, d4c94bf | `test_judge_inplace.py::test_in_place_needs_the_judge_input_to_be_declared_trusted` |
 | 6 既存テスト本体 | 既存のテストの行の書き換えを `test_body_modified` として検出（確認の数が同じでも） | 96da63e | `test_review5b.py::TestBodyTamper`、`test_cheatproof.py` |
 | 7 --no-llm キャッシュ | キャッシュキーに LLM の有無。必須の LLM 判定が未実施の結果は INCONCLUSIVE | 96da63e | `TestNoLlmCacheAndVerdict` |
 | 8 cmp_passed=null | 明示的な null は比較から外す。フィールドのない旧記録だけ passed | 96da63e | `TestCmpPassedNull` |
