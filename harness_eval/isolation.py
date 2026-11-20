@@ -344,27 +344,29 @@ def _grader_material(cmd: str, extra_ro: list[str]) -> tuple[list[str], list[str
     return out, dirs
 
 
-def _exe_symlinks() -> list[str]:
-    """Python 実行ファイルの道筋にあるシンボリックリンクのフォルダ（隔離の中に同じ名前で張る）。"""
+def _link_chain(path: str) -> list[str]:
+    """path と、その道筋にあるシンボリックリンク（path 自身がリンクならその向き先の道筋も）。"""
     out: list[str] = []
-    exe = sys.executable
+    cur = path
     for _ in range(8):
-        for a in Path(exe).parents:
-            if a.is_symlink() and str(a) not in out and not str(a).startswith(tuple(SANDBOX_SYSTEM)):
+        for a in (Path(cur), *Path(cur).parents):
+            if a.is_symlink() and str(a) not in out:
                 out.append(str(a))
-        if not os.path.islink(exe):
+        if not os.path.islink(cur):
             break
-        t = os.readlink(exe)
-        exe = t if os.path.isabs(t) else os.path.join(os.path.dirname(exe), t)
+        t = os.readlink(cur)
+        cur = t if os.path.isabs(t) else os.path.join(os.path.dirname(cur), t)
     return out
 
 
 def grader_sandbox_cmd(cmd: str, workdir: Path, tmp_dir: Path, extra_ro: list[str] | None = None) -> list[str]:
     """採点コマンド（シェル文字列）を bwrap の中で動かすコマンドにする。"""
     ro = [p for p in SANDBOX_SYSTEM if os.path.exists(p)]
-    for prefix in (sys.prefix, sys.base_prefix, str(Path(os.path.realpath(sys.executable)).parents[1])):  # Python 本体と venv（秘密は置かれない）
-        if Path(prefix).resolve() != Path.home().resolve():
-            ro.append(prefix)
+    py = [sys.executable, sys.prefix, sys.base_prefix]
+    home = Path.home().resolve()
+    for prefix in (*py, str(Path(os.path.realpath(sys.executable)).parents[1])):  # Python 本体と venv（秘密は置かれない）
+        if Path(prefix).resolve() != home:
+            ro.append(os.path.realpath(prefix))  # 実体のパスで bind する（リンクの名前では bind しない）
     material, dirs = _grader_material(cmd, extra_ro or [])
     ro += material
     wd, tmp = str(workdir.resolve()), str(tmp_dir.resolve())
@@ -376,7 +378,10 @@ def grader_sandbox_cmd(cmd: str, workdir: Path, tmp_dir: Path, extra_ro: list[st
     args += ["--ro-bind", wd, wd, "--bind", tmp, tmp]
     for d in dict.fromkeys(dirs):
         args += ["--dir", d]
-    for link in _exe_symlinks():  # venv の python は別名のフォルダ（uv の cpython-3.12-… など）を経由する。道筋のリンクを張る
+    bound = [p for p in ro + [wd, tmp]]
+    links = [lk for src in py for lk in _link_chain(src)
+             if not any(lk == b or lk.startswith(b.rstrip("/") + "/") for b in bound) and not lk.startswith(tuple(SANDBOX_SYSTEM))]
+    for link in dict.fromkeys(links):  # venv の python は別名のフォルダ（uv の cpython-3.12-… など）を経由する。bind した実体への道筋のリンクを張る
         args += ["--symlink", os.path.realpath(link), link]
     args += ["--chdir", wd]
     return args + ["--", "/bin/sh", "-c", cmd]

@@ -159,6 +159,26 @@ class GraderIsolation(unittest.TestCase):
         self.assertNotEqual(seen["workdir"], "writable")  # 作業フォルダは読み取り専用（採点が他の採点・判定の入力を書き換えない）
         self.assertEqual(seen["home"], "grade_tmp")  # HOME は採点の一時フォルダ（実のホームではない）
 
+    @unittest.skipIf(os.name == "nt", "シンボリックリンクの作成に権限が要る")
+    def test_symlinked_python_prefix_is_bound_by_real_path_and_linked(self):
+        """CI の uv は Python を別名のリンク（cpython-3.10-… → cpython-3.10.22-…）で参照する。リンク名で bind せず、実体を bind してリンクを張る。"""
+        tmp = Path(tempfile.mkdtemp(prefix="r5-py-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        real = tmp / "uv" / "cpython-3.10.22"
+        write(real / "bin" / "python3", "")
+        link = tmp / "uv" / "cpython-3.10"
+        link.symlink_to(real)
+        (tmp / "wd").mkdir()
+        (tmp / "g").mkdir()
+        from harness_eval.isolation import grader_sandbox_cmd
+        with mock.patch.object(sys, "base_prefix", str(link)), mock.patch.object(sys, "prefix", str(link)), \
+                mock.patch.object(sys, "executable", str(link / "bin" / "python3")):
+            args = grader_sandbox_cmd("true", tmp / "wd", tmp / "g")
+        triples = [tuple(args[i:i + 3]) for i in range(len(args) - 2)]
+        self.assertNotIn(("--ro-bind", str(link), str(link)), triples)  # リンク名では bind しない（bwrap が衝突する）
+        self.assertIn(("--ro-bind", str(real.resolve()), str(real.resolve())), triples)
+        self.assertIn(("--symlink", str(real.resolve()), str(link)), triples)
+
     def test_box_has_no_controlling_terminal(self):
         """採点・solver の隔離の中の候補のコードは、制御端末（/dev/tty）に TIOCSTI で文字を打ち込んで、操作者のシェルへ抜けられない。"""
         import pty

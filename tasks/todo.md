@@ -83,3 +83,27 @@ PY
 ```
 - 任意（1 回）: `~/.codex/AGENTS.md` が判定に入るかの確認。`HOME=$(mktemp -d) codex exec --json --ephemeral -s read-only --skip-git-repo-check --ignore-user-config --ignore-rules --disable hooks -C "$(mktemp -d)" "渡されている指示文の見出しだけを列挙して。なければ none"`
 - 結果は docs/results/2026-11-19-sound-eval-defaults.md の「d」に追記する（一致率・費用・in_place が効いたか・AGENTS.md の有無）。`run` が「認証が…期限」で止まったら `codex login` してやり直す。
+
+## Codex レビュー（XREVIEW-AHE5-astra、CHANGES_REQUESTED・ブロッキング 14 件）への対応（11/20）
+グラフは `task-graph-fix.json`（cred-writeback → sandbox-trust → judge-trust → verdict-integrity → cost-integrity → pr-docs）。各ノードを graph-reviewer が独立に確認（sandbox-trust は 1 回目 FAIL: 端末経由の TIOCSTI 脱出と improve.py のリンク追従 → 8d828cd で直して PASS）。
+
+| 指摘 | 対応 | コミット | テスト |
+|---|---|---|---|
+| 1 CRITICAL 採点の隔離 | command グレーダーを bwrap（実ホーム・他試行・未参照の評価資材・認証なし、ネットワークなし、作業フォルダ ro、環境変数は許可リスト、`--new-session`）で実行。bwrap のない OS は `grader_isolation: none` を記録し、decisive の verdict は INCONCLUSIVE | f460257, 8d828cd | `test_review5.py::GraderIsolation`（箱の中身・none の記録と verdict・pty で TIOCSTI が効かない） |
+| 2 CRITICAL solver の書ける範囲 | bwrap に渡すのは一時ホームと作業フォルダだけ（試行ルートのログ・採点記録は見えず書けない）。ホストの書き込みはリンクをたどらない（`open_new`・`replace_text`・`fresh_dir`・`snapshot` はリンク・FIFO を読まない） | f460257, 8d828cd | `SolverWriteScope`・`HostWritesDoNotFollowLinks` |
+| 3 CRITICAL 認証の書き戻し | `give_back` を廃止。複製は捨てるだけ。更新が要る期限なら事前確認で止める | 16f42ac | `test_cheatproof.py::Credentials`（壊れた JSON・空・別トークンでも本物は不変） |
+| 4 AWS ファイル | プロファイルが Bedrock を明示したときだけ。`env_unset` は戻さない | f460257 | `AwsFiles` |
+| 5 in_place の判定 | `--trust-judge-input` が必須（なければ起動前に SpecError）。in_place の判定の理由は記録しない。README に限界 | 8f75b92 | `test_judge_inplace.py::test_in_place_needs_the_judge_input_to_be_declared_trusted` |
+| 6 既存テスト本体 | 既存のテストの行の書き換えを `test_body_modified` として検出（確認の数が同じでも） | 96da63e | `test_review5b.py::TestBodyTamper`、`test_cheatproof.py` |
+| 7 --no-llm キャッシュ | キャッシュキーに LLM の有無。必須の LLM 判定が未実施の結果は INCONCLUSIVE | 96da63e | `TestNoLlmCacheAndVerdict` |
+| 8 cmp_passed=null | 明示的な null は比較から外す。フィールドのない旧記録だけ passed | 96da63e | `TestCmpPassedNull` |
+| 9 全滅したタスク | 両条件とも有効な試行がない対象タスクは INCONCLUSIVE | 96da63e | `TestAllInvalidTask` |
+| 10 negate | 系統ごとの確定ラベルを反転してから合意（UNKNOWN は票にしない） | 8f75b92 | `NegateAcrossFamilies` |
+| 11 判定キャッシュのキー | 実行ファイル（実体・大きさ・更新時刻）・CLI の版・実効モデル・経路を識別子としてキーに | 8f75b92 | `JudgeIdentity`（CLI を取り替えるとキャッシュを使わない） |
+| 12 校正 | 盲検化後の入力で重複除去。verdict は合格例・不合格例の両方と各一致率を要求 | 8f75b92 | `CalibrationIndependence` |
+| 13 費用 | 呼び出しごとに公開価格で一度確定し、予算・台帳・集計に同じ額（pricing なしの Codex も） | 4808664 | `TestSolverCostSettledOnce` |
+| 14 in_place の直列判定 | ロックの中で起動直前に残額を確認し、費用を計上してから次を許可 | 4808664 | `TestInPlaceBudgetInsideLock` |
+| 提案: 再試行分の使量 | 捨てた試行の使量を usage.solver に足す | 4808664 | `TestRetryUsageCounted` |
+
+- 見送り（理由つき）: 提案「別 run との認証競合を検出する安定したロック」は、`auth.json` 本体を置き換える CLI の更新と別にロックファイルを作る必要があり、本物の `~/.codex` に新しいファイルを置かない方針と衝突するため見送り（README の運用条件に「単独実行」を明記済み）。
+- 隔離された採点が見せるもの: 採点コマンドに書いた実在する絶対パスと `command` グレーダーの `ro:` だけ。`{task_dir}` や `/tmp` のような広いパスを書くとその範囲が見える（タスク作者の責任）。
