@@ -242,7 +242,7 @@ def _judge_checks(j: dict[str, Any], agents: set[str], decided: int, disagreemen
     return fail, prov
 
 
-def _integrity(recs: list[TrialRecord], cand: str, inconclusive: list[str]) -> dict[str, Any]:
+def _integrity(recs: list[TrialRecord], cand: str, inconclusive: list[str], rules: Rules | None = None) -> dict[str, Any]:
     """leak（INVALID。有効率に入る）・tamper（不合格）・隔離なしの試行を数える。隔離のない試行で候補が答えを見に行った形跡があれば、
     トランスクリプトに出ない読み方もありうるので結論を出さない（隔離ありなら、見に行っても見えないので警告だけ）。"""
     leak = [r for r in recs if invalid_reason(r) == "leak"]
@@ -253,12 +253,19 @@ def _integrity(recs: list[TrialRecord], cand: str, inconclusive: list[str]) -> d
     cand_open_leak = [r for r in leak if r.profile_id == cand and (r.meta or {}).get("sandbox") != "bwrap"]
     parts = [f"答え・試行の外の参照（INVALID） {len(leak)} 件", f"見えているテストの改ざん（不合格） {len(tamper)} 件",
              f"隔離なしの試行 {open_} 件" + (f"（記録なし {unknown} 件）" if unknown else "")]
+    open_grader = sum(1 for r in recs if (r.meta or {}).get("grader_isolation") == "none")
+    if open_grader:
+        parts.append(f"隔離なしの採点 {open_grader} 件（候補のコードがホストの権限で動いた）")
     msg = "、".join(parts)
+    if open_grader and (rules is None or rules.required_tier == "decisive"):
+        inconclusive.append(f"採点コマンドを隔離せずに実行した試行が {open_grader} 件あります（bwrap のない OS）。候補のコードが採点の中で"
+                            "ホストの権限で動き、結果を操作・認証を読めたかもしれないため、decisive では結論を出しません（Linux + bwrap で実行し直してください）")
+        return _c("integrity", "fail", inconclusive[-1] + f"（{msg}）")
     if cand_open_leak:
         inconclusive.append(f"隔離なしの試行で、候補が評価の答え・試行の外を参照しました（{len(cand_open_leak)} 件）。"
                             "検出できない読み方もありうるため結論を出しません")
         return _c("integrity", "fail", inconclusive[-1] + f"（{msg}）")
-    return _c("integrity", "warn" if (leak or tamper or open_) else ("n/a" if unknown == len(recs) else "ok"), msg)
+    return _c("integrity", "warn" if (leak or tamper or open_ or open_grader) else ("n/a" if unknown == len(recs) else "ok"), msg)
 
 
 def _c(cid: str, status: str, message: str) -> dict[str, Any]:
@@ -314,7 +321,7 @@ def verdict(records: list[TrialRecord], summary: dict[str, Any], rules: Rules,
         checks.append(_c("errors", "warn" if bad else "ok", f"無効な試行 {len(bad)}/{len(recs)}（{err_rate:.0%}）{by_type or ''}"))
 
     # 1b. ズル対策（評価の答えを見た形跡・見えているテストの改ざん・隔離の有無）
-    checks.append(_integrity(recs, cand, inconclusive))
+    checks.append(_integrity(recs, cand, inconclusive, rules))
 
     # 2. 比較（対象タスク）
     pairs, one_sided = _task_pairs(recs, base, cand, target)

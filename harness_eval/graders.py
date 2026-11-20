@@ -12,15 +12,16 @@ status:
 from __future__ import annotations
 
 import json
-import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .isolation import fill
+from .isolation import fill, grader_env, grader_isolation, grader_sandbox_cmd, open_new
 from .record import TrialRecord
 from .spec import Grader
 
@@ -135,16 +136,27 @@ def grade_one(g: Grader, rec: TrialRecord, workdir: Path, task_dir: Path | None 
         if task_dir is not None:
             ph["task_dir"] = str(task_dir)
         cmd = fill(str(p["run"]), ph, quote=True)
-        rec_path = workdir.parent / "record_for_grader.json"
-        rec_path.write_text(json.dumps(rec.to_dict(), ensure_ascii=False), encoding="utf-8")
-        env = {**os.environ, "TRIAL_WORKDIR": str(workdir), "TRIAL_RECORD": str(rec_path)}
-        if tmp_dir is not None:  # 採点の一時ファイル（隠しテストを当てた木など）は試行ごとのフォルダへ。採点のあとに消す
-            env.update({"TMPDIR": str(tmp_dir), "TEMP": str(tmp_dir), "TMP": str(tmp_dir)})
+        mode = grader_isolation()
+        rec.meta["grader_isolation"] = mode  # "none" なら候補のコードがホストの権限で動いた（verdict が decisive では結論を出さない）
+        own_tmp = tmp_dir is None
+        gtmp = Path(tempfile.mkdtemp(prefix="ahe-grade-")) if own_tmp else tmp_dir
         try:
-            r = subprocess.run(cmd, shell=True, cwd=workdir, env=env, capture_output=True, text=True,
-                               timeout=int(p.get("timeout_s", 120)), stdin=subprocess.DEVNULL)
-        except subprocess.TimeoutExpired:
-            return False, "採点コマンドがタイムアウト"
+            rec_path = gtmp / "record_for_grader.json"  # 試行ルートではなく採点の一時フォルダ（solver から見えない・採点のあとに消える）
+            with open_new(rec_path, "w") as fh:
+                fh.write(json.dumps(rec.to_dict(), ensure_ascii=False))
+            env = grader_env(workdir, gtmp, rec_path)
+            try:
+                if mode == "bwrap":
+                    r = subprocess.run(grader_sandbox_cmd(cmd, workdir, gtmp, [fill(x, ph) for x in p.get("ro", [])]), cwd=workdir, env=env,
+                                       capture_output=True, text=True, timeout=int(p.get("timeout_s", 120)), stdin=subprocess.DEVNULL)
+                else:
+                    r = subprocess.run(cmd, shell=True, cwd=workdir, env=env, capture_output=True, text=True,
+                                       timeout=int(p.get("timeout_s", 120)), stdin=subprocess.DEVNULL)
+            except subprocess.TimeoutExpired:
+                return False, "採点コマンドがタイムアウト"
+        finally:
+            if own_tmp:
+                shutil.rmtree(gtmp, ignore_errors=True)
         tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
         return r.returncode == 0, f"exit={r.returncode} {tail[0][:200]}"
     raise ValueError(t)

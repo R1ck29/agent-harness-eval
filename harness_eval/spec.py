@@ -22,7 +22,7 @@ GRADER_FIELDS: dict[str, set[str]] = {
     "file_exists": {"path"},
     "file_contains": {"path", "pattern"},
     "regex": {"pattern"},
-    "command": {"run", "timeout_s"},
+    "command": {"run", "timeout_s", "ro"},
     "llm": {"criteria", "focus", "max_chars"},
     # 過程（process）を見るグレーダー
     "tool_used": {"tool", "input_match", "min", "max", "include_subagents"},

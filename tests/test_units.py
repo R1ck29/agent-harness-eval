@@ -796,7 +796,7 @@ class HarvestTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertTrue((root / "references" / "h-a" / "total.txt").is_file())
         self.assertEqual(selftest(load_task(root / "tasks" / "h-a.yaml")), "")  # 正解例で通り、何もしなければ落ちる
-        self.assertTrue(marker.exists())  # selftest（人が確認したあと）では実行される
+        # selftest（人が確認したあと）では実行される。採点は隔離（bwrap）の中なので、印のファイルは外に残らない（実行されたことは上の結果で分かる）
         always = {**good, "id": "h-b", "check_script": "import sys\nsys.exit(0)\n", "graders": []}
         self.assertEqual(check_written(write_draft(always, root, origin)), "")  # 実行しないので harvest では分からない
         self.assertIn("何もしなくても", selftest(load_task(root / "tasks" / "h-b.yaml")))

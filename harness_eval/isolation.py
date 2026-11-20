@@ -22,6 +22,7 @@ import platform
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -171,6 +172,16 @@ def fill(s: str, ph: dict[str, str], quote: bool = False) -> str:
     return out
 
 
+def _declares_bedrock(profile: Profile) -> bool:
+    """Bedrock を使うと、プロファイル自身が宣言しているか（env に書く、または inherit_env に書いて親の環境で有効）。"""
+    if profile.agent != "claude_code":
+        return False
+    v = profile.env.get("CLAUDE_CODE_USE_BEDROCK")
+    if v is None and "CLAUDE_CODE_USE_BEDROCK" in profile.inherit_env:
+        v = os.environ.get("CLAUDE_CODE_USE_BEDROCK")
+    return str(v or "").strip().lower() not in ("", "0", "false")
+
+
 def build_env(profile: Profile, tp: TrialPaths, config_env: str) -> dict[str, str]:
     """試行の環境変数。親の環境からは許可リスト（BASE_ENV）と inherit_env に書いたものだけを渡す。"""
     dropped = set(INHERITED_UNSET) | set(profile.env_unset)
@@ -185,10 +196,12 @@ def build_env(profile: Profile, tp: TrialPaths, config_env: str) -> dict[str, st
     if profile.isolate_home:
         env["HOME"] = str(tp.home)
         env["USERPROFILE"] = str(tp.home)
-        # ホームを差し替えても AWS（Bedrock）の認証情報ファイルは本物を参照させる
-        for var, rel in (("AWS_SHARED_CREDENTIALS_FILE", ".aws/credentials"), ("AWS_CONFIG_FILE", ".aws/config")):
-            if var not in env and (real_home / rel).is_file():
-                env[var] = str(real_home / rel)
+        # ホームを差し替えても AWS（Bedrock）の認証情報ファイルは本物を参照させる。ただしプロファイルが Bedrock を明示したときだけ
+        # （未宣言のプロファイルに実の AWS 認証を渡さない。env_unset で外した変数も戻さない）
+        if _declares_bedrock(profile):
+            for var, rel in (("AWS_SHARED_CREDENTIALS_FILE", ".aws/credentials"), ("AWS_CONFIG_FILE", ".aws/config")):
+                if var not in env and var not in dropped and (real_home / rel).is_file():
+                    env[var] = str(real_home / rel)
     env[config_env] = str(tp.config_dir)
     ph = placeholders(tp, profile)
     for k, v in profile.env.items():
@@ -214,7 +227,7 @@ def release_home(tp: TrialPaths, log=None) -> list[str]:
 
 
 # ---------------------------------------------------------------- 隔離（bubblewrap）
-# 見えるもの = 試行ディレクトリ（一時ホーム・作業ディレクトリ。書ける）、読み取り専用のシステム、エージェントの CLI の本体、
+# 見えるもの = 一時ホーム・作業ディレクトリ（書ける。試行ルートのログ・採点記録は見えない）、読み取り専用のシステム、エージェントの CLI の本体、
 # プロファイルの sandbox_ro。--out の他の試行・タスクのフォルダ（参照解・採点）・本物のホーム（認証）・/tmp の残りは見えない。
 # ネットワークはモデルの API のために残す（上流への参照は leak 検査が INVALID にする）。agent-verify-layer の
 # eval/tools/sandbox-run.sh と同じ見え方
@@ -275,12 +288,98 @@ def sandbox_cmd(cmd: list[str], tp: TrialPaths, env: dict[str, str], profile: Pr
             "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", "/home", "--tmpfs", "/workspace"]
     for p in dict.fromkeys(ro):
         args += ["--ro-bind", p, p]
-    trial = str(tp.root.resolve())
-    args += ["--bind", trial, trial, "--chdir", str(tp.workdir.resolve())]
+    # solver が書ける場所は一時ホームと作業ディレクトリだけ（TMPDIR は隔離の中の /tmp）。標準出力・標準エラーのログ・採点記録・
+    # 費用記録のある試行ルート（tp.root）は見せない・書かせない（ログを書き換えて合否・費用・leak 判定を操作させない）
+    writable = [str(tp.home.resolve()), str(tp.workdir.resolve())]
+    for w in writable:
+        args += ["--bind", w, w]
+    args += ["--chdir", str(tp.workdir.resolve())]
     for k in ("TMPDIR", "TEMP", "TMP"):
         args += ["--setenv", k, "/tmp"]
-    run = real if not _visible(exe, ro + [trial]) else exe
+    run = real if not _visible(exe, ro + writable) else exe
     return args + ["--", run, *cmd[1:]]
+
+
+# ---------------------------------------------------------------- command グレーダーの隔離
+# 採点は候補のコード（実装・テスト）を import / 実行しうる。solver と同等以上に閉じる: 実のホーム・他の試行・採点に要らない評価資材・
+# 認証・ネットワークを見せず、作業フォルダは読み取り専用、環境変数は許可リストだけ。bwrap がない OS では「隔離なし」を記録する
+# （verdict が decisive では結論を出さない）。
+_GRADER_ENV_DROP = ("PROXY", "CERT", "_CA_", "CA_BUNDLE", "SSL_")
+
+
+def grader_isolation() -> str:
+    """"bwrap"（採点を隔離して実行できる）/ "none"（Linux 以外・bwrap が使えない。候補のコードがホストの権限で動く）。"""
+    return "bwrap" if sys.platform.startswith("linux") and bwrap_problem() is None else "none"
+
+
+def grader_env(workdir: Path, tmp_dir: Path, record_path: Path) -> dict[str, str]:
+    """採点コマンドの環境変数: 許可リスト（BASE_ENV。プロキシ・証明書は除く）+ TRIAL_*・一時フォルダ。HOME は採点の一時フォルダ。"""
+    env = {k: v for k, v in os.environ.items() if base_allowed(k) and not any(m in k.upper() for m in _GRADER_ENV_DROP)}
+    env.update({"TRIAL_WORKDIR": str(workdir), "TRIAL_RECORD": str(record_path), "HOME": str(tmp_dir), "USERPROFILE": str(tmp_dir),
+                "TMPDIR": str(tmp_dir), "TEMP": str(tmp_dir), "TMP": str(tmp_dir)})
+    return env
+
+
+def _grader_material(cmd: str, extra_ro: list[str]) -> tuple[list[str], list[str]]:
+    """採点コマンドが参照する評価資材（採点スクリプト・正解データなど。コマンドに書かれた実在する絶対パスと、明示した ro）と、
+    `{task_dir}/../checks/x.py` のように `..` で戻る道筋のために隔離の中に作る空のフォルダ（中身は見せない）。"""
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:
+        toks = cmd.split()
+    home = Path.home().resolve()
+    out: list[str] = []
+    dirs: list[str] = []
+    for t in [*toks, *extra_ro]:
+        if not os.path.isabs(t) or not os.path.exists(t):
+            continue
+        r = Path(t).resolve()
+        if r == home or r == Path(r.anchor) or r in home.parents:  # ホームそのもの・その親・ルートは見せない
+            continue
+        out.append(str(r))
+        parts = Path(t).parts
+        for i, part in enumerate(parts):
+            if part == "..":
+                dirs.append(os.path.normpath(os.path.join(*parts[:i])))
+    return out, dirs
+
+
+def _exe_symlinks() -> list[str]:
+    """Python 実行ファイルの道筋にあるシンボリックリンクのフォルダ（隔離の中に同じ名前で張る）。"""
+    out: list[str] = []
+    exe = sys.executable
+    for _ in range(8):
+        for a in Path(exe).parents:
+            if a.is_symlink() and str(a) not in out and not str(a).startswith(tuple(SANDBOX_SYSTEM)):
+                out.append(str(a))
+        if not os.path.islink(exe):
+            break
+        t = os.readlink(exe)
+        exe = t if os.path.isabs(t) else os.path.join(os.path.dirname(exe), t)
+    return out
+
+
+def grader_sandbox_cmd(cmd: str, workdir: Path, tmp_dir: Path, extra_ro: list[str] | None = None) -> list[str]:
+    """採点コマンド（シェル文字列）を bwrap の中で動かすコマンドにする。"""
+    ro = [p for p in SANDBOX_SYSTEM if os.path.exists(p)]
+    for prefix in (sys.prefix, sys.base_prefix, str(Path(os.path.realpath(sys.executable)).parents[1])):  # Python 本体と venv（秘密は置かれない）
+        if Path(prefix).resolve() != Path.home().resolve():
+            ro.append(prefix)
+    material, dirs = _grader_material(cmd, extra_ro or [])
+    ro += material
+    wd, tmp = str(workdir.resolve()), str(tmp_dir.resolve())
+    ro = [p for p in dict.fromkeys(ro) if p not in (wd, tmp)]
+    args = ["bwrap", "--die-with-parent", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net",
+            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", "/home", "--tmpfs", "/workspace"]
+    for p in ro:
+        args += ["--ro-bind", p, p]
+    args += ["--ro-bind", wd, wd, "--bind", tmp, tmp]
+    for d in dict.fromkeys(dirs):
+        args += ["--dir", d]
+    for link in _exe_symlinks():  # venv の python は別名のフォルダ（uv の cpython-3.12-… など）を経由する。道筋のリンクを張る
+        args += ["--symlink", os.path.realpath(link), link]
+    args += ["--chdir", wd]
+    return args + ["--", "/bin/sh", "-c", cmd]
 
 
 def run_install(profile: Profile, tp: TrialPaths, env: dict[str, str], timeout_s: int = 300) -> None:
@@ -313,14 +412,36 @@ def run_install(profile: Profile, tp: TrialPaths, env: dict[str, str], timeout_s
 
 
 def snapshot(d: Path) -> dict[str, str]:
+    """作業ディレクトリの {相対パス: ハッシュ}。リンクはたどらない（中身ではなく向き先を記録する）。FIFO などの特殊ファイルは読まない
+    （solver が置いたリンク・FIFO で、ホストが本物のファイルを読んだり固まったりしないように）。"""
     out = {}
-    for f in d.rglob("*"):
-        if f.is_file():
+    for dirpath, _dirs, files in os.walk(d, followlinks=False):
+        for name in files + [x for x in _dirs if os.path.islink(os.path.join(dirpath, x))]:
+            f = Path(dirpath) / name
             try:
-                out[f.relative_to(d).as_posix()] = hashlib.sha1(f.read_bytes()).hexdigest()
+                st = f.lstat()
+                if stat.S_ISLNK(st.st_mode):
+                    data = b"link:" + os.readlink(f).encode("utf-8", "surrogateescape")
+                elif stat.S_ISREG(st.st_mode):
+                    data = f.read_bytes()
+                else:
+                    continue
+                out[f.relative_to(d).as_posix()] = hashlib.sha1(data).hexdigest()
             except OSError:
                 pass
     return out
+
+
+def open_new(path: Path, mode: str = "wb"):
+    """ホストが書くファイルを開く。リンク・通常ファイル以外には書かない（リンクの先の既存ファイルを壊さない）。"""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        st = None
+    if st is not None and not stat.S_ISREG(st.st_mode):
+        raise OSError(f"リンク・特殊ファイルには書きません: {path}")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), 0o600)
+    return os.fdopen(fd, mode)
 
 
 def _kill_tree(p: subprocess.Popen) -> None:
@@ -365,7 +486,11 @@ def run_process(cmd: list[str], cwd: Path, env: dict[str, str], stdin_text: str 
     タイムアウト時は子プロセスごと終了させる。"""
     t0 = time.monotonic()
     kw: dict = {"start_new_session": True} if os.name != "nt" else {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined]
-    with open(stdout_path, "wb") as out, open(stderr_path, "wb") as err:
+    try:
+        out_f, err_f = open_new(stdout_path), open_new(stderr_path)
+    except OSError as e:
+        return ProcResult(None, False, 0, launch_error=f"{type(e).__name__}: {e}")
+    with out_f as out, err_f as err:
         try:
             p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=out, stderr=err,
                                  stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL, **kw)
