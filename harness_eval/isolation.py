@@ -17,6 +17,7 @@ Codex は OS の一時ディレクトリ配下の CODEX_HOME だと補助バイ�
 from __future__ import annotations
 
 from contextlib import ExitStack
+import errno
 import hashlib
 import os
 import platform
@@ -30,6 +31,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import BinaryIO
 
 from . import credentials
 from .spec import ROUTE_VARS, Profile
@@ -473,12 +475,14 @@ def fresh_dir(path: Path) -> Path:
 
 
 def _kill_tree(p: subprocess.Popen) -> None:
-    if p.poll() is not None:
-        return
     if os.name == "nt":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True)
+        if p.poll() is None:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True)
         return
     try:
+        if p.poll() is not None:
+            os.killpg(p.pid, signal.SIGKILL)  # The leader may have exited while descendants still hold its pipes.
+            return
         os.killpg(p.pid, signal.SIGTERM)
         try:
             p.wait(5)
@@ -521,23 +525,73 @@ def run_process(cmd: list[str], cwd: Path, env: dict[str, str], stdin_text: str 
                                  stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL, **kw)
         except OSError as e:
             return ProcResult(None, False, 0, launch_error=f"{type(e).__name__}: {e}")
+
+        log_lock = threading.Lock()
+        stop_writing = False
+        errors: list[OSError] = []
+
+        def drain(pipe: BinaryIO, log: BinaryIO) -> None:
+            try:
+                with pipe:
+                    while chunk := os.read(pipe.fileno(), 64 * 1024):
+                        with log_lock:
+                            if stop_writing:
+                                return
+                            log.write(chunk)
+                            log.flush()
+            except OSError as e:
+                errors.append(e)
+
+        def send_input(pipe: BinaryIO, prompt: str) -> None:
+            try:
+                with pipe:
+                    pipe.write(prompt.encode("utf-8"))
+            except BrokenPipeError:
+                pass
+            except OSError as e:
+                # Windows may report a closed child stdin as EINVAL.
+                if os.name != "nt" or e.errno != errno.EINVAL:
+                    errors.append(e)
+
+        assert p.stdout is not None and p.stderr is not None
+        workers = [threading.Thread(target=drain, args=(pipe, log), daemon=True)
+                   for pipe, log in ((p.stdout, out), (p.stderr, err))]
+        if p.stdin is not None and stdin_text is not None:
+            workers.append(threading.Thread(target=send_input, args=(p.stdin, stdin_text), daemon=True))
+
+        def wait_workers(deadline: float) -> None:
+            for worker in workers:
+                worker.join(max(0, deadline - time.monotonic()))
+            if any(worker.is_alive() for worker in workers):
+                raise subprocess.TimeoutExpired(cmd, timeout_s)
+
         with _RUNNING_LOCK:
             _RUNNING.add(p)
+        timed_out = False
+        deadline = time.monotonic() + timeout_s
         try:
-            # communicate は標準入力の書き込みとタイムアウトを同時に扱う（子が入力を読まなくても詰まらない）
-            stdout, stderr = p.communicate(stdin_text.encode("utf-8") if stdin_text is not None else None, timeout=timeout_s)
-            timed_out = False
+            for worker in workers:
+                worker.start()
+            p.wait(timeout=max(0, deadline - time.monotonic()))
+            wait_workers(deadline)
         except subprocess.TimeoutExpired:
             _kill_tree(p)
             timed_out = True
+            deadline = time.monotonic() + 5
             try:
-                stdout, stderr = p.communicate(timeout=5)
-            except subprocess.TimeoutExpired as partial:
-                # 子孫がパイプを持ったままの場合も、回収済みの出力を残して戻る。
-                stdout, stderr = partial.output, partial.stderr
+                p.wait(timeout=max(0, deadline - time.monotonic()))
+                wait_workers(deadline)
+            except subprocess.TimeoutExpired:
+                # A descendant can retain the pipes. Keep the bytes already written and return.
+                _kill_tree(p)
+        except BaseException:
+            _kill_tree(p)
+            raise
         finally:
+            with log_lock:
+                stop_writing = True
             with _RUNNING_LOCK:
                 _RUNNING.discard(p)
-        out.write(stdout or b"")
-        err.write(stderr or b"")
+        if errors:
+            raise errors[0]
     return ProcResult(p.returncode, timed_out, int((time.monotonic() - t0) * 1000))

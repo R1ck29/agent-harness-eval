@@ -1,4 +1,5 @@
 """単体テスト: 定義の検証・パーサ・指標・グレーダー・隔離。python -m unittest discover -s tests"""
+import errno
 import json
 import os
 import shutil
@@ -684,6 +685,23 @@ install:
     def test_launch_failure(self):
         pr = run_process(["definitely-not-a-command-xyz"], self.tmp, dict(os.environ), None, self.tmp / "o", self.tmp / "e", 5)
         self.assertIsNotNone(pr.launch_error)
+
+    def test_windows_closed_stdin_preserves_the_process_result(self) -> None:
+        from types import SimpleNamespace
+        from harness_eval import isolation
+
+        windows_os = SimpleNamespace(**vars(os))
+        windows_os.name = "nt"
+        stdin = mock.MagicMock()
+        stdin.write.side_effect = OSError(errno.EINVAL, "closed pipe")
+        with write(self.tmp / "child-out", "usage record\n").open("rb") as stdout, \
+                write(self.tmp / "child-err", "").open("rb") as stderr:
+            child = mock.Mock(stdin=stdin, stdout=stdout, stderr=stderr, returncode=0)
+            with mock.patch.object(isolation, "os", windows_os), mock.patch.object(isolation.subprocess, "Popen", return_value=child), \
+                    mock.patch.object(isolation.subprocess, "CREATE_NEW_PROCESS_GROUP", 0, create=True):
+                pr = run_process(["fake-cli"], self.tmp, {}, "prompt", self.tmp / "o", self.tmp / "e", 5)
+        self.assertEqual(pr.returncode, 0)
+        self.assertEqual((self.tmp / "o").read_text(encoding="utf-8"), "usage record\n")
 
 
 class HarvestTests(unittest.TestCase):

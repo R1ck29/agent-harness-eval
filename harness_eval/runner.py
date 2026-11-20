@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from . import __version__, credentials
 from .adapters import classify_stderr, get_adapter
@@ -40,6 +40,19 @@ from .record import EXCLUDED_ERRORS, TrialRecord
 from .spec import NO_SPLIT, ROUTE_VARS, Profile, SpecError, Task, load_profile, reject_in_place, split_mixing
 
 NOT_RUN_ERRORS = {"budget_stop"}
+_SOLVER_LOG_LIMIT = 16 * 1024 * 1024
+
+
+def _solver_accounting_lines(path: Path) -> Iterator[str]:
+    """Read bounded JSONL records, dropping any single line over the log processing limit."""
+    if path.is_file():
+        with path.open("rb") as fh:
+            while line := fh.readline(_SOLVER_LOG_LIMIT + 1):
+                if len(line) <= _SOLVER_LOG_LIMIT:
+                    yield line.decode("utf-8", errors="replace")
+                else:
+                    while line and not line.endswith(b"\n"):
+                        line = fh.readline(64 * 1024)
 
 CACHE_SCHEMA = "7"  # 試行レコードの形式を変えたら上げる（古いキャッシュを使わないため）。7: 隔離・leak・tamper・環境変数の許可リスト
 
@@ -453,6 +466,13 @@ class Runner(JudgePhase):
             return rec
         pr = run_process(cmd, tp.workdir, env, task.prompt, tp.stdout, tp.stderr, task.timeout_s)
         rec.wall_ms = pr.wall_ms
+        if any(log.is_file() and log.stat().st_size > _SOLVER_LOG_LIMIT for log in (tp.stdout, tp.stderr)):
+            parsed = adapter.parse(_solver_accounting_lines(tp.stdout), profile, usage_only=True)
+            rec.tokens, rec.cost_usd, rec.cost_source = parsed.tokens, parsed.cost_usd, parsed.cost_source
+            rec.valid = False
+            rec.invalid_reason = "harness_error"
+            rec.error = {"type": "harness_error", "message": "solver のログが解析上限（16 MiB）を超えました"}
+            return rec
         out_lines = tp.stdout.read_text(encoding="utf-8", errors="replace").splitlines() if tp.stdout.exists() else []
         stderr = tp.stderr.read_text(encoding="utf-8", errors="replace") if tp.stderr.exists() else ""
         parsed = adapter.parse(out_lines, profile)

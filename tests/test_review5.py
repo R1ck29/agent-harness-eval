@@ -198,6 +198,35 @@ class HostWritesDoNotFollowLinks(unittest.TestCase):
         self.assertEqual(out.read_text(encoding="utf-8"), "True\n")
         self.assertEqual(err.read_text(encoding="utf-8"), "True\n")
 
+    def test_large_solver_output_is_saved_while_running(self) -> None:
+        out, err = self.tmp / "stdout.jsonl", self.tmp / "stderr.txt"
+        size = 8 * 1024 * 1024
+        probe = (
+            "import pathlib, sys, time\n"
+            "out, err, size = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), int(sys.argv[3])\n"
+            "for _ in range(size // 65536):\n"
+            "    sys.stdout.buffer.write(b'o' * 65536)\n"
+            "    sys.stderr.buffer.write(b'e' * 65536)\n"
+            "sys.stdout.flush(); sys.stderr.flush()\n"
+            "while min(out.stat().st_size, err.stat().st_size) < size:\n"
+            "    time.sleep(0.01)\n"
+            "print('usage record')\n"
+        )
+        res = isolation.run_process([sys.executable, "-c", probe, str(out), str(err), str(size)], self.tmp,
+                                    dict(os.environ), None, out, err, 5)
+        self.assertFalse(res.timed_out)
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(out.read_bytes(), b"o" * size + b"usage record\n")
+        self.assertEqual(err.read_bytes(), b"e" * size)
+
+    def test_timeout_preserves_usage_when_child_does_not_read_stdin(self) -> None:
+        out, err = self.tmp / "stdout.jsonl", self.tmp / "stderr.txt"
+        probe = "import time; print('usage record', flush=True); time.sleep(60)"
+        res = isolation.run_process([sys.executable, "-c", probe], self.tmp, dict(os.environ), "x" * (1024 * 1024),
+                                    out, err, 1)
+        self.assertTrue(res.timed_out)
+        self.assertEqual(out.read_bytes(), b"usage record\n")
+
     @unittest.skipIf(os.name == "nt", "シンボリックリンクの作成に権限が要る")
     def test_snapshot_skips_special_files_and_links(self):
         wd = self.tmp / "wd"

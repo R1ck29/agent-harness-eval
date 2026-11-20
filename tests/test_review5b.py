@@ -156,6 +156,12 @@ class TestSolverCostSettledOnce(unittest.TestCase):
     """#13: pricing のない Codex 試行も、公開価格で呼び出しごとに費用を確定し、予算・台帳・集計に同じ額を渡す。"""
 
     def test_codex_without_pricing_is_costed_in_budget_ledger_and_summary(self):
+        self.check_codex_cost(large_output=False)
+
+    def test_oversized_solver_log_keeps_the_usage_and_ledger(self) -> None:
+        self.check_codex_cost(large_output=True)
+
+    def check_codex_cost(self, large_output: bool) -> None:
         import json
         import shutil
         from test_cheatproof import run_cli, write
@@ -163,15 +169,29 @@ class TestSolverCostSettledOnce(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         ex = tmp / "examples"
         shutil.copytree(ROOT / "examples", ex)
+        fake = ROOT / "tests" / "fake_agents" / "fake_codex.py"
+        if large_output:
+            fake = write(tmp / "large_output.py",
+                         "import runpy, sys\n"
+                         "if '--version' not in sys.argv:\n"
+                         "    for _ in range(272):\n"
+                         "        sys.stdout.write('x' * 65536)\n"
+                         "    print()\n"
+                         f"runpy.run_path({str(fake)!r}, run_name='__main__')\n")
         prof = write(ex / "profiles" / "codex-priced.yaml",
                      f"id: codex-priced\nagent: codex\nmodel: gpt-6.2-sol\nsandbox: off\nexecutable: [{json.dumps(sys.executable)}, "
-                     f"{json.dumps(str(ROOT / 'tests' / 'fake_agents' / 'fake_codex.py'))}]\n")
+                     f"{json.dumps(str(fake))}]\n")
         out = tmp / "out"
         code, text = run_cli("run", "--tasks", str(ex / "tasks" / "arithmetic-no-skill.yaml"), "--profiles", str(prof), "--out", str(out),
                              "--no-cache", "--no-llm", "--cache-dir", str(tmp / "cache"))
         self.assertEqual(code, 0, text)
         run = sorted(d for d in out.iterdir() if (d / "summary.json").is_file())[-1]
         rec = json.loads((run / "trials.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        if large_output:
+            self.assertFalse(rec["valid"])
+            self.assertEqual(rec["error"]["type"], "harness_error")
+            self.assertEqual(rec["grader_results"], [])
+            self.assertGreater((Path(rec["trial_dir"]) / "stdout.jsonl").stat().st_size, 17 * 1024 * 1024)
         s = json.loads((run / "summary.json").read_text(encoding="utf-8"))
         want = (500 * 2 + 1500 * 0.10 + 100 * 10) / 1e6  # 偽 codex の使用量（入力 2000・キャッシュ読み 1500・出力 100）を gpt-6.2-sol の公開価格で
         self.assertAlmostEqual(rec["cost_usd"], want, places=9)

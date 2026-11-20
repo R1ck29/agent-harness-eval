@@ -140,7 +140,7 @@ class ClaudeAdapter(_Adapter):
                         "cache_write": u.get("cache_creation_input_tokens"), "output": u.get("output_tokens")}
         return {}
 
-    def parse(self, lines: Iterable[str], profile: Profile | None = None) -> ParsedRun:
+    def parse(self, lines: Iterable[str], profile: Profile | None = None, *, usage_only: bool = False) -> ParsedRun:
         r = ParsedRun(hook_calls=[])
         pending: dict[str, ToolCall] = {}
         result: dict[str, Any] | None = None
@@ -148,6 +148,8 @@ class ClaudeAdapter(_Adapter):
         retries: list[str] = []
         for e in _jsonl(lines, r.warnings):
             t, st = e.get("type"), e.get("subtype")
+            if usage_only and t != "result":
+                continue
             if t == "system" and st == "init":
                 r.meta.update({
                     "cli_version": e.get("claude_code_version"),
@@ -267,13 +269,15 @@ class CodexAdapter(_Adapter):
         """判定 1 回のトークン（input はキャッシュ読みを含む OpenAI の定義）。"""
         return dict(self.parse(stdout.splitlines()).tokens)
 
-    def parse(self, lines: Iterable[str], profile: Profile | None = None) -> ParsedRun:
+    def parse(self, lines: Iterable[str], profile: Profile | None = None, *, usage_only: bool = False) -> ParsedRun:
         r = ParsedRun(skill_detection="heuristic")
         tok = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "reasoning_output": 0}
         completed = failed = progressed = False
         reconnects = 0
         for e in _jsonl(lines, r.warnings):
             t = e.get("type")
+            if usage_only and t != "turn.completed":
+                continue
             if t == "item.completed" and ((e.get("item") or {}).get("type") or "error") != "error":
                 progressed = True
             if t == "thread.started":
