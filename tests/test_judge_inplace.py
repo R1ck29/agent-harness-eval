@@ -147,7 +147,8 @@ class InPlaceJudge(unittest.TestCase):
     def test_in_place_judge_calls_never_overlap(self):
         code, out, _ = self.go("--judge-profile", f"codex={self.judge}", "--trials", "4", "--jobs", "4", "--no-cache")
         self.assertEqual(code, 0, out)
-        self.assertGreaterEqual(len(self.judge_calls()), 4, out)
+        # 解く側も --jobs 4 で同じ argv ログに追記するので、判定の回数は偽 codex が数えたファイルで見る
+        self.assertGreaterEqual(len(list(self.overlap.glob("call-*"))), 4, out)
         self.assertFalse((self.overlap / "OVERLAP").exists(), "同じ系統の in_place の判定が同時に走った")
 
     def test_expired_or_missing_auth_stops_before_any_trial(self):

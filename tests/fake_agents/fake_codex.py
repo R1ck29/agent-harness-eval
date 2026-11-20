@@ -28,13 +28,14 @@ if "read-only" in args and "-C" not in args:  # LLM 判定（judge_cmd）: 対�
                                 "prompt": prompt}, ensure_ascii=False) + "\n")
     ov = os.environ.get("FAKE_JUDGE_OVERLAP_DIR")  # 判定の同時実行の検出: 入口で印を O_EXCL で作り、少し待って消す。先客がいれば OVERLAP を記録
     if ov:
+        import time
+        (Path(ov) / f"call-{os.getpid()}-{time.time_ns()}").write_text("x", encoding="utf-8")  # 呼び出し回数（argv ログは並列の追記で混ざる）
         mark = Path(ov) / "inflight"
         try:
             os.close(os.open(mark, os.O_CREAT | os.O_EXCL))
         except FileExistsError:
             (Path(ov) / "OVERLAP").write_text("x", encoding="utf-8")
         else:
-            import time
             time.sleep(0.15)
             mark.unlink()
     print(json.dumps({"type": "thread.started", "thread_id": "judge"}))
