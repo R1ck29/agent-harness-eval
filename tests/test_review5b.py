@@ -200,10 +200,20 @@ class TestSolverCostSettledOnce(unittest.TestCase):
         run = sorted(d for d in out.iterdir() if (d / "summary.json").is_file())[-1]
         rec = json.loads((run / "trials.jsonl").read_text(encoding="utf-8").splitlines()[0])
         if large_output:
-            self.assertFalse(rec["valid"])
-            self.assertEqual(rec["error"]["type"], "harness_error")
+            # r4 #6: 出力量は solver が決める。上限超過は除外ではなく、有効な試行の不合格として数える（使用量は計上する）
+            from harness_eval.record import TrialRecord
+            from harness_eval.soundness import invalid_reason
+            r = TrialRecord.from_dict(rec)
+            self.assertTrue(rec["valid"])
+            self.assertEqual(rec["error"]["type"], "log_overflow")
+            self.assertIs(rec["passed"], False)
+            self.assertIs(rec["cmp_passed"], False)
+            self.assertEqual(rec["failure_tags"], ["log_overflow"])
+            # r4 #7: ディスクへ書く量も 16 MiB（と使用量の行）で止まる
+            self.assertLess((Path(rec["trial_dir"]) / "stdout.jsonl").stat().st_size, 17 * 1024 * 1024 + 4096)
             self.assertEqual(rec["grader_results"], [])
-            self.assertGreater((Path(rec["trial_dir"]) / "stdout.jsonl").stat().st_size, 17 * 1024 * 1024)
+            self.assertIsNone(invalid_reason(r))
+            self.assertIs(outcome(r), False)
         s = json.loads((run / "summary.json").read_text(encoding="utf-8"))
         want = (500 * 2 + 1500 * 0.10 + 100 * 10) / 1e6  # 偽 codex の使用量（入力 2000・キャッシュ読み 1500・出力 100）を gpt-6.2-sol の公開価格で
         self.assertAlmostEqual(rec["cost_usd"], want, places=9)

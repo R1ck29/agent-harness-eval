@@ -21,6 +21,7 @@ import errno
 import hashlib
 import os
 import platform
+import re
 import shlex
 import shutil
 import signal
@@ -514,17 +515,27 @@ def kill_running() -> None:
         _kill_tree(p)
 
 
+LOG_LIMIT = 16 * 1024 * 1024  # 1 本のログ（stdout / stderr）をディスクへ書く量の上限
+_USAGE_TAIL_LIMIT = 1024 * 1024  # 上限を超えたあとに、使用量の行として追加で残す量
+_USAGE_LINE_MAX = 64 * 1024  # 使用量の行として調べる 1 行の最大長（これより長い行は捨てる）
+# 使用量を載せるイベント行（Claude の result・Codex の turn.completed。adapters.parse(usage_only=True) が読むもの）
+_USAGE_EVENT = re.compile(rb'"type"\s*:\s*"(result|turn\.completed)"')
+
+
 @dataclass
 class ProcResult:
     returncode: int | None
     timed_out: bool
     wall_ms: int
     launch_error: str | None = None
+    log_truncated: bool = False  # ログが上限（log_limit）に達して、以降は使用量の行だけを残した
 
 
 def run_process(cmd: list[str], cwd: Path, env: dict[str, str], stdin_text: str | None,
-                stdout_path: Path, stderr_path: Path, timeout_s: int) -> ProcResult:
-    """子の stdout/stderr をパイプで読み、親がログへ保存する。タイムアウト時も回収済みの出力を保存する。"""
+                stdout_path: Path, stderr_path: Path, timeout_s: int, log_limit: int = LOG_LIMIT) -> ProcResult:
+    """子の stdout/stderr をパイプで読み、親がログへ保存する。タイムアウト時も回収済みの出力を保存する。
+    ログは log_limit バイトで打ち切る（ディスクを埋めて使用量の計上や他の書き込みを巻き込まないため）。打ち切ったあともパイプは
+    読み続け、使用量のイベント行だけを（_USAGE_TAIL_LIMIT まで）ログの末尾に残す。"""
     t0 = time.monotonic()
     kw: dict = {"start_new_session": True} if os.name != "nt" else {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined]
     with ExitStack() as stack:
@@ -540,15 +551,57 @@ def run_process(cmd: list[str], cwd: Path, env: dict[str, str], stdin_text: str 
         stop_writing = False
         errors: list[OSError] = []
 
+        truncated: list[bool] = []
+
         def drain(pipe: BinaryIO, log: BinaryIO) -> None:
+            written = 0
+            cut = False  # 上限に達した。以降は使用量の行だけを残す
+            line = bytearray()
+            skipping = False  # 今の行は長すぎる（または途中から始まる）ので使用量の行として調べない
+            tail_left = _USAGE_TAIL_LIMIT
+
+            def keep(done: bytes) -> None:
+                nonlocal tail_left
+                if len(done) + 1 <= tail_left and _USAGE_EVENT.search(done):
+                    log.write(done + b"\n")
+                    log.flush()
+                    tail_left -= len(done) + 1
+
             try:
                 with pipe:
                     while chunk := os.read(pipe.fileno(), 64 * 1024):
                         with log_lock:
                             if stop_writing:
                                 return
-                            log.write(chunk)
-                            log.flush()
+                            if not cut:
+                                if written + len(chunk) <= log_limit:
+                                    log.write(chunk)
+                                    log.flush()
+                                    written += len(chunk)
+                                    continue
+                                head = chunk[:log_limit - written]
+                                log.write(head + b"\n")  # 途中で切れた行は、あとの使用量の行と混ぜない
+                                log.flush()
+                                cut = True
+                                truncated.append(True)
+                                skipping = not head.endswith(b"\n")
+                                chunk = chunk[len(head):]
+                            parts = chunk.split(b"\n")
+                            for i, part in enumerate(parts):
+                                if not skipping:
+                                    if len(line) + len(part) <= _USAGE_LINE_MAX:
+                                        line += part
+                                    else:
+                                        skipping = True
+                                        line.clear()
+                                if i < len(parts) - 1:  # 1 行が終わった
+                                    if not skipping:
+                                        keep(bytes(line))
+                                    line.clear()
+                                    skipping = False
+                    with log_lock:  # 改行のない最後の断片
+                        if cut and not skipping and line and not stop_writing:
+                            keep(bytes(line))
             except OSError as e:
                 errors.append(e)
 
@@ -604,4 +657,4 @@ def run_process(cmd: list[str], cwd: Path, env: dict[str, str], stdin_text: str 
                 _RUNNING.discard(p)
         if errors:
             raise errors[0]
-    return ProcResult(p.returncode, timed_out, int((time.monotonic() - t0) * 1000))
+    return ProcResult(p.returncode, timed_out, int((time.monotonic() - t0) * 1000), log_truncated=bool(truncated))

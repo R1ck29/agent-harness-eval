@@ -33,14 +33,14 @@ from .costs import add_usage, empty_usage, solver_call_estimate, solver_cost, us
 from .graders import JudgeConfig, grade_all, judge_content, rescore
 from .judge_phase import JudgePhase
 from .judging import FAMILIES, JudgeSettings, make_settings
-from .isolation import (fresh_dir, ancestor_instructions, build_env, bwrap_problem, copy_credentials, fill, kill_running, make_trial_paths,
+from .isolation import (LOG_LIMIT, fresh_dir, ancestor_instructions, build_env, bwrap_problem, copy_credentials, fill, kill_running, make_trial_paths,
                         placeholders, release_home, route_signature, run_install, run_process, sandbox_cmd, sandbox_mode, snapshot)
 from .metrics import summarize
 from .record import EXCLUDED_ERRORS, TrialRecord
 from .spec import NO_SPLIT, ROUTE_VARS, Profile, SpecError, Task, load_profile, reject_in_place, split_mixing
 
 NOT_RUN_ERRORS = {"budget_stop"}
-_SOLVER_LOG_LIMIT = 16 * 1024 * 1024
+_SOLVER_LOG_LIMIT = LOG_LIMIT
 
 
 def _solver_accounting_lines(path: Path) -> Iterator[str]:
@@ -54,7 +54,7 @@ def _solver_accounting_lines(path: Path) -> Iterator[str]:
                     while line and not line.endswith(b"\n"):
                         line = fh.readline(64 * 1024)
 
-CACHE_SCHEMA = "8"  # 8: 採点資材のリンク拒否・テスト名の再代入の検出・ログ解析上限
+CACHE_SCHEMA = "9"  # 9: ログ上限超過は除外でなく不合格・テスト名の再束縛/削除の検出を拡張。8: 採点資材のリンク拒否・ログ解析上限
 
 
 @dataclass
@@ -470,12 +470,15 @@ class Runner(JudgePhase):
             return rec
         pr = run_process(cmd, tp.workdir, env, task.prompt, tp.stdout, tp.stderr, task.timeout_s)
         rec.wall_ms = pr.wall_ms
-        if any(log.is_file() and log.stat().st_size > _SOLVER_LOG_LIMIT for log in (tp.stdout, tp.stderr)):
+        if pr.log_truncated or any(log.is_file() and log.stat().st_size > _SOLVER_LOG_LIMIT for log in (tp.stdout, tp.stderr)):
             parsed = adapter.parse(_solver_accounting_lines(tp.stdout), profile, usage_only=True)
             rec.tokens, rec.cost_usd, rec.cost_source = parsed.tokens, parsed.cost_usd, parsed.cost_source
-            rec.valid = False
-            rec.invalid_reason = "harness_error"
-            rec.error = {"type": "harness_error", "message": "solver のログが解析上限（16 MiB）を超えました"}
+            # 出力量は solver（エージェント・評価対象のフック・スキル）が決める。失敗しそうな試行で大量に出力すれば除外される、という
+            # 抜け道を作らないため、除外（harness_error）にはせず、有効な試行の不合格として数える（使用量は上で計上済み）
+            rec.error = {"type": "log_overflow", "message": "solver のログが解析上限（16 MiB）を超えたため不合格として数えます"}
+            rec.valid, rec.invalid_reason = True, None
+            rec.passed, rec.cmp_passed, rec.score, rec.cmp_score = False, False, 0.0, 0.0
+            rec.failure_tags = ["log_overflow"]
             return rec
         out_lines = tp.stdout.read_text(encoding="utf-8", errors="replace").splitlines() if tp.stdout.exists() else []
         stderr = tp.stderr.read_text(encoding="utf-8", errors="replace") if tp.stderr.exists() else ""

@@ -9,7 +9,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
+from harness_eval.adapters import CodexAdapter  # noqa: E402
 from harness_eval.cheatproof import capture_tests, rebound_tests, tamper_check  # noqa: E402
+from harness_eval.isolation import run_process  # noqa: E402
+from harness_eval.runner import _solver_accounting_lines  # noqa: E402
 
 BASE = "def test_x():\n    assert 1 + 1 == 2\n"
 OTHER = "\n\ndef other():\n    pass\n"
@@ -121,6 +124,50 @@ class DynamicRebindTests(unittest.TestCase):
         self.run_check()
         self.assertNotIn("test_a", set(sys.modules) - before_modules)
         self.assertNotIn("tests.test_a", set(sys.modules) - before_modules)
+
+
+USAGE = '{"type": "turn.completed", "usage": {"input_tokens": 1200, "cached_input_tokens": 200, "output_tokens": 34}}'
+
+
+class DrainCapTests(unittest.TestCase):
+    """r4 #7: drain がディスクへ書く量に上限を置き、超えたあとも使用量の行だけは残す。"""
+
+    def run_noisy(self, limit: int, script: str):
+        tmp = Path(tempfile.mkdtemp(prefix="r5r-drain-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        out, err = tmp / "stdout.jsonl", tmp / "stderr.txt"
+        res = run_process([sys.executable, "-c", script], tmp, {"PATH": ""}, None, out, err, 60, log_limit=limit)
+        return res, out, err
+
+    def test_garbage_is_capped_but_the_trailing_usage_event_is_kept(self):
+        script = ("import sys\n"
+                  "for i in range(400):\n"
+                  "    sys.stdout.write('garbage-' * 2000 + '\\n')\n"  # 約 14 KiB × 400 = 5.6 MiB
+                  "sys.stdout.write('x' * 300000)\n"  # 改行のない長い断片
+                  f"sys.stdout.write('\\n' + {USAGE!r} + '\\n')\n"
+                  "sys.stderr.write('e' * 3000000)\n")
+        limit = 1024 * 1024
+        res, out, err = self.run_noisy(limit, script)
+        self.assertTrue(res.log_truncated)
+        self.assertEqual(res.returncode, 0)
+        self.assertLess(out.stat().st_size, limit + 4096)  # 上限（と、使用量の行）で止まる
+        self.assertLess(err.stat().st_size, limit + 4096)
+        lines = list(_solver_accounting_lines(out))
+        usage = CodexAdapter().parse(lines, usage_only=True)
+        self.assertEqual(usage.tokens["input"], 1200)
+        self.assertEqual(usage.tokens["output"], 34)
+
+    def test_output_under_the_cap_is_written_whole_and_not_flagged(self):
+        res, out, _ = self.run_noisy(1024 * 1024, f"print({USAGE!r})")
+        self.assertFalse(res.log_truncated)
+        self.assertEqual(out.read_text(encoding="utf-8").strip(), USAGE)
+
+    def test_only_a_bounded_number_of_usage_lines_is_kept(self):
+        script = f"for _ in range(200000):\n    print({USAGE!r})\n"  # すべて使用量の形の行 約 20 MiB
+        limit = 256 * 1024
+        res, out, _ = self.run_noisy(limit, script)
+        self.assertTrue(res.log_truncated)
+        self.assertLess(out.stat().st_size, limit + 2 * 1024 * 1024)
 
 
 if __name__ == "__main__":
