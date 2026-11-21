@@ -130,3 +130,19 @@ PY
 - 両ノードとも独立レビューで PASS。ログの再レビューでは Windows の `EINVAL`、判定 CLI の再レビューではリンク直後の `..` を修正した。関連テストは 35 件成功。
 - `uv run --offline --no-sync ruff check .` は成功。pytest 全 331 件は 314 成功、10 失敗、7 スキップ。この環境にある `/tmp` の設定ディレクトリをテストプロセス内だけで無視し、ネットワーク名前空間を使えないため bwrap 不可の経路で確認した。残る 10 件はループバックソケットの権限制限で失敗し、`36951cf` でも同じ 10 件を再現した。Windows 実機は未検証。
 - 必須の A・B は対応済み。非ブロッキングの #5 は、`in_place` で認証を参照する CLI 側の読み取りをハーネスから制限できないため、明示的に入力を信頼する運用条件が残る。
+
+## PR #5 opus r4 再レビュー対応（62b715f）
+
+レビュー: `XREVIEW-AHE5-opus-r4.md`（CHANGES_REQUESTED）。対応表（テストは `tests/test_review_r5.py`、ログ超過は `tests/test_review5b.py` も更新）。
+
+| 指摘 | 対応 | コミット | テスト |
+|---|---|---|---|
+| #2/#6 テスト名の再束縛・削除（ブロッキング） | 静的: for/with/except/match・import の alias・`del`・global/nonlocal 越しの関数本体の代入を同じスコープの束縛として数える。動的: 採点と同じ隔離の子プロセスで pytest 収集し、基準にあった各テストの `co_filename`/`co_firstlineno` を基準の定義と照合（`setattr`・`globals()`・新規 conftest からの代入・収集から消えたテスト）。ホストは solver のコードを import しない。不一致は `test_body_modified` | b4fef1f | `StaticRebindTests`・`DynamicRebindTests` |
+| #6 ログ 16 MiB 超の除外（ブロッキング） | 除外（`harness_error`）をやめ、有効な試行の不合格（`log_overflow`、`passed`/`cmp_passed` = False）にする。`invalid_reason` は None、`outcome` は False。使用量・台帳・集計の計上は維持 | 3444614 | `test_oversized_solver_log_keeps_the_usage_and_ledger` |
+| #7 drain のディスク書き込み上限 | `run_process(log_limit=16 MiB)`: 上限で書き込みを止めて `ProcResult.log_truncated`。以降もパイプは読み、使用量イベント行だけを 1 MiB まで末尾に残す（1 行 64 KiB 超は捨てる） | 3444614 | `DrainCapTests` |
+| #8 waitid WNOWAIT | `_wait_exit`: 終了を回収せずに待つ。`_kill_tree`: 回収前に `killpg`。回収済みのリーダーには送らない。waitid がない OS・Windows は従来経路 | 49108f9 | `KillTreeOrderTests` |
+| #9 リンクで捨てた採点資材 | `_grader_material` がリンクで打ち切るとき logging の警告を出す（bind しない方針は維持） | 49108f9 | `GraderMaterialLinkWarningTests` |
+
+- キャッシュ: `CACHE_SCHEMA` を 8 → 9（ログ超過の結果の意味が変わり、tamper の検出も広がったため。古い結果は再利用しない）。
+- 動的な再束縛の確認は pytest の収集が成功したときだけ行う（pytest がない・収集エラー・タイムアウトは確認できないので何も返さず警告ログ。採点そのものが同じ理由で落ちる）。pytest 以外で走るテスト（JS など）は静的な検出のまま。
+- 残る限界: 関数内で `Cls.test_x = f` のように別スコープのクラス属性へ代入しても静的には数えない（動的な照合が捕まえる）。収集で見るのは基準にあったテストだけで、収集の子プロセスを solver が見分けて挙動を変える場合は検出できない。
