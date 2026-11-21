@@ -162,6 +162,14 @@ class DrainCapTests(unittest.TestCase):
         self.assertEqual(usage.tokens["input"], 1200)
         self.assertEqual(usage.tokens["output"], 34)
 
+    def test_a_cap_that_lands_exactly_on_a_line_end_keeps_the_next_usage_line(self):
+        script = ("import sys, time\n"
+                  "sys.stdout.write('a' * 99 + '\\n'); sys.stdout.flush(); time.sleep(0.3)\n"  # 別のチャンクにして、ちょうど 100 バイトで切る
+                  f"sys.stdout.write({USAGE!r} + '\\n')\n")
+        res, out, _ = self.run_noisy(100, script)
+        self.assertTrue(res.log_truncated)
+        self.assertEqual(CodexAdapter().parse(list(_solver_accounting_lines(out)), usage_only=True).tokens["output"], 34)
+
     def test_output_under_the_cap_is_written_whole_and_not_flagged(self):
         res, out, _ = self.run_noisy(1024 * 1024, f"print({USAGE!r})")
         self.assertFalse(res.log_truncated)

@@ -603,6 +603,7 @@ def run_process(cmd: list[str], cwd: Path, env: dict[str, str], stdin_text: str 
 
         def drain(pipe: BinaryIO, log: BinaryIO) -> None:
             written = 0
+            ended_line = True  # 書いた最後のバイトが改行か（ちょうど行末で上限に達したときの判定）
             cut = False  # 上限に達した。以降は使用量の行だけを残す
             line = bytearray()
             skipping = False  # 今の行は長すぎる（または途中から始まる）ので使用量の行として調べない
@@ -626,13 +627,14 @@ def run_process(cmd: list[str], cwd: Path, env: dict[str, str], stdin_text: str 
                                     log.write(chunk)
                                     log.flush()
                                     written += len(chunk)
+                                    ended_line = chunk.endswith(b"\n")
                                     continue
                                 head = chunk[:log_limit - written]
                                 log.write(head + b"\n")  # 途中で切れた行は、あとの使用量の行と混ぜない
                                 log.flush()
                                 cut = True
                                 truncated.append(True)
-                                skipping = not head.endswith(b"\n")
+                                skipping = not (head.endswith(b"\n") if head else ended_line)
                                 chunk = chunk[len(head):]
                             parts = chunk.split(b"\n")
                             for i, part in enumerate(parts):
