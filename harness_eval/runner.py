@@ -28,7 +28,7 @@ from typing import Any, Callable, Iterator
 
 from . import __version__, credentials
 from .adapters import ClaudeAdapter, CodexAdapter, classify_stderr, get_adapter
-from .cheatproof import capture_tests, leak_check, summarize_hits, tamper_check, tamper_result
+from .cheatproof import capture_tests, leak_check, rebound_tests, summarize_hits, tamper_check, tamper_result
 from .costs import add_usage, empty_usage, solver_call_estimate, solver_cost, usage_summary
 from .graders import JudgeConfig, grade_all, judge_content, rescore
 from .judge_phase import JudgePhase
@@ -514,6 +514,12 @@ class Runner(JudgePhase):
         rec.invalid_reason = None if rec.valid else etype
         if rec.valid:
             tamper = [] if task.allow_test_changes else tamper_check(tests_before, tp.workdir)
+            if not task.allow_test_changes and not tamper:  # 静的に見つからなくても、収集時の差し替え（setattr・globals()）を確認する
+                ctmp = fresh_dir(tp.root / "collect_tmp")
+                try:
+                    tamper = rebound_tests(tests_before, tp.workdir, ctmp)
+                finally:
+                    shutil.rmtree(ctmp, ignore_errors=True)
             if tamper:
                 rec.meta["tamper"] = tamper[:10]
             # 決定的な検査を先に行い、LLM 判定は合格した出力の判定入力（最小）だけを積んでおく。判定は全試行のあと（_judge_phase）。
