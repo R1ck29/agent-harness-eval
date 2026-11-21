@@ -53,6 +53,8 @@ class StaticRebindTests(unittest.TestCase):
             "walrus": "(test_x := other)\n",
             "global_in_function": "def rebind():\n    global test_x\n    test_x = other\n\n\nrebind()\n",
             "global_in_class_body": "class Holder:\n    global test_x\n    test_x = other\n",
+            "code_forgery": "test_x.__code__ = other.__code__\n",
+            "defaults_forgery": "test_x.__defaults__ = (1,)\n",
             "global_in_nested_function": "def outer():\n    def inner():\n        global test_x\n        test_x = other\n    inner()\n",
         }
         for label, code in forms.items():
@@ -117,6 +119,12 @@ class DynamicRebindTests(unittest.TestCase):
         (self.wd / "conftest.py").write_text(
             "import tests.test_a as m\n\n\ndef _ok():\n    assert True\n\n\nm.test_x = _ok\n", encoding="utf-8")
         self.assertEqual([f["kind"] for f in self.run_check()], ["test_body_modified"])
+
+    def test_a_class_with_init_is_not_collected_so_it_is_not_expected(self):
+        text = "class TestInit:\n    def __init__(self):\n        pass\n\n    def test_m(self):\n        assert 1\n\n\ndef test_x():\n    assert 1\n"
+        self.t.write_text(text, encoding="utf-8")
+        self.before = capture_tests(self.wd)
+        self.assertEqual(self.run_check(), [])
 
     def test_a_vanished_test_is_detected(self):
         self.t.write_text(self.original + "\n\ndel test_x\n", encoding="utf-8")

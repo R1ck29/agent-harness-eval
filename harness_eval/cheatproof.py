@@ -303,7 +303,13 @@ def _redefined_python_name(old: str, new: str) -> str | None:
         after = Counter(_python_bindings(ast.parse(new).body, assignments=True))
     except SyntaxError:
         return None
-    return next((".".join(name) for name in _python_bindings(baseline) if after[name] > before[name]), None)
+
+    def dunder_writes(counts: Counter, name: tuple[str, ...]) -> int:
+        """test_x.__code__ = … のように、既存のテストの内部（ダンダー属性）への書き込み・削除。"""
+        return sum(n for t, n in counts.items() if len(t) > len(name) and t[:len(name)] == name and t[len(name)].startswith("__"))
+
+    return next((".".join(name) for name in _python_bindings(baseline)
+                 if after[name] > before[name] or dunder_writes(after, name) > dunder_writes(before, name)), None)
 
 
 # 収集の子プロセスで動かす: pytest の収集結果（conftest・プラグインによる差し替えも含む）の各テストについて、実際に実行される関数の位置を記録する
@@ -346,7 +352,8 @@ def _baseline_test_positions(path: str, text: str) -> dict[str, int]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
             out[f"{path}::{node.name}"] = first(node)
         elif isinstance(node, ast.ClassDef) and (node.name.startswith("Test") or any(
-                (b.attr if isinstance(b, ast.Attribute) else getattr(b, "id", "")).endswith("TestCase") for b in node.bases)):
+                (b.attr if isinstance(b, ast.Attribute) else getattr(b, "id", "")).endswith("TestCase") for b in node.bases)) \
+                and not any(isinstance(m, ast.FunctionDef) and m.name in ("__init__", "__new__") for m in node.body):  # pytest は集めない
             for m in node.body:
                 if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name.startswith("test"):
                     out[f"{path}::{node.name}::{m.name}"] = first(m)
