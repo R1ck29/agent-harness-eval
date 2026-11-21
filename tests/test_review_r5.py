@@ -1,6 +1,10 @@
 """PR #5 r4 レビュー（XREVIEW-AHE5-opus-r4.md）の指摘 #2/#6（テスト名の再束縛・削除）のテスト。"""
+import os
 import shutil
+import signal
+import subprocess
 import sys
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +15,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from harness_eval.adapters import CodexAdapter  # noqa: E402
 from harness_eval.cheatproof import capture_tests, rebound_tests, tamper_check  # noqa: E402
+from harness_eval import isolation  # noqa: E402
 from harness_eval.isolation import run_process  # noqa: E402
 from harness_eval.runner import _solver_accounting_lines  # noqa: E402
 
@@ -168,6 +173,101 @@ class DrainCapTests(unittest.TestCase):
         res, out, _ = self.run_noisy(limit, script)
         self.assertTrue(res.log_truncated)
         self.assertLess(out.stat().st_size, limit + 2 * 1024 * 1024)
+
+
+@unittest.skipUnless(hasattr(os, "waitid") and os.name != "nt", "waitid は Unix（macOS を除く）")
+class KillTreeOrderTests(unittest.TestCase):
+    """r4 #8: 回収（wait）の前に killpg する。回収済みのリーダーの PID（= グループ ID）には何も送らない。実プロセスは殺さない。"""
+
+    def spawn_exited(self) -> subprocess.Popen:
+        p = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        self.addCleanup(p.wait)
+        deadline = time.monotonic() + 20
+        while os.waitid(os.P_PID, p.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:  # 終了を待つが、回収はしない
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        return p
+
+    def record_killpg(self, p: subprocess.Popen) -> list:
+        calls: list = []
+
+        def fake(pgid: int, sig: int) -> None:
+            calls.append((pgid, sig, p.returncode))  # この時点のリーダーが未回収（returncode が None）かを残す
+
+        orig = os.killpg
+        os.killpg = fake  # type: ignore[assignment]
+        self.addCleanup(setattr, os, "killpg", orig)
+        return calls
+
+    def test_an_exited_but_unreaped_leader_is_signalled_before_it_is_reaped(self):
+        p = self.spawn_exited()
+        calls = self.record_killpg(p)
+        isolation._kill_tree(p)
+        self.assertEqual(calls, [(p.pid, signal.SIGKILL, None)])
+        self.assertEqual(p.returncode, 0)  # 送ったあとに回収した
+
+    def test_an_already_reaped_leader_gets_no_signal(self):
+        p = self.spawn_exited()
+        p.wait()
+        calls = self.record_killpg(p)
+        isolation._kill_tree(p)
+        self.assertEqual(calls, [])
+
+    def test_wait_exit_detects_the_exit_without_reaping(self):
+        p = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        self.addCleanup(p.wait)
+        isolation._wait_exit(p, 20)
+        self.assertIsNone(p.returncode)
+        self.assertEqual(p.wait(), 0)
+
+    def test_wait_exit_times_out_on_a_running_child(self):
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        self.addCleanup(p.wait)
+        self.addCleanup(p.kill)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            isolation._wait_exit(p, 0.2)
+
+    def test_run_process_kills_a_leaderless_descendant_holding_the_pipes(self):
+        """リーダーが先に終わり、子孫がパイプを持ち続けるとき、タイムアウトで子孫を止めて戻る。"""
+        tmp = Path(tempfile.mkdtemp(prefix="r5r-kill-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        script = ("import subprocess, sys\n"
+                  "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n")
+        t0 = time.monotonic()
+        res = run_process([sys.executable, "-c", script], tmp, dict(os.environ), None, tmp / "o", tmp / "e", 2)
+        self.assertLess(time.monotonic() - t0, 20)
+        self.assertEqual(res.returncode, 0)
+
+
+class GraderMaterialLinkWarningTests(unittest.TestCase):
+    """r4 #9: リンクを通る採点資材は bind しない（安全側）が、捨てたことを警告する。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="r5r-link-")).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        (self.tmp / "real").mkdir()
+        (self.tmp / "real" / "check.py").write_text("print(1)\n", encoding="utf-8")
+        (self.tmp / "link").symlink_to(self.tmp / "real")
+        self.workdir = self.tmp / "work"
+        self.workdir.mkdir()
+
+    def material(self, path: Path):
+        return isolation._grader_material(f"python {path}", [], self.workdir, self.workdir)
+
+    def test_a_path_through_a_symlink_is_dropped_with_a_warning(self):
+        with self.assertLogs("harness_eval.isolation", level="WARNING") as cm:
+            out, dirs = self.material(self.tmp / "link" / "check.py")
+        self.assertEqual((out, dirs), ([], []))
+        self.assertIn(str(self.tmp / "link"), "\n".join(cm.output))
+
+    def test_a_real_path_is_bound_without_a_warning(self):
+        with self.assertNoLogs("harness_eval.isolation", level="WARNING"):
+            out, _ = self.material(self.tmp / "real" / "check.py")
+        self.assertEqual(out, [str(self.tmp / "real" / "check.py")])
+
+    def test_a_missing_path_is_not_a_link_warning(self):
+        with self.assertNoLogs("harness_eval.isolation", level="WARNING"):
+            self.material(self.tmp / "nope" / "check.py")
 
 
 if __name__ == "__main__":

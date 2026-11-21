@@ -19,6 +19,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 import errno
 import hashlib
+import logging
 import os
 import platform
 import re
@@ -36,6 +37,8 @@ from typing import BinaryIO
 
 from . import credentials
 from .spec import ROUTE_VARS, Profile
+
+log = logging.getLogger(__name__)
 
 # 親プロセス（Claude Code・デスクトップアプリ・Agent SDK の中から実行した場合など）が子に渡すセッションの変数。
 # 受け継ぐと、同じプロファイルでも起動元で挙動が変わる（入れ子扱い・推論の強さ・簡易モード・認証の更新・親アプリへの通信など）。
@@ -349,7 +352,9 @@ def _grader_material(cmd: str, extra_ro: list[str], workdir: Path, resolved_work
                 mode = r.lstat().st_mode
             except OSError:
                 break
-            if stat.S_ISLNK(mode):
+            if stat.S_ISLNK(mode):  # solver が差し替えられる道筋かもしれないので bind しない（安全側）。捨てたことは警告する
+                log.warning("採点資材の道筋にシンボリックリンクがあるため隔離の中へ見せません: %s（リンク: %s）。"
+                            "実体の絶対パスで書くと見せられます", t, r)
                 break
         else:
             if r != Path(r.anchor) and r != home and r not in home.parents:
@@ -485,22 +490,65 @@ def fresh_dir(path: Path) -> Path:
     return path
 
 
+_HAS_WAITID = hasattr(os, "waitid")  # Unix（macOS を除く）。ない OS は従来の poll() で判定する
+
+
+def _exited_unreaped(p: subprocess.Popen) -> bool:
+    """リーダーが終了済みで、まだ回収（wait）されていないか。回収はしない（WNOWAIT）ので、PID（= プロセスグループ ID）はまだ自分のもの。"""
+    try:
+        return os.waitid(os.P_PID, p.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:  # すでに回収されている
+        return False
+
+
+def _wait_exit(p: subprocess.Popen, timeout: float) -> None:
+    """リーダーの終了を、回収せずに待つ（TimeoutExpired）。回収はあとで p.wait() / _kill_tree() が行う。
+    回収の前に killpg できるので、PID が再利用されて無関係なプロセスグループを撃つことがない。"""
+    if not _HAS_WAITID or os.name == "nt":
+        p.wait(timeout=timeout)
+        return
+    deadline = time.monotonic() + timeout
+    delay = 0.002
+    while not _exited_unreaped(p):
+        if p.returncode is not None:  # 他で回収された
+            return
+        if time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired(p.args, timeout)
+        time.sleep(delay)
+        delay = min(delay * 2, 0.05)
+
+
 def _kill_tree(p: subprocess.Popen) -> None:
     if os.name == "nt":
         if p.poll() is None:
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True)
         return
     try:
-        if p.poll() is not None:
-            os.killpg(p.pid, signal.SIGKILL)  # The leader may have exited while descendants still hold its pipes.
+        if not _HAS_WAITID:  # macOS など: 従来どおり（回収後は PID の再利用を排除できない）
+            if p.poll() is not None:
+                os.killpg(p.pid, signal.SIGKILL)  # The leader may have exited while descendants still hold its pipes.
+                return
+            os.killpg(p.pid, signal.SIGTERM)
+            try:
+                p.wait(5)
+            except subprocess.TimeoutExpired:
+                os.killpg(p.pid, signal.SIGKILL)
             return
-        os.killpg(p.pid, signal.SIGTERM)
-        try:
-            p.wait(5)
-        except subprocess.TimeoutExpired:
-            os.killpg(p.pid, signal.SIGKILL)
+        if p.returncode is not None:  # 回収済み: グループ ID が別のものに再利用されているかもしれないので、何も送らない
+            return
+        if not _exited_unreaped(p):
+            os.killpg(p.pid, signal.SIGTERM)
+            deadline = time.monotonic() + 5
+            while not _exited_unreaped(p) and p.returncode is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+        if p.returncode is None:
+            os.killpg(p.pid, signal.SIGKILL)  # リーダーを回収する前に送る（子孫がパイプを持ち続けていてもここで止める）
+            try:
+                p.wait(5)
+            except subprocess.TimeoutExpired:
+                pass
     except ProcessLookupError:
-        pass
+        p.poll()
 
 
 _RUNNING: set = set()
@@ -635,15 +683,17 @@ def run_process(cmd: list[str], cwd: Path, env: dict[str, str], stdin_text: str 
         try:
             for worker in workers:
                 worker.start()
-            p.wait(timeout=max(0, deadline - time.monotonic()))
+            _wait_exit(p, max(0, deadline - time.monotonic()))
             wait_workers(deadline)
+            p.wait()  # 子孫のパイプも閉じた。ここで回収する
         except subprocess.TimeoutExpired:
             _kill_tree(p)
             timed_out = True
             deadline = time.monotonic() + 5
             try:
-                p.wait(timeout=max(0, deadline - time.monotonic()))
+                _wait_exit(p, max(0, deadline - time.monotonic()))
                 wait_workers(deadline)
+                p.wait()
             except subprocess.TimeoutExpired:
                 # A descendant can retain the pipes. Keep the bytes already written and return.
                 _kill_tree(p)
