@@ -13,8 +13,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from harness_eval.cli import main  # noqa: E402
+from harness_eval.runner import Runner  # noqa: E402
+from fake_env import SUFFIX  # noqa: E402
 
 FAKE = ROOT / "tests" / "fake_agents"
 
@@ -34,7 +37,7 @@ class E2E(unittest.TestCase):
         # 実物の代わりに偽 CLI を使うようプロファイルを書き換える
         for f in (ex / "profiles").glob("*.yaml"):
             fake = FAKE / ("fake_claude.py" if "claude" in f.name else "fake_codex.py")
-            f.write_text(f.read_text(encoding="utf-8") + f"\nexecutable: [{json.dumps(sys.executable)}, {json.dumps(str(fake))}]\n",
+            f.write_text(f.read_text(encoding="utf-8") + f"\nexecutable: [{json.dumps(sys.executable)}, {json.dumps(str(fake))}]\n" + SUFFIX,
                          encoding="utf-8")
         self.ex = ex
         self.out = self.tmp / "results"
@@ -133,7 +136,7 @@ class E2E(unittest.TestCase):
         self.assertIn("claude-ds-lite/csv-summary-format", out)  # 下がったタスクは診断として出る
 
     def test_llm_judge_only_when_code_passes(self):
-        args = ["--trials", "1", "--task", "csv-summary-insight", "--judge-executable", sys.executable, str(FAKE / "fake_claude.py")]
+        args = ["--trials", "1", "--task", "csv-summary-insight", "--judge-agent", "claude_code", "--judge-executable", sys.executable, str(FAKE / "fake_claude.py")]
         code, out, s, recs = self.run_eval(*args)
         self.assertEqual(code, 0, out)
         by = {r["profile_id"]: r for r in recs}
@@ -164,10 +167,20 @@ class E2E(unittest.TestCase):
         self.assertTrue(recs["to"]["valid"])  # タイムアウトは失敗として数える（除外しない）
         self.assertFalse(recs["to"]["passed"])
 
-        # 予算上限: 0 ドルなら新規試行は実行されない（集計からも除外）
+        # 予算上限: 0 ドルなら新規試行は実行されない。履歴のない呼び出しはタスクの上限（既定の見積もり）で数えるので、
+        # 開始前の門が先に止める（何も実行しない）
+        runs_before = len(self.runs())
         code, out = run_cli("run", "--tasks", str(self.ex / "tasks" / "arithmetic-no-skill.yaml"), "--profiles",
                             str(self.ex / "profiles" / "claude-baseline.yaml"), "--out", str(self.out),
                             "--no-cache", "--max-cost-usd", "0", "--no-llm")
+        self.assertEqual(code, 2, out)
+        self.assertIn("止めました", out)
+        self.assertEqual(len(self.runs()), runs_before)
+        # 門を通した（見積もりを 0 にした）あとの、実行中の上限: 新規試行は実行されず budget_stop（集計からも除外）
+        with mock.patch.object(Runner, "estimated_total", return_value=0.0):
+            code, out = run_cli("run", "--tasks", str(self.ex / "tasks" / "arithmetic-no-skill.yaml"), "--profiles",
+                                str(self.ex / "profiles" / "claude-baseline.yaml"), "--out", str(self.out),
+                                "--no-cache", "--max-cost-usd", "0", "--no-llm")
         last = self.runs()[-1]
         rec = json.loads((last / "trials.jsonl").read_text().splitlines()[0])
         self.assertEqual(rec["error"]["type"], "budget_stop")
@@ -193,7 +206,7 @@ class E2E(unittest.TestCase):
         prof = self.ex / "profiles" / "claude-ds-lite.yaml"
         prof.write_text(prof.read_text(encoding="utf-8") + "\nenv: {FAKE_MARKER: from-profile}\nextra_args: [--add-dir, '{workdir}']\n",
                         encoding="utf-8")
-        args = ["--trials", "1", "--task", "csv-summary-insight", "--judge-executable", sys.executable, str(FAKE / "fake_claude.py"),
+        args = ["--trials", "1", "--task", "csv-summary-insight", "--judge-agent", "claude_code", "--judge-executable", sys.executable, str(FAKE / "fake_claude.py"),
                 "--judge-profile", "claude-ds-lite"]
         code, out, s, recs = self.run_eval(*args)
         self.assertEqual(code, 0, out)
@@ -255,7 +268,7 @@ class E2E(unittest.TestCase):
             fake = FAKE / ("fake_claude.py" if agent == "claude_code" else "fake_codex.py")
             (self.ex / "profiles" / f"{name}.yaml").write_text(
                 f"id: {name}\nagent: {agent}\ninstall: [{{copy: ../harnesses/hooked/settings.json, to: '{{config_dir}}/settings.json'}}]\n"
-                f"executable: [{json.dumps(sys.executable)}, {json.dumps(str(fake))}]\n", encoding="utf-8")
+                f"executable: [{json.dumps(sys.executable)}, {json.dumps(str(fake))}]\n" + SUFFIX, encoding="utf-8")
         t = self.ex / "tasks" / "hook.yaml"
         t.write_text("id: hook\ntargets: [claude_code, codex]\nprompt: 17 × 23 は？\nallow_tools: [Read]\n"
                      "graders: [{type: regex, pattern: '391'}, {type: hook_used, hook: 'SessionStart:.*', outcome: success}]\n",
@@ -299,17 +312,19 @@ class E2E(unittest.TestCase):
         self.assertEqual(json.loads(led.read_text(encoding="utf-8").splitlines()[-1])["billing"], "subscription")
 
     def test_doctor_reports_inherited_route_variables(self):
-        """親の環境から経路を変える変数（API キーなど）を引き継ぐと NG。値は表示しない。"""
+        """環境変数は許可リスト: 親の環境にある経路の変数（API キーなど）も、宣言しなければ試行に渡さない。doctor は名前だけ出す。"""
         from harness_eval.isolation import ROUTE_VARS
         clean = {k: v for k, v in os.environ.items() if k not in {x for xs in ROUTE_VARS.values() for x in xs}}
         with mock.patch.dict(os.environ, {**clean, "CLAUDE_CODE_CLIENT_CERT": "/c.pem"}, clear=True):
             code, out = run_cli("doctor", "--profiles", str(self.ex / "profiles"), "--out", str(self.out))
-            self.assertEqual(code, 0, out)  # 経路以外で試行に渡る変数は注意として名前を出すだけ（NG にしない）
+            self.assertEqual(code, 0, out)  # 渡さない変数は注意として名前を出すだけ（NG にしない）
             self.assertIn("CLAUDE_CODE_CLIENT_CERT", out)
+            self.assertIn("試行に渡しません", out)
             os.environ["ANTHROPIC_API_KEY"] = "sk-secret-value"
             code, out = run_cli("doctor", "--profiles", str(self.ex / "profiles"), "--out", str(self.out))
-        self.assertEqual(code, 1, out)
+        self.assertEqual(code, 0, out)  # 黙って引き継ぐことはもうないので NG ではない（宣言しなければ渡らない、と知らせる）
         self.assertIn("ANTHROPIC_API_KEY", out)
+        self.assertIn("宣言されていないので試行に渡しません", out)
         self.assertIn("inherit_env", out)  # 直し方は「名前を宣言」（値をプロファイルに書かせない）
         self.assertNotIn("sk-secret-value", out)
         # 親の値を使うと名前だけで宣言すれば OK（値はプロファイルにもログにも出ない）
@@ -500,9 +515,12 @@ class E2E(unittest.TestCase):
         self.assertEqual(code, 3, out)
         self.assertIn("記録できません", out)
         locked = self.out / "locked.jsonl"
-        locked.write_text("{}\n", encoding="utf-8")
-        locked.chmod(0)
-        self.addCleanup(locked.chmod, 0o644)
+        if os.name == "nt":  # Windows では chmod で読めなくできないので、UTF-8 として読めない中身で「読めない台帳」を作る（同じ経路で止まる）
+            locked.write_bytes(b"\xff\xfe\x00{}\n")
+        else:
+            locked.write_text("{}\n", encoding="utf-8")
+            locked.chmod(0)
+            self.addCleanup(locked.chmod, 0o644)
         common_p = ["promote", "--run", str(run_dir), "--candidate", "claude-ds-lite", "--incumbent", "claude-baseline",
                     "--max-regressions", "0", "--min-tasks", "2", "--holdout-log", str(locked)]
         self.assertEqual(run_cli(*common_p)[0], 2)  # 評価済みの候補の数を台帳から数えるのに読めない → 止める

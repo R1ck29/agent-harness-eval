@@ -1,4 +1,5 @@
 """単体テスト: 定義の検証・パーサ・指標・グレーダー・隔離。python -m unittest discover -s tests"""
+import errno
 import json
 import os
 import shutil
@@ -20,7 +21,7 @@ from harness_eval.metrics import decide, deltas, gate, paired_bootstrap, pass_ha
 from harness_eval.runner import append_spend, month_spent, schedule  # noqa: E402
 from harness_eval.adapters import older_than_verified  # noqa: E402
 from harness_eval.isolation import (INHERITED_UNSET, ancestor_instructions, missing_inherited,  # noqa: E402
-                                    passed_claude_vars, route_signature, route_variables)
+                                    dropped_vars, route_signature, route_variables)
 from harness_eval.record import TrialRecord  # noqa: E402
 from harness_eval.spec import (ROUTE_VARS, Grader, SpecError, lint, load_profile, load_profiles, load_task,  # noqa: E402
                                load_tasks)
@@ -515,7 +516,10 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("model-a", s1)
         self.assertNotEqual(route_signature(d, parent), route_signature(d, {k: v for k, v in parent.items() if k != "ANTHROPIC_API_KEY"}))
         with self.assertRaisesRegex(SpecError, "inherit_env"):
-            load_profile(write(tmp / "e.yaml", "id: e\nagent: codex\ninherit_env: [ANTHROPIC_API_KEY]\n"))  # codex の経路の変数ではない
+            load_profile(write(tmp / "e.yaml", "id: e\nagent: codex\ninherit_env: ['OPENAI_API_KEY=sk-x']\n"))  # 名前だけ（値は書かない）
+        # 経路以外の変数（社内の証明書の場所など）も inherit_env で渡せる（環境変数は許可リスト）
+        x = load_profile(write(tmp / "x.yaml", "id: x\nagent: codex\ninherit_env: [SSL_CERT_FILE, MY_CA_DIR]\n"))
+        self.assertEqual(x.inherit_env, ["SSL_CERT_FILE", "MY_CA_DIR"])
 
     def test_missing_inherited(self):
         """inherit_env で宣言したのに親の環境にない（空も含む）変数。実行するとログインできないので先に知らせる。"""
@@ -527,16 +531,19 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(missing_inherited(p, {"CLAUDE_CODE_OAUTH_TOKEN": ""}), ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"])
         self.assertEqual(missing_inherited(p, {"CLAUDE_CODE_OAUTH_TOKEN": "t", "ANTHROPIC_BASE_URL": "u"}), ["ANTHROPIC_BASE_URL"])
 
-    def test_passed_claude_vars(self):
-        """経路以外で親の環境から試行に渡る Claude Code の変数（名前だけ）。消す親セッションの変数・env_unset・env で決めたものは除く。"""
+    def test_dropped_vars(self):
+        """親の環境にあるが試行に渡さない、そのエージェントの設定になりうる変数（名前だけ）。消す親セッションの変数・env_unset・
+        env で決めたもの・経路の変数（route_variables が出す）・inherit_env で渡すものは除く。"""
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
         p = load_profile(write(tmp / "p.yaml", "id: p\nagent: claude_code\nenv: {CLAUDE_CODE_MAX_OUTPUT_TOKENS: '1'}\n"
                                                "env_unset: [CLAUDE_CODE_DROP]\n"))
         parent = {"CLAUDE_CODE_CLIENT_CERT": "/c.pem", "CLAUDE_EFFORT": "high", "CLAUDE_CODE_DROP": "1",
                   "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "9", "CLAUDE_CODE_OAUTH_TOKEN": "t", "PATH": "/bin"}
-        self.assertEqual(passed_claude_vars(p, parent), ["CLAUDE_CODE_CLIENT_CERT"])
-        self.assertEqual(passed_claude_vars(load_profile(write(tmp / "c.yaml", "id: c\nagent: codex\n")), parent), [])
+        self.assertEqual(dropped_vars(p, parent), ["CLAUDE_CODE_CLIENT_CERT"])
+        self.assertEqual(dropped_vars(load_profile(write(tmp / "c.yaml", "id: c\nagent: codex\n")), parent), [])  # Claude の変数は出さない
+        q = load_profile(write(tmp / "q.yaml", "id: q\nagent: claude_code\ninherit_env: [CLAUDE_CODE_CLIENT_CERT]\n"))
+        self.assertNotIn("CLAUDE_CODE_CLIENT_CERT", dropped_vars(q, parent))
         # 経路の変数を消す一覧に入れると、宣言なしの引き継ぎ（doctor の NG）も inherit_env も効かなくなる
         self.assertEqual(set(INHERITED_UNSET) & {n for ns in ROUTE_VARS.values() for n in ns}, set())
 
@@ -615,14 +622,25 @@ install:
   - {run: '{python} -c "import os,pathlib; pathlib.Path(os.environ[\\"CLAUDE_CONFIG_DIR\\"],\\"ran\\").write_text(\\"1\\")"'}
 """))
         tp = make_trial_paths(self.tmp / "trial", ".claude")
-        # 親セッション（デスクトップアプリなど）の変数は消し、組織で意図して設定した変数（クライアント証明書など）は渡す
+        # 環境変数は許可リスト: 親セッション（デスクトップアプリなど）の変数・秘密・宣言していない設定は渡さない。
+        # 組織で意図して設定した変数（クライアント証明書など）は inherit_env に書いたときだけ渡す
         parent = {"CLAUDECODE": "1", "CLAUDE_EFFORT": "low", "CLAUDE_CODE_MESSAGING_SOCKET": "/s", "DROP_ME": "1",
-                  "CLAUDE_CODE_CLIENT_CERT": "/c.pem"}
+                  "CLAUDE_CODE_CLIENT_CERT": "/c.pem", "GH_TOKEN": "ghp_x", "ANTHROPIC_API_KEY": "sk-x", "LC_ALL": "C.UTF-8",
+                  "HTTPS_PROXY": "http://proxy:8080", "TMPDIR": "/tmp/parent", "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
         with mock.patch.dict(os.environ, parent):
             env = build_env(p, tp, "CLAUDE_CONFIG_DIR")
-        for k in ("CLAUDECODE", "CLAUDE_EFFORT", "CLAUDE_CODE_MESSAGING_SOCKET", "DROP_ME"):
+            q = load_profile(write(self.tmp / "q.yaml", "id: q\nagent: claude_code\ninherit_env: [CLAUDE_CODE_CLIENT_CERT, DROP_ME]\n"
+                                                        "env_unset: [DROP_ME]\n"))
+            env_q = build_env(q, tp, "CLAUDE_CONFIG_DIR")
+        for k in ("CLAUDECODE", "CLAUDE_EFFORT", "CLAUDE_CODE_MESSAGING_SOCKET", "DROP_ME", "CLAUDE_CODE_CLIENT_CERT", "GH_TOKEN",
+                  "ANTHROPIC_API_KEY"):
             self.assertNotIn(k, env)
-        self.assertEqual(env["CLAUDE_CODE_CLIENT_CERT"], "/c.pem")
+        self.assertEqual((env["PATH"], env["LC_ALL"], env["HTTPS_PROXY"]), (os.environ["PATH"], "C.UTF-8", "http://proxy:8080"))
+        self.assertEqual(env["TMPDIR"], str(tp.tmp))  # 試行の一時フォルダ（親の TMPDIR ではない）
+        # 文字コードの設定は渡す（落とすと Windows の cp1252 で非 ASCII の出力が UnicodeEncodeError になる）
+        self.assertEqual((env["PYTHONUTF8"], env["PYTHONIOENCODING"]), ("1", "utf-8"))
+        self.assertEqual(env_q["CLAUDE_CODE_CLIENT_CERT"], "/c.pem")
+        self.assertNotIn("DROP_ME", env_q)  # env_unset は inherit_env より強い
         self.assertEqual(env["HOME"], str(tp.home))
         self.assertEqual(env["USERPROFILE"], str(tp.home))
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(tp.config_dir))
@@ -653,9 +671,9 @@ install:
 
     def test_timeout_kills_child_tree(self):
         marker = self.tmp / "child_alive"
-        code = ("import subprocess,sys,time;"
-                f"subprocess.Popen([sys.executable,'-c','import time,pathlib;time.sleep(3);pathlib.Path(r\"{marker}\").write_text(\"1\")']);"
-                "time.sleep(30)")
+        # パスは repr で埋め込む（Windows の C:\Users… を文字列に直接書くと \U がエスケープとして解釈され、子が起動前に落ちる）
+        grandchild = f"import time,pathlib;time.sleep(3);pathlib.Path({str(marker)!r}).write_text('1')"
+        code = f"import subprocess,sys,time;subprocess.Popen([sys.executable,'-c',{grandchild!r}]);time.sleep(30)"
         t0 = time.monotonic()
         pr = run_process([sys.executable, "-c", code], self.tmp, dict(os.environ), None,
                          self.tmp / "o", self.tmp / "e", timeout_s=1)
@@ -667,6 +685,23 @@ install:
     def test_launch_failure(self):
         pr = run_process(["definitely-not-a-command-xyz"], self.tmp, dict(os.environ), None, self.tmp / "o", self.tmp / "e", 5)
         self.assertIsNotNone(pr.launch_error)
+
+    def test_windows_closed_stdin_preserves_the_process_result(self) -> None:
+        from types import SimpleNamespace
+        from harness_eval import isolation
+
+        windows_os = SimpleNamespace(**vars(os))
+        windows_os.name = "nt"
+        stdin = mock.MagicMock()
+        stdin.write.side_effect = OSError(errno.EINVAL, "closed pipe")
+        with write(self.tmp / "child-out", "usage record\n").open("rb") as stdout, \
+                write(self.tmp / "child-err", "").open("rb") as stderr:
+            child = mock.Mock(stdin=stdin, stdout=stdout, stderr=stderr, returncode=0)
+            with mock.patch.object(isolation, "os", windows_os), mock.patch.object(isolation.subprocess, "Popen", return_value=child), \
+                    mock.patch.object(isolation.subprocess, "CREATE_NEW_PROCESS_GROUP", 0, create=True):
+                pr = run_process(["fake-cli"], self.tmp, {}, "prompt", self.tmp / "o", self.tmp / "e", 5)
+        self.assertEqual(pr.returncode, 0)
+        self.assertEqual((self.tmp / "o").read_text(encoding="utf-8"), "usage record\n")
 
 
 class HarvestTests(unittest.TestCase):
@@ -738,7 +773,8 @@ class HarvestTests(unittest.TestCase):
     def test_paths_are_restricted(self):
         """設定ファイル（.claude/・.mcp.json・CLAUDE.md・AGENTS.md）や作業ディレクトリの外には置かせない。"""
         from harness_eval.harvest import _safe_rel
-        for p in (".claude/settings.json", ".mcp.json", "CLAUDE.md", "sub/AGENTS.md", "AGENTS.override.md", "../x", "/etc/x"):
+        for p in (".claude/settings.json", ".mcp.json", "CLAUDE.md", "sub/AGENTS.md", "AGENTS.override.md", "../x", "/etc/x",
+                  "\\etc\\x", "C:\\x", "C:x", "..\\x", "a\\..\\..\\x"):
             self.assertFalse(_safe_rel(p), p)
         self.assertTrue(_safe_rel("data/orders.csv"))
 
@@ -778,7 +814,7 @@ class HarvestTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertTrue((root / "references" / "h-a" / "total.txt").is_file())
         self.assertEqual(selftest(load_task(root / "tasks" / "h-a.yaml")), "")  # 正解例で通り、何もしなければ落ちる
-        self.assertTrue(marker.exists())  # selftest（人が確認したあと）では実行される
+        # selftest（人が確認したあと）では実行される。採点は隔離（bwrap）の中なので、印のファイルは外に残らない（実行されたことは上の結果で分かる）
         always = {**good, "id": "h-b", "check_script": "import sys\nsys.exit(0)\n", "graders": []}
         self.assertEqual(check_written(write_draft(always, root, origin)), "")  # 実行しないので harvest では分からない
         self.assertIn("何もしなくても", selftest(load_task(root / "tasks" / "h-b.yaml")))

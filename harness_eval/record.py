@@ -9,8 +9,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 # 集計から除外する異常終了（評価対象の失敗ではなく、環境起因）
-EXCLUDED_ERRORS = {"rate_limit", "overloaded", "auth", "api_error", "network", "launch_failed", "harness_error", "judge_error",
-                   "not_graded", "interrupted"}
+EXCLUDED_ERRORS = {"rate_limit", "usage_limit", "overloaded", "auth", "api_error", "network", "launch_failed", "harness_error", "judge_error",
+                   "not_graded", "interrupted", "leak"}
 # 失敗として数える異常終了
 
 
@@ -74,12 +74,17 @@ class TrialRecord:
     # 除いた後に判定が 1 つも残らなければ None（Δ に使わない）
     cmp_score: float | None = None
     cmp_passed: bool | None = None
+    cmp_legacy: bool = False  # cmp_passed のフィールドがない旧形式の記録（読み込み時に立てる。passed にフォールバックしてよい）
     valid: bool = True
+    invalid_reason: str | None = None  # 無効な試行の理由（error の種類と同じ。leak = 評価の答え・試行の外を見た）
     error: dict[str, str] | None = None
     failure_tags: list[str] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     skill_detection: str = "exact"
+    # 判定待ちの LLM 判定の入力（最小: 評価観点・対象の種類・盲検化前の対象の文字列）。判定は runner がまとめて行う
+    judge_inputs: list[dict[str, Any]] = field(default_factory=list)
+    judge_votes: list[dict[str, Any]] = field(default_factory=list)  # 判定の記録（系統・モデル・票・多数決。応答の本文は残さない）
     from_cache: bool = False
     trial_dir: str | None = None
     started_at: str | None = None
@@ -90,4 +95,7 @@ class TrialRecord:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "TrialRecord":
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in d.items() if k in known})
+        r = cls(**{k: v for k, v in d.items() if k in known})
+        if "cmp_passed" not in d:
+            r.cmp_legacy = True
+        return r

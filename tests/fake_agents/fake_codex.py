@@ -19,6 +19,36 @@ if log:
     with open(log, "a", encoding="utf-8") as f:
         f.write(json.dumps({"argv": args, "home": os.environ.get("HOME"), "cfg": str(home), "cwd": os.getcwd(),
                             "claudecode": os.environ.get("CLAUDECODE"), "marker": os.environ.get("FAKE_MARKER")}) + "\n")
+if "read-only" in args and "-C" not in args:  # LLM 判定（judge_cmd）: 対象に「2026-03」と店舗名があれば PASS
+    content = prompt.split("<<<", 1)[-1]
+    verdict = os.environ.get("FAKE_CODEX_JUDGE_VERDICT") or ("PASS" if "2026-03" in content and "店" in content else "FAIL")
+    if os.environ.get("FAKE_JUDGE_PROMPT_LOG"):
+        with open(os.environ["FAKE_JUDGE_PROMPT_LOG"], "a", encoding="utf-8") as f:
+            f.write(json.dumps({"family": "codex", "model": args[args.index("-m") + 1] if "-m" in args else None,
+                                "prompt": prompt}, ensure_ascii=False) + "\n")
+    ov = os.environ.get("FAKE_JUDGE_OVERLAP_DIR")  # 判定の同時実行の検出: 入口で印を O_EXCL で作り、少し待って消す。先客がいれば OVERLAP を記録
+    if ov:
+        import time
+        (Path(ov) / f"call-{os.getpid()}-{time.time_ns()}").write_text("x", encoding="utf-8")  # 呼び出し回数（argv ログは並列の追記で混ざる）
+        mark = Path(ov) / "inflight"
+        try:
+            os.close(os.open(mark, os.O_CREAT | os.O_EXCL))
+        except FileExistsError:
+            (Path(ov) / "OVERLAP").write_text("x", encoding="utf-8")
+        else:
+            time.sleep(0.15)
+            mark.unlink()
+    if os.environ.get("FAKE_JUDGE_FAIL"):  # 判定の失敗（エラーイベントと標準エラーに目印を出す）
+        print(json.dumps({"type": "turn.failed", "error": {"message": "LEAK-ERRMSG-XYZ"}}))
+        print("LEAK-STDERR-XYZ", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps({"type": "thread.started", "thread_id": "judge"}))
+    print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": f"{verdict}\n偽の判定"}}, ensure_ascii=False))
+    print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 2000, "cached_input_tokens": 1500, "output_tokens": 50}}))
+    sys.exit(0)
+if os.environ.get("FAKE_REFRESH_AUTH") and (home / "auth.json").is_file():  # 試行の中での認証の更新（refresh）を再現する
+    (home / "auth.json").write_text(json.dumps({"tokens": {"access_token": "refreshed", "refresh_token": "rt-2"},
+                                                "last_refresh": "2026-11-20T00:00:00Z"}), encoding="utf-8")
 agents_md = (home / "AGENTS.md").read_text(encoding="utf-8") if (home / "AGENTS.md").exists() else ""
 skills_dir = Path(os.environ["HOME"]) / ".agents" / "skills"
 

@@ -198,7 +198,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <rect x="20" y="526" width="900" height="34" rx="6" class="acc"/>
 <text x="470" y="548" text-anchor="middle" class="t-acc">後始末：home/ は必ず削除（例外・Ctrl-C でも）／ workdir/ は --keep に従う（既定は不合格だけ残す）</text>
 </svg></div>
-<figcaption>試行レコードはエージェントの種類によらない共通の形です。CLI ごとの出力形式の違いはパースの段階で吸収します。</figcaption>
+<figcaption>試行レコードはエージェントの種類によらない共通の形です。CLI ごとの出力形式の違いはパースの段階で吸収します。試行の中で行うのはコード判定までです。LLM 判定は判定入力だけを残しておき、全試行のあとにまとめて行います（6 章）。</figcaption>
 </figure>
 
 <h2 id="isolation">5. 隔離：エージェントから何が見えるか</h2>
@@ -242,7 +242,8 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <tr><td><code>AWS_SHARED_CREDENTIALS_FILE</code>・<code>AWS_CONFIG_FILE</code></td><td>本物の <code>~/.aws/…</code></td><td>ホームを差し替えても Bedrock の認証を使える（<code>isolate_home: true</code> で、未設定かつファイルがあるときだけ）</td></tr>
 <tr><td><code>CLAUDECODE</code>・<code>CLAUDE_EFFORT</code> など親セッションの変数</td><td>削除</td><td>Claude Code・デスクトップアプリの中から実行しても、推論の強さ・認証の付帯情報（トークンのスコープなど）・親アプリとの通信を引き継がず、端末から実行したときと同じに動く（一覧は <code>harness_eval/isolation.py</code> の <code>INHERITED_UNSET</code>。それ以外で試行に渡る <code>CLAUDE…</code> 変数は <code>doctor</code> が名前を表示）</td></tr>
 <tr><td>プロファイルの <code>env</code></td><td>追加・上書き</td><td>Bedrock の設定など</td></tr>
-<tr><td>経路を変える変数（API キー・Bedrock の切り替え・モデルの別名など）</td><td>親の値をそのまま渡す</td><td>経路と請求先が変わるので、プロファイルで宣言させる（<a href="reference.html#auth">リファレンス「認証」</a>）</td></tr>
+<tr><td>その他の親の環境の変数</td><td>許可リスト（<code>PATH</code>・<code>LANG</code>・<code>LC_*</code>・<code>TERM</code>、Windows の必須、プロキシと証明書）と <code>inherit_env</code> に書いた名前だけ渡す</td><td>API キー・<code>GH_TOKEN</code>・経路を変える変数を黙って渡さない。親の値を使うものはプロファイルで宣言させる（<a href="reference.html#auth">リファレンス「認証」</a>）</td></tr>
+<tr><td><code>TMPDIR</code>・<code>TEMP</code>・<code>TMP</code></td><td>試行の <code>tmp/</code>（隔離の中では空の <code>/tmp</code>）</td><td>一時ファイルを OS の <code>/tmp</code> に残さず、前の試行の残りも見せない。試行のあとに消す</td></tr>
 </table>
 <p>Claude Code にはさらに <code>--settings {"syncClaudeAiSkills":false,"syncClaudeAiPlugins":false}</code> を渡し、claude.ai アカウントから同期されるスキル・プラグインが混ざるのを防ぎます。</p>
 
@@ -250,7 +251,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <ul>
 <li><b>上のフォルダの指示</b>：CLI は作業ディレクトリより上のフォルダにある指示・スキル・ルール・サブエージェント・コマンドも読み込みます（一時ホームでは防げません）。配布物なしの基準にも混ざって比較が壊れるため、<code>--out</code> とその上に <code>CLAUDE.md</code>・<code>CLAUDE.local.md</code>・<code>AGENTS.md</code>・<code>AGENTS.override.md</code>・<code>.mcp.json</code> や <code>.claude/</code>・<code>.codex/</code>・<code>.agents/</code> フォルダがあると、<code>run</code> は止まり、<code>doctor</code> は NG にします。<code>--out</code> はリポジトリやホームの外（例: macOS <code>/Users/Shared/harness-eval</code>、Windows <code>C:\harness-eval</code>）に置いてください。承知の上で実行するなら <code>--allow-ancestor-instructions</code> を付けます（結果とレポートに記録されます）。OS の一時フォルダは Codex が拒否するので使えません。</li>
 <li><b>同梱スキル・組織の管理設定</b>：Claude Code に同梱のスキルや組織の managed settings は読み込まれます。各試行で実際に読み込まれたスキル・プラグイン・MCP を記録し、レポートの「実行環境の記録」と <code>doctor --live</code> で確認できます。</li>
-<li><b>ファイルアクセス</b>：これは「どの設定を読み込むか」の隔離で、試行のファイルの読み書きを禁止するものではありません（Read や Bash を許可すれば絶対パスで外も読めます）。評価には合成データだけを使います。読み取りを制限するのは改善役だけです（<a href="#improve">11 章</a>）。</li>
+<li><b>ファイルアクセス（macOS・Windows・<code>sandbox: off</code>）</b>：Linux では試行を bubblewrap の中で動かし、試行の外（参照解・採点・他の試行・本物のホーム・リポジトリ）を見せません（<a href="reference.html#cheat">リファレンス「ズル対策」</a>）。macOS・Windows と <code>sandbox: off</code> では、Read や Bash を許可すれば絶対パスで外も読めます。そのため、どの環境でも試行のあとにツールの入力とトランスクリプトを調べ、試行の外・評価の答えを参照した試行は無効（<code>leak</code>）にします。見えているテストを消したり skip したりして通した試行は不合格（<code>test_tamper</code>）です。評価には合成データだけを使います。</li>
 <li><b>配布物の実行物</b>：hooks・MCP サーバー・install の <code>run</code> は利用者の権限で動き、sandbox はありません。自分たちでレビュー済みの配布物だけを評価してください（<code>validate</code> が警告します）。</li>
 </ul>
 
@@ -291,8 +292,21 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <ul>
 <li>※ 配布物がないと通らない判定だけが不合格のときは、LLM 判定を省きません（ベースラインとの比較用のスコアに必要なため）。</li>
 <li>スコアの分母は実際に判定したグレーダーだけです。呼ばなかった LLM 判定（skipped_prior_fail）と <code>--no-llm</code> のときの LLM 判定（not_run）は分母から外します。</li>
-<li>UNKNOWN（判定モデルが判断できなかった）は合格にしません。実行されたグレーダーが 1 つもない試行は not_graded として除外します。</li>
+<li>UNKNOWN（判定モデルが判断できなかった）と judge_disagreement（判定役の系統で結果が割れた）は合格にしません。実行されたグレーダーが 1 つもない試行は not_graded として除外します。</li>
 </ul>
+<h3 id="judge">LLM 判定（判定役）の既定</h3>
+<table>
+<tr><th>項目</th><th>既定の挙動</th></tr>
+<tr><td>いつ走るか</td><td>全試行のあと。決定的な検査（コード判定）に合格した出力にだけ、ルーブリック（<code>type: llm</code>）の基準でだけ判定する</td></tr>
+<tr><td>渡すもの</td><td>評価観点と、最終応答かファイル 1 つ（<code>max_chars</code> まで）だけ。会話の記録・ツールの入出力は渡さない</td></tr>
+<tr><td>盲検化</td><td>プロファイル id・モデル名・ハーネスの名前（CLAUDE.md・<code>.claude</code>・Codex など）・パスを伏せる。判定の順番は <code>--seed</code> で入れ替える</td></tr>
+<tr><td>系統</td><td>評価対象と別系統（Claude Code の出力は Codex、Codex の出力は Claude が判定）。別系統の CLI がなければ同系統で動くが「同系統の判定役」と警告し、LLM 判定が決めた結論は INCONCLUSIVE（7 章）</td></tr>
+<tr><td>段階（<code>--tier</code>）</td><td><code>dev</code>（既定）: sonnet / gpt-6.2-sol で 1 回。LLM 判定が決めた結論は「暫定: 採用判断には使えません」。<code>decisive</code>: opus / gpt-6.2-astra で系統ごとに 3 回の多数決。両方の CLI があれば両系統の一致を求め、割れたら judge_disagreement（合格にしない）</td></tr>
+<tr><td>弱いモデル</td><td>haiku など段階が求めるより弱いモデルは止める。<code>--allow-weak-judge</code> で使えるが「弱い判定役」と表示し、結論は採用判断に使えない</td></tr>
+<tr><td>校正</td><td>タスクの <code>calibration</code> で、決定的な採点器と同じことを判定役にも問い、一致率を測る。LLM 判定が合否を決めた試行があるときだけ、<code>--calibration-items</code>（既定 6）件まで、合格と不合格が偏らないように選ぶ</td></tr>
+<tr><td>キャッシュ</td><td><code>&lt;--cache-dir&gt;/judge/</code>。キーは判定入力・モデル・ルーブリック・段階・何票目かのハッシュ。試行のキャッシュとは別なので、段階を変えても解く側は再実行しない</td></tr>
+</table>
+<p>既定を dev にしているのは費用のためです。社内の評価は API の従量課金なので、普段は中位モデルで 1 回だけ判定し、強いモデル・複数回・別系統はマージなどの大事な判断のときだけ使います。判定役に依存する dev の結論は暫定なので、安い判定で採用が決まることはありません。</p>
 <table>
 <tr><th>試行の状態</th><th>例</th><th>pass@1・pass^k の分母</th><th>キャッシュ</th></tr>
 <tr><td class="ok">合格</td><td>全グレーダー合格</td><td>入る</td><td>保存</td></tr>
@@ -360,6 +374,34 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <p><code>--max-regressions</code> は、平均では通過しても一部のタスクが壊れる変更を止めるためのもので、既定では数えません。マージンと同じく結果を見る前に決めます。</p>
 <p>タスクが少ないと区間は実際より狭く出やすいので、判断には 20 タスク以上・3 試行以上を目安にしてください（理由は <a href="design.html#method">設計記録 4 章</a>）。</p>
 
+<h3 id="verdict">評価の結論（verdict）</h3>
+<p><code>run</code> は最後に、候補（<code>--candidate</code>。既定はベースライン以外のすべて）がベースラインより良くなったかを 1 つの結論で出します。CLI の出力の先頭、report.html の冒頭「結論」、summary.json の <code>verdicts</code> に入ります。差は pass@1（配布物がないと通らない判定は両側とも除く）で、95% 区間はタスクでクラスタした 2 段ブートストラップ（タスクを復元抽出し、その中で各条件の試行も復元抽出）で出します。gate と違い、結果を見る前に決めた規則（<code>prereg.json</code>）で判定します。</p>
+<table>
+<tr><th>結論</th><th>条件</th><th><code>verdict</code> の終了コード</th></tr>
+<tr><td class="ok">IMPROVED</td><td>区間の下端 &gt; 0。採用判断に使えないとき（下）は「暫定: 採用判断には使えません」と付く</td><td class="n">0（暫定なら 5）</td></tr>
+<tr><td class="ng">REGRESSED</td><td>区間の上端 &lt; 0。または対照タスク（<code>--control-tag</code>）で区間の上端 &lt; 0</td><td class="n">1</td></tr>
+<tr><td>NO CHANGE</td><td>区間が 0 をまたぎ、±<code>min_effect</code>（既定 0.10）の内側</td><td class="n">4</td></tr>
+<tr><td>INCONCLUSIVE</td><td>区間が 0 をまたぎ ±<code>min_effect</code> より広い（検出力不足）。または下の妥当性チェックに掛かった</td><td class="n">3</td></tr>
+</table>
+<p>妥当性チェック（既定で有効。掛かれば INCONCLUSIVE で、結論より優先）:</p>
+<ul>
+<li>ベースラインの合格率が 20%〜80% の外（<code>floor</code>・<code>ceiling</code>）</li>
+<li>エラーで結果が出なかった試行（<code>usage_limit</code>・<code>rate_limit</code>・<code>auth</code>・<code>agent_error</code> など）が 20% を超える。利用上限のメッセージは、旧版が <code>agent_error</code> と記録した結果からも見つける</li>
+<li>比べたタスクが 5 件未満、または 1 タスク・1 条件あたりの有効な試行が 2 回未満（10 件未満は警告）</li>
+<li>片側にしか値がないタスクがある</li>
+<li>対照タスクの後退の疑い（推定 &lt; −0.10 だが区間が 0 をまたぐ）。<code>--control-tag</code> のタスクがない・対照タスクの有効な試行が足りないときも同じ</li>
+<li>LLM 判定が合否を決めた試行があるのに、判定役が同系統だけ（別系統を確認できない）、または校正が足りない（6 件未満・一致率 80% 未満）。LLM 判定が合否を決めていなければ掛からない</li>
+<li><code>prereg.json</code> のハッシュが合わない</li>
+</ul>
+<p>採用判断に使えないとき（IMPROVED でも暫定）: dev 段階の LLM 判定が合否を決めた試行がある、弱い判定役か盲検化の記録がない旧版の判定が合否を決めた、decisive で 1 系統あたりの判定が 3 回未満（<code>--judge-votes</code>）、事前登録と違う規則で集計し直した（「事後」）。LLM 判定を使わない実行は、段階によらず採用判断に使えます。</p>
+<p><code>python -m harness_eval verdict &lt;結果フォルダ&gt;</code> は、モデルを呼ばずに既存の結果（旧版の結果も可）を判定し直し、<code>verdict.json</code> に書いて、上の終了コードで返します（定義エラーは 2）。<code>run</code> の終了コードは結論によらず 0 です。規則のキーは <a href="reference.html#rules">リファレンス「判定規則」</a> にあります。</p>
+<h3 id="pr-gate">他のリポジトリの PR を関門にかける</h3>
+<ol>
+<li>プロファイルを 2 つ作る。<code>before</code> はデフォルトブランチのハーネス、<code>after</code> は PR のブランチのハーネス。2 つのブランチを別のフォルダに取り出し、それぞれの <code>install</code> の <code>copy</code> でそのフォルダを指す（<code>id</code> は <code>before</code>・<code>after</code>）。タスクは 5 件以上（推奨 10 件以上）。LLM 判定を使うなら <code>calibration</code> を書いたタスクも入れる。</li>
+<li>同じ run で両方を実行する: <code>run --tasks … --profiles before.yaml after.yaml --trials 3 --baseline before --candidate after --tier decisive --out …</code>（対照タスクがあれば <code>--control-tag control</code> も）。</li>
+<li>CI で <code>python -m harness_eval verdict &lt;実行フォルダ&gt;</code> を実行し、終了コード 0（採用してよい IMPROVED）のときだけマージを許す。NO CHANGE・REGRESSED・INCONCLUSIVE・暫定（5）はマージしない。</li>
+</ol>
+
 <h2 id="cost">8. 費用とトークン節約</h2>
 <h3>キャッシュ：変えたところだけ実行する</h3>
 <p>試行の入力をすべてハッシュにしてキャッシュのキーにします。配布物を変えたプロファイルだけキーが変わるので、そのプロファイルだけが再実行されます。</p>
@@ -393,12 +435,12 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <li>プロファイル定義・配布物（copy 元・<code>hash_paths</code>）の中身</li>
 <li>CLI のバージョン・試行番号・harness-eval の版（ツールを更新すると全試行を再実行）</li>
 <li>経路の変数の名前（秘密でないものは値のハッシュも。キー・トークン・ヘッダの値は使わない）</li>
-<li>llm グレーダーがあるタスクだけ: <code>--no-llm</code> の有無・判定エージェント・モデル・判定プロンプト・判定 CLI の版・借りるプロファイルの環境変数・実行ファイル</li>
 </ul>
 </td><td>
 <ul>
 <li>タスクの説明・タグ・<code>paired_negative</code>・<code>split</code>・<code>family</code></li>
 <li>プロファイルの説明・<code>billing</code></li>
+<li>判定役の設定（<code>--tier</code>・判定モデル・回数・<code>--no-llm</code>）。LLM 判定は別の判定キャッシュ（<code>&lt;--cache-dir&gt;/judge/</code>。6 章）で再利用する</li>
 </ul>
 </td></tr>
 </table>
@@ -425,7 +467,9 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <ul>
 <li>費用台帳 <code>--out/spend.jsonl</code> には、再試行・中断・<code>doctor</code> を含め、費用が発生するたびに 1 行追記します。<code>--out</code> を変えると別の台帳になります。<code>harvest</code> は <code>--ledger</code>（既定 <code>results/spend.jsonl</code>）に書くので、<code>run</code> と同じ台帳に数えるには <code>--ledger &lt;run の --out&gt;/spend.jsonl</code> を付けます。口座ごとの残りは <code>plan</code> で確認できます。</li>
 <li>LLM 判定の費用は判定エージェントの口座に入ります。<code>billing: subscription</code> のプロファイルは呼び出しごとの請求がないため、月の予算には数えません（<code>--max-cost-usd</code> には数えます）。</li>
-<li>費用が分からない試行（<code>pricing</code> のない Codex、Codex での判定）は上限の計算に入りません。<code>--jobs</code> が 2 以上だと、実行中の分だけ上限を超えることがあります（実行前に注意を表示）。</li>
+<li>実行前に、解く側（solver）と判定側（judge）を分けて、dev と decisive の両方の見積もりを出します（<code>plan</code> も同じ）。判定側は全出力が決定的な検査に合格した場合の上限で、1 回あたりは判定キャッシュの実測、なければ多めの仮定です。<code>--max-cost-usd</code> は判定の費用を含み、見積もりが上限を超えると何も実行せずに止まります（終了コード 2）。実行中に上限に達したら判定もやめます（<code>budget_stop</code>）。</li>
+<li>判定の費用は、判定のトークンを <code>harness_eval/prices.json</code>（公開 API 価格。出典 URL と取得日つき）で換算します。表にないモデルは CLI が返す費用を使い、それもなければ推測せず「不明」にします。実行後は solver・judge 別のトークン・回数・費用・判定の割合を CLI と summary.json の <code>usage</code> に出します。</li>
+<li>費用が分からない試行（<code>pricing</code> のない Codex、表にないモデルでの判定）は上限の計算に入りません。<code>--jobs</code> が 2 以上だと、実行中の分だけ上限を超えることがあります（実行前に注意を表示）。</li>
 <li>総額はエージェントと LLM 判定の合計です。どちらかが不明な試行が 1 つでもあれば「不明」と表示します。費用の出どころ（<code>cost_source</code>）は <a href="reference.html#cost">リファレンス「費用の出どころ」</a> にあります。</li>
 </ul>
 
@@ -434,7 +478,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <tr><th>トークンを使う場所</th><th>節約の仕組み</th><th>評価の正しさへの影響</th></tr>
 <tr><td>エージェントの試行</td><td>スモーク（1 試行・コード判定のみ）とフル（3 試行＋LLM 判定）の使い分け</td><td>スモークは傾向の確認用と割り切り、判断はフルで行う</td></tr>
 <tr><td>LLM 判定</td><td>コード判定が全合格のときだけ呼ぶ（例外は 6 章の ※）</td><td>なし（不合格の試行は判定しても合否が変わらない）</td></tr>
-<tr><td>LLM 判定</td><td>既定は Claude Code の haiku・ツールなし・1 ターン・対象は最大 2 万文字（<code>--judge-agent codex</code> は読み取り専用だが、ツール・ターンの制限はなく費用も不明）</td><td><code>calibrate</code> で人手ラベルとの一致率を確認する</td></tr>
+<tr><td>LLM 判定</td><td>既定は <code>--tier dev</code>: 評価対象と別系統の中位モデル（sonnet / gpt-6.2-sol）で 1 回。対象は最大 2 万文字（Claude はツールなし・1 ターン、Codex は読み取り専用）。同じ判定入力は判定キャッシュから再利用する</td><td>dev の LLM 判定が決めた結論は暫定。採用判断は <code>--tier decisive</code>（強いモデル・3 回・両系統）で行う。校正の一致率と <code>calibrate</code> で人手ラベルとの一致率を確認する</td></tr>
 <tr><td>再試行</td><td>レート制限・過負荷で落ちた試行だけ（3 章）</td><td>なし（不合格を引き直さない）</td></tr>
 <tr><td>（入れていない）</td><td>早期打ち切り（失敗が出たらそのタスクの残り試行をやめる）</td><td>理由は <a href="design.html#rejected">設計記録「採らなかった案」</a></td></tr>
 </table>
@@ -493,13 +537,15 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <h2 id="outputs">10. 出力と後始末</h2>
 <table>
 <tr><th>場所</th><th>中身</th><th>残る期間</th></tr>
-<tr><td><code>&lt;--out&gt;/&lt;実行ID&gt;/report.html</code></td><td>レポート（比較表・Δ・タスク別・失敗分類・実行環境の記録・試行の詳細）</td><td>残る</td></tr>
-<tr><td><code>&lt;--out&gt;/&lt;実行ID&gt;/summary.json</code></td><td>集計と実行メタデータ（CLI 版・プロファイル/タスクのハッシュ・判定モデル・オプション）</td><td>残る</td></tr>
+<tr><td><code>&lt;--out&gt;/&lt;実行ID&gt;/report.html</code></td><td>レポート（冒頭の結論・比較表・Δ・タスク別・失敗分類・実行環境の記録・試行の詳細）</td><td>残る</td></tr>
+<tr><td><code>&lt;--out&gt;/&lt;実行ID&gt;/summary.json</code></td><td>集計と実行メタデータ（CLI 版・プロファイル/タスクのハッシュ・判定役の設定・オプション）、結論（<code>verdicts</code>）、トークンと費用（<code>usage</code>）</td><td>残る</td></tr>
+<tr><td><code>&lt;--out&gt;/&lt;実行ID&gt;/prereg.json</code></td><td>事前登録（判定規則・そのハッシュ・判定役の設定）。試行を始める前に書く（7 章）</td><td>残る</td></tr>
+<tr><td><code>&lt;--out&gt;/&lt;実行ID&gt;/verdict.json</code></td><td><code>verdict</code> の結論と根拠（7 章）</td><td>残る</td></tr>
 <tr><td><code>&lt;--out&gt;/&lt;実行ID&gt;/trials.jsonl</code></td><td>1 行 1 試行の記録（最終応答・ツール呼び出しの入力を含む）</td><td>残る</td></tr>
 <tr><td><code>&lt;--out&gt;/&lt;実行ID&gt;/trials/&lt;タスク&gt;/&lt;プロファイル&gt;/&lt;n&gt;/stdout.jsonl</code>・<code>stderr.txt</code></td><td>エージェントの生出力（プロンプトと応答を含む）</td><td><code>--keep none</code> で削除</td></tr>
 <tr><td><code>trials/…/&lt;n&gt;/workdir/</code></td><td>エージェントが作ったファイル</td><td>既定は不合格の試行だけ残す（<code>--keep</code>）</td></tr>
 <tr><td><code>trials/…/&lt;n&gt;/home/</code></td><td>一時ホーム（認証ファイルの複製を含みうる）</td><td>試行の終わりに必ず削除（中断時も）</td></tr>
-<tr><td><code>.harness-eval-cache/</code></td><td>キャッシュ（試行の記録と同じ内容）</td><td>残る</td></tr>
+<tr><td><code>.harness-eval-cache/</code></td><td>キャッシュ（試行の記録と同じ内容）。<code>judge/</code> は判定キャッシュ（1 票ごとの結果と理由・トークン・費用。判定入力は残さない）</td><td>残る</td></tr>
 <tr><td><code>&lt;--out&gt;/spend.jsonl</code></td><td>費用台帳（1 行 <code>{at, usd, run_id, agent, billing}</code>）</td><td>残る</td></tr>
 <tr><td><code>&lt;--out&gt;/holdout_uses.jsonl</code></td><td>holdout 利用台帳（holdout のタスクを含む実行ごとに 1 行。id とハッシュだけで、プロンプト・応答は書かない。11 章）</td><td>残る</td></tr>
 <tr><td><code>&lt;--out&gt;/&lt;実行ID&gt;/promote.json</code></td><td><code>promote</code> の判定と根拠（11 章）</td><td>残る</td></tr>
