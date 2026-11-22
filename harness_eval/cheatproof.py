@@ -205,11 +205,16 @@ def tamper_check(before: dict[str, str], workdir: Path) -> list[dict[str, str]]:
                 # 変える・assert True にする、など）。末尾への新しいテストの追加と新しいファイルは数えない。
                 # テストを直すこと自体が課題のタスクは allow_test_changes: true
                 body = [ln for ln in removed if ln.strip() and not ln.strip().startswith(("#", "//"))]
+                line_finding = None
                 if body:
-                    found.append({"kind": "test_body_modified", "path": path, "line": f"changed: {body[0].strip()[:160]}"})
+                    line_finding = f"changed: {body[0].strip()[:160]}"
                 elif not after[path].startswith(old.rstrip()) and not _skip_added_here(added):
                     # 行を消さない弱め方（先頭に return・assert の前に代入・autouse の差し替え）: 末尾への追記ではない変更
-                    found.append({"kind": "test_body_modified", "path": path, "line": f"inserted before the end: {(added or [''])[0].strip()[:160]}"})
+                    line_finding = f"inserted before the end: {(added or [''])[0].strip()[:160]}"
+                if line_finding and path.endswith(".py") and _pure_addition(old, after[path]):
+                    line_finding = None  # クラス途中への新しい test・import への名前の追加などは、AST で見れば純粋な追加
+                if line_finding:
+                    found.append({"kind": "test_body_modified", "path": path, "line": line_finding})
                 elif path.endswith(".py") and (name := _redefined_python_name(old, after[path])):
                     found.append({"kind": "test_body_modified", "path": path, "line": f"redefined: {name}"})
         for ln in added:
@@ -312,6 +317,106 @@ def _redefined_python_name(old: str, new: str) -> str | None:
                  if after[name] > before[name] or dunder_writes(after, name) > dunder_writes(before, name)), None)
 
 
+_RESERVED_NAMES = {"setup_module", "teardown_module", "setup_function", "teardown_function", "load_tests", "setUpModule", "tearDownModule"}
+_FIXTURE_NAMES = {"fixture", "yield_fixture"}
+
+
+def _bound_names(body: list[ast.stmt]) -> set[str]:
+    """このスコープ（モジュール・クラスの本体）で束縛される名前（def・class・代入・import・for・with など。global 宣言越しも含む）。"""
+    return {t[0] for t in _python_bindings(body, assignments=True)}
+
+
+def _is_fixture(node: ast.AST) -> bool:
+    return any((isinstance(p, ast.Name) and p.id in _FIXTURE_NAMES) or (isinstance(p, ast.Attribute) and p.attr in _FIXTURE_NAMES)
+               for d in getattr(node, "decorator_list", ()) for p in ast.walk(d))
+
+
+def _alias_names(aliases: Iterable[ast.alias]) -> list[str]:
+    return [(a.asname or a.name).split(".")[0] for a in aliases]
+
+
+class _PureAddition:
+    """基準の文の列が、順序・内容そのままで残り、許す追加だけが挿入されているか（クラスの本体は再帰。関数の本体は 1 文でも変われば不可）。
+
+    許す追加: 既存のモジュール・クラス直下の新しい test_* 関数（名前が既存・基底クラスのものと重ならない・fixture でない）、モジュール直下の新しいクラス、
+    新しい import 文、既存の `from m import a` への名前の追加。追加の import の束縛名が、基準で束縛されている名前・基準が参照している名前
+    （組み込み・`*` import が供給する名前・fixture を受ける引数名）と重なれば不可。それ以外の追加（代入・式文・global・非テストのメソッド・属性・フック・fixture）はすべて不可。"""
+
+    def __init__(self, old: ast.Module):
+        self.classes = {n.name: n for n in ast.walk(old) if isinstance(n, ast.ClassDef)}
+        # 追加の import・クラスで上書きしてはいけない名前: 基準で束縛されている名前、基準が参照している名前（組み込み・`*` import が
+        # 供給する名前・conftest の fixture を受ける引数名を含む）
+        used = {n.id for n in ast.walk(old) if isinstance(n, ast.Name)} | {a.arg for a in ast.walk(old) if isinstance(a, ast.arg)}
+        self.shadow = _bound_names(old.body) | used
+        self.imported: list[str] = []
+
+    def base_names(self, cls: ast.ClassDef, seen: set[str]) -> set[str]:
+        """同じファイル（基準）にある基底クラスの本体の名前（再帰）。ほかのファイルから import した基底クラスは見えない。"""
+        out: set[str] = set()
+        for b in cls.bases:
+            name = b.attr if isinstance(b, ast.Attribute) else getattr(b, "id", "")
+            if name in self.classes and name not in seen:
+                seen.add(name)
+                out |= _bound_names(self.classes[name].body) | self.base_names(self.classes[name], seen)
+        return out
+
+    def ok(self, old: list[ast.stmt], new: list[ast.stmt], owner: ast.ClassDef | None) -> bool:
+        taken = _bound_names(old) | (self.base_names(owner, {owner.name}) if owner else set())
+        i = 0
+        for node in new:
+            if i < len(old) and self.same(old[i], node, owner):
+                i += 1
+            elif self.allowed_addition(node, owner, taken):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    taken.add(node.name)  # 追加した名前どうしも重ならない
+            else:
+                return False
+        return i == len(old)
+
+    def same(self, old: ast.stmt, new: ast.stmt, owner: ast.ClassDef | None) -> bool:
+        if isinstance(old, ast.ClassDef) and isinstance(new, ast.ClassDef):
+            head = lambda c: ast.dump(ast.ClassDef(c.name, c.bases, c.keywords, [], c.decorator_list), include_attributes=False)  # noqa: E731
+            return head(old) == head(new) and self.ok(old.body, new.body, old)
+        if owner is None and isinstance(old, ast.ImportFrom) and isinstance(new, ast.ImportFrom) \
+                and (old.module, old.level) == (new.module, new.level):
+            kept = [ast.dump(a, include_attributes=False) for a in old.names]
+            extra: list[ast.alias] = []
+            j = 0
+            for a in new.names:  # 既存の alias が、順序どおりそのまま残っている
+                if j < len(kept) and ast.dump(a, include_attributes=False) == kept[j]:
+                    j += 1
+                else:
+                    extra.append(a)
+            if j == len(kept) and all(a.name != "*" for a in extra):
+                self.imported += _alias_names(extra)
+                return True
+        return ast.dump(old, include_attributes=False) == ast.dump(new, include_attributes=False)
+
+    def allowed_addition(self, node: ast.stmt, owner: ast.ClassDef | None, taken: set[str]) -> bool:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return node.name.startswith("test_") and node.name not in taken and not _is_fixture(node)
+        if owner is not None:
+            return False  # 既存クラスへの非テストの追加はすべて改ざん
+        if isinstance(node, ast.ClassDef):
+            return (node.name not in taken and node.name not in self.shadow and node.name not in _RESERVED_NAMES
+                    and not node.name.startswith("pytest_") and not _is_fixture(node))
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and all(
+                a.name != "*" and not (a.asname and a.name.split(".")[-1] in _FIXTURE_NAMES) for a in node.names):  # fixture の別名は不可
+            self.imported += _alias_names(node.names)
+            return True
+        return False
+
+
+def _pure_addition(old: str, new: str) -> bool:
+    """既存の .py のテストファイルへの変更が、上の意味での純粋な追加だけか（どちらかが構文エラーなら False）。"""
+    try:
+        before, after = ast.parse(old), ast.parse(new)
+    except SyntaxError:
+        return False
+    check = _PureAddition(before)
+    return check.ok(before.body, after.body, None) and not set(check.imported) & check.shadow
+
+
 # 収集の子プロセスで動かす: pytest の収集結果（conftest・プラグインによる差し替えも含む）の各テストについて、実際に実行される関数の位置を記録する
 _COLLECT_SCRIPT = """
 import inspect, json, sys
@@ -340,24 +445,44 @@ with open(out, "w") as f:
 _COLLECT_TIMEOUT_S = 120
 
 
-def _baseline_test_positions(path: str, text: str) -> dict[str, int]:
-    """基準のテストファイルが定義するテスト（pytest の node id の後半 → 定義の先頭行。デコレータがあればその行）。"""
+def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None = None) -> dict[str, int]:
+    """テストファイルが定義するテスト（pytest の node id の後半 → 定義の先頭行。デコレータがあればその行）。dumps を渡すと、定義の AST の表現も入れる。"""
     try:
         tree = ast.parse(text)
     except SyntaxError:
         return {}
     first = lambda n: min([n.lineno, *(d.lineno for d in n.decorator_list)])  # noqa: E731
     out: dict[str, int] = {}
+
+    def put(key: str, node: ast.AST) -> None:
+        out[key] = first(node)
+        if dumps is not None:
+            dumps[key] = ast.dump(node, include_attributes=False)
+
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
-            out[f"{path}::{node.name}"] = first(node)
+            put(f"{path}::{node.name}", node)
         elif isinstance(node, ast.ClassDef) and (node.name.startswith("Test") or any(
                 (b.attr if isinstance(b, ast.Attribute) else getattr(b, "id", "")).endswith("TestCase") for b in node.bases)) \
                 and not any(isinstance(m, ast.FunctionDef) and m.name in ("__init__", "__new__") for m in node.body):  # pytest は集めない
             for m in node.body:
                 if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name.startswith("test"):
-                    out[f"{path}::{node.name}::{m.name}"] = first(m)
+                    put(f"{path}::{node.name}::{m.name}", m)
     return out
+
+
+def _current_positions(root: Path, path: str, text: str) -> dict[str, int]:
+    """基準にあったテストの定義が、いまのファイルでも同じ内容で残っているとき、その先頭行。クラスの途中に新しいテストを足すと
+    後ろの行がずれるので、収集時の位置は基準の行ではなく、いまのファイルでの同じ定義の位置と照合する。"""
+    old_dumps: dict[str, str] = {}
+    _baseline_test_positions(path, text, old_dumps)
+    try:
+        now = (root / path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    new_dumps: dict[str, str] = {}
+    lines = _baseline_test_positions(path, now, new_dumps)
+    return {k: lines[k] for k, d in old_dumps.items() if new_dumps.get(k) == d}
 
 
 def rebound_tests(before: dict[str, str], workdir: Path, tmp_dir: Path) -> list[dict[str, str]]:
@@ -372,6 +497,7 @@ def rebound_tests(before: dict[str, str], workdir: Path, tmp_dir: Path) -> list[
         if path.endswith(".py") and TEST_FILE.search(path) and Path(path).name != "conftest.py":
             found = _baseline_test_positions(path, text)
             if found:
+                found.update(_current_positions(root, path, text))
                 expected.update(found)
                 files.append(path)
     if not expected:
