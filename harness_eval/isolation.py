@@ -19,6 +19,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 import errno
 import hashlib
+import json
 import logging
 import os
 import platform
@@ -33,7 +34,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO, Callable
 
 from . import credentials
 from .spec import ROUTE_VARS, Profile
@@ -564,10 +565,103 @@ def kill_running() -> None:
 
 
 LOG_LIMIT = 16 * 1024 * 1024  # 1 本のログ（stdout / stderr）をディスクへ書く量の上限
-_USAGE_TAIL_LIMIT = 1024 * 1024  # 上限を超えたあとに、使用量の行として追加で残す量
-_USAGE_LINE_MAX = 64 * 1024  # 使用量の行として調べる 1 行の最大長（これより長い行は捨てる）
-# 使用量を載せるイベント行（Claude の result・Codex の turn.completed。adapters.parse(usage_only=True) が読むもの）
+_USAGE_LINE_MAX = LOG_LIMIT  # 上限のあとで 1 行として読む最大長（runner._solver_accounting_lines が読む 1 行の上限と同じ）。超えた行は捨てる
+# 使用量を載せるイベント行（Claude の result・Codex の turn.completed。adapters.parse(usage_only=True) が読むもの）の足切り。本物かどうかは
+# JSON として読んだトップレベルの type で決める（ツールの出力にこの文字列が入っていても、行の枠は使わない）
 _USAGE_EVENT = re.compile(rb'"type"\s*:\s*"(result|turn\.completed)"')
+_RESULT_SCALARS = ("type", "subtype", "duration_ms", "num_turns", "total_cost_usd", "terminal_reason", "is_error", "api_error_status")
+_TURN_USAGE_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "cache_write_input_tokens", "reasoning_output_tokens")
+_Scalar = (str, int, float, bool, type(None))
+
+
+def _scalars(d: Any, limit: int = 200) -> dict[str, Any]:
+    """数値・短い文字列だけの辞書（使用量の中身）。"""
+    return {str(k): (v[:limit] if isinstance(v, str) else v) for k, v in (d if isinstance(d, dict) else {}).items() if isinstance(v, _Scalar)}
+
+
+def _slim_result(e: dict[str, Any]) -> dict[str, Any]:
+    """Claude の result 行から、パーサ（adapters.ClaudeAdapter.parse）が使う項目だけを小さく残す（最終応答の長い本文は落とす）。"""
+    out: dict[str, Any] = {k: (v[:200] if isinstance(v, str) else v) for k, v in e.items() if k in _RESULT_SCALARS and isinstance(v, _Scalar)}
+    if isinstance(e.get("usage"), dict):
+        out["usage"] = _scalars(e["usage"])
+    if isinstance(e.get("modelUsage"), dict):
+        out["modelUsage"] = {str(k): _scalars(v) for k, v in list(e["modelUsage"].items())[:20]}
+    if isinstance(e.get("result"), str):
+        out["result"] = e["result"][:2000]  # エラーの理由として読まれる冒頭だけ
+    if isinstance(e.get("errors"), list):
+        out["errors"] = [str(x)[:200] for x in e["errors"][:5]]
+    return out
+
+
+class _UsageKeeper:
+    """ログが上限に達したあとの出力から、使用量のイベントだけを集める。1 行ずつ（上限をまたぐ行も、続きを読み切ってから）JSON として読み、
+    トップレベルの type が result のものは最新の 1 件（本文を落とす）、turn.completed のものは使用量を足した 1 件にして、末尾に残す。"""
+
+    def __init__(self) -> None:
+        self.line = bytearray()
+        self.skipping = False  # 今の行は長すぎるので使わない
+        self.result: dict[str, Any] | None = None
+        self.turns = 0
+        self.usage = dict.fromkeys(_TURN_USAGE_KEYS, 0)
+
+    def track(self, chunk: bytes) -> None:
+        """上限の前に書いた分: 最後の改行より後ろ（未完の行）だけ持つ。上限で切れた行を、続きと合わせて 1 行として読むため。"""
+        i = chunk.rfind(b"\n")
+        if i >= 0:
+            self.line, self.skipping = bytearray(chunk[i + 1:]), False
+        elif not self.skipping:
+            self.line += chunk
+        if len(self.line) > _USAGE_LINE_MAX:
+            self.line.clear()
+            self.skipping = True
+
+    def feed(self, chunk: bytes) -> None:
+        parts = chunk.split(b"\n")
+        for i, part in enumerate(parts):
+            if not self.skipping:
+                if len(self.line) + len(part) <= _USAGE_LINE_MAX:
+                    self.line += part
+                else:
+                    self.skipping = True
+                    self.line.clear()
+            if i < len(parts) - 1:  # 1 行が終わった
+                self.flush_line()
+
+    def flush_line(self) -> None:
+        if not self.skipping and self.line:
+            self.take(bytes(self.line))
+        self.line.clear()
+        self.skipping = False
+
+    def take(self, done: bytes) -> None:
+        if not _USAGE_EVENT.search(done):
+            return
+        try:
+            e = json.loads(done)
+        except (ValueError, RecursionError):
+            return
+        if not isinstance(e, dict):
+            return
+        if e.get("type") == "result":
+            self.result = _slim_result(e)
+        elif e.get("type") == "turn.completed":
+            self.turns += 1
+            u = e.get("usage") if isinstance(e.get("usage"), dict) else {}
+            for k in _TURN_USAGE_KEYS:
+                try:
+                    self.usage[k] += int(u.get(k) or 0)
+                except (TypeError, ValueError):
+                    pass
+
+    def tail(self) -> bytes:
+        """ログの末尾に足す行（改行で終わる）。未完の最後の行も読む。"""
+        self.flush_line()
+        out = []
+        if self.turns:
+            out.append({"type": "turn.completed", "usage": self.usage})
+        if self.result is not None:
+            out.append(self.result)
+        return b"".join(json.dumps(x).encode("utf-8") + b"\n" for x in out)
 
 
 @dataclass
@@ -601,21 +695,22 @@ def run_process(cmd: list[str], cwd: Path, env: dict[str, str], stdin_text: str 
 
         truncated: list[bool] = []
 
+        finalizers: list[Callable[[], None]] = []
+
         def drain(pipe: BinaryIO, log: BinaryIO) -> None:
             written = 0
-            ended_line = True  # 書いた最後のバイトが改行か（ちょうど行末で上限に達したときの判定）
-            cut = False  # 上限に達した。以降は使用量の行だけを残す
-            line = bytearray()
-            skipping = False  # 今の行は長すぎる（または途中から始まる）ので使用量の行として調べない
-            tail_left = _USAGE_TAIL_LIMIT
+            cut = False  # 上限に達した。以降は使用量のイベントだけを残す
+            keeper = _UsageKeeper()
+            done = False
 
-            def keep(done: bytes) -> None:
-                nonlocal tail_left
-                if len(done) + 1 <= tail_left and _USAGE_EVENT.search(done):
-                    log.write(done + b"\n")
+            def finish() -> None:  # log_lock の中で 1 回だけ。集めた使用量を末尾に書く（タイムアウトで打ち切られる場合も、親が呼ぶ）
+                nonlocal done
+                if cut and not done:
+                    done = True
+                    log.write(keeper.tail())
                     log.flush()
-                    tail_left -= len(done) + 1
 
+            finalizers.append(finish)
             try:
                 with pipe:
                     while chunk := os.read(pipe.fileno(), 64 * 1024):
@@ -627,31 +722,19 @@ def run_process(cmd: list[str], cwd: Path, env: dict[str, str], stdin_text: str 
                                     log.write(chunk)
                                     log.flush()
                                     written += len(chunk)
-                                    ended_line = chunk.endswith(b"\n")
+                                    keeper.track(chunk)
                                     continue
                                 head = chunk[:log_limit - written]
                                 log.write(head + b"\n")  # 途中で切れた行は、あとの使用量の行と混ぜない
                                 log.flush()
                                 cut = True
                                 truncated.append(True)
-                                skipping = not (head.endswith(b"\n") if head else ended_line)
+                                keeper.track(head)  # 切れた行は、続きを読み切ってから使用量の行かどうかを決める
                                 chunk = chunk[len(head):]
-                            parts = chunk.split(b"\n")
-                            for i, part in enumerate(parts):
-                                if not skipping:
-                                    if len(line) + len(part) <= _USAGE_LINE_MAX:
-                                        line += part
-                                    else:
-                                        skipping = True
-                                        line.clear()
-                                if i < len(parts) - 1:  # 1 行が終わった
-                                    if not skipping:
-                                        keep(bytes(line))
-                                    line.clear()
-                                    skipping = False
-                    with log_lock:  # 改行のない最後の断片
-                        if cut and not skipping and line and not stop_writing:
-                            keep(bytes(line))
+                            keeper.feed(chunk)
+                    with log_lock:
+                        if not stop_writing:
+                            finish()
             except OSError as e:
                 errors.append(e)
 
@@ -705,6 +788,11 @@ def run_process(cmd: list[str], cwd: Path, env: dict[str, str], stdin_text: str 
         finally:
             with log_lock:
                 stop_writing = True
+                for finish in finalizers:  # パイプを握る子孫が残っていても、集めた使用量は残す
+                    try:
+                        finish()
+                    except (OSError, ValueError):
+                        pass
             with _RUNNING_LOCK:
                 _RUNNING.discard(p)
         if errors:
