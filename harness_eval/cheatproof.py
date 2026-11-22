@@ -328,13 +328,25 @@ def _redefined_python_name(old: str, new: str) -> str | None:
         return sum(n for t, n in counts.items() if len(t) > len(name) and t[:len(name)] == name and t[len(name)].startswith("__"))
 
     names = list(_python_bindings(baseline))
-    owners = {t[-1] for t in names}
+    owners = _test_owner_names(baseline)
     inner_before, inner_after = _dunder_write_owners(ast.parse(old), owners), _dunder_write_owners(ast.parse(new), owners)
     star = next((scope for scope, n in after.items() if scope[-1:] == ("*",) and n > before[scope]), None)  # 新しい `from m import *`
     return next((".".join(name) for name in names
                  if after[name] > before[name] or dunder_writes(after, name) > dunder_writes(before, name)
                  or inner_after[name[-1]] > inner_before[name[-1]]),
                 ".".join(star) if star else None)
+
+
+def _test_owner_names(body: list[ast.stmt]) -> set[str]:
+    """基準のテストの名前（test* の関数・メソッド）と、テストを含むクラスの名前。ヘルパーや、テストを持たないクラスは含まない。"""
+    out: set[str] = set()
+    for node in ast.walk(ast.Module(body, [])):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
+            out.add(node.name)
+        elif isinstance(node, ast.ClassDef) and (any(isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name.startswith("test")
+                                                     for m in ast.walk(node)) or node.name.startswith("Test")):
+            out.add(node.name)
+    return out
 
 
 def _dunder_write_owners(tree: ast.AST, owners: set[str]) -> Counter:
@@ -654,24 +666,40 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]]) 
     return not _LIB_DIRS & set(rel.parts) and (str(f), int(pos[1])) not in known
 
 
+def _nested_defs(tree: ast.AST) -> list[tuple[str, ast.AST]]:
+    """関数の中で定義された関数・lambda（デコレータの内側のラッパーなど）と、その qualname（`retry.<locals>.wrapper` の形）。"""
+    out: list[tuple[str, ast.AST]] = []
+
+    def visit(node: ast.AST, prefix: str, inside: bool) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                name = prefix + (getattr(child, "name", None) or "<lambda>")
+                if inside:
+                    out.append((name, child))
+                visit(child, name + ".<locals>.", True)
+            elif isinstance(child, ast.ClassDef):
+                visit(child, prefix + child.name + ".", inside)
+            else:
+                visit(child, prefix, inside)
+
+    visit(tree, "", False)
+    return out
+
+
 def _known_wrappers(root: Path, before: dict[str, str]) -> set[tuple[str, int]]:
-    """基準にあった、関数の中で定義された関数（デコレータの内側のラッパー）が、いまのファイルで同じ内容で残っている位置（絶対パス・先頭行）。"""
-
-    def nested(tree: ast.AST) -> list[ast.AST]:
-        return [n for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)) for b in f.body for n in ast.walk(b)
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-
+    """基準のファイルにあった、関数の中で定義された関数・lambda（デコレータの内側のラッパー）と同じ qualname のものの、いまのファイルでの位置
+    （絶対パス・先頭行）。本体を正当に直しても同じ qualname なら残る。新しい名前の関数や、モジュール直下・クラス直下の関数は含まない。"""
     out: set[tuple[str, int]] = set()
     for path, text in before.items():
         if not path.endswith(".py"):
             continue
         try:
-            old = {ast.dump(n, include_attributes=False) for n in nested(ast.parse(text))}
-            new = nested(ast.parse((root / path).read_text(encoding="utf-8")))
+            old = {q for q, _ in _nested_defs(ast.parse(text))}
+            new = _nested_defs(ast.parse((root / path).read_text(encoding="utf-8")))
         except (SyntaxError, OSError, UnicodeDecodeError):
             continue
-        out |= {(str((root / path).resolve()), min([n.lineno, *(d.lineno for d in n.decorator_list)])) for n in new
-                if ast.dump(n, include_attributes=False) in old}
+        out |= {(str((root / path).resolve()), min([n.lineno, *(d.lineno for d in getattr(n, "decorator_list", []))]))
+                for q, n in new if q in old}
     return out
 
 

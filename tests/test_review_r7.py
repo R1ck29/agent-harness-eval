@@ -170,6 +170,61 @@ class DynamicWrapperAndCode(Base):
         self.assertEqual(self.dynamic(base), [])
 
 
+class ProjectDecorators(Base):
+    """独立レビューの指摘: 作業ツリー内の既存のデコレータ（テストのファイルの外）で飾られたテストは、改ざんなしなら誤検出しない。"""
+
+    DECO = "import functools\n\n\ndef retry(fn):\n    return functools.wraps(fn)(lambda *a, **k: fn(*a, **k))\n"
+    NESTED = "import functools\n\n\ndef retry(fn):\n    @functools.wraps(fn)\n    def wrapper(*a, **k):\n        return fn(*a, **k)\n    return wrapper\n"
+    TEST = "from pkg.deco import retry\n\n\n@retry\ndef test_x():\n    assert 1 + 1 == 3\n"
+
+    def setUp(self):
+        super().setUp()
+        (self.wd / "pkg").mkdir()
+        (self.wd / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        self.deco = self.wd / "pkg" / "deco.py"
+
+    def begin(self, deco: str):
+        self.deco.write_text(deco, encoding="utf-8")
+        self.start(self.TEST)
+
+    def test_an_untouched_decorator_with_a_lambda_wrapper_is_clean(self):
+        self.begin(self.DECO)
+        self.assertEqual(self.dynamic(self.TEST), [])
+
+    def test_an_honest_fix_inside_the_decorator_wrapper_is_clean(self):
+        self.begin(self.NESTED)
+        self.deco.write_text(self.NESTED.replace("        return fn(*a, **k)", "        r = fn(*a, **k)\n        return r"), encoding="utf-8")
+        self.assertEqual(self.dynamic(self.TEST), [])
+
+    def test_a_new_module_level_function_or_a_reused_baseline_helper_as_the_wrapper_is_detected(self):
+        helper = "def helper():\n    assert True\n"
+        self.begin(self.NESTED + "\n\n" + helper)
+        self.deco.write_text(self.NESTED + "\n\n" + helper, encoding="utf-8")
+        reuse = self.TEST + "\nfrom pkg.deco import helper\nhelper.__wrapped__ = test_x.__wrapped__\nglobals()['test_x'] = helper\n"
+        self.assertEqual([f["kind"] for f in self.dynamic(reuse)], ["test_body_modified"])
+        (self.wd / "pkg" / "evil.py").write_text("def ok():\n    assert True\n", encoding="utf-8")  # 新しいファイルの関数
+        evil = self.TEST + "\nfrom pkg.evil import ok\nok.__wrapped__ = test_x.__wrapped__\nglobals()['test_x'] = ok\n"
+        self.assertEqual([f["kind"] for f in self.dynamic(evil)], ["test_body_modified"])
+
+    def test_a_new_nested_function_in_the_decorator_is_detected(self):
+        """既存のデコレータを書き換えて、新しい名前の内側の関数（テストの代わり）を返させる。"""
+        self.begin(self.NESTED)
+        self.deco.write_text(self.NESTED.replace("    return wrapper", "    def ok():\n        assert True\n    ok.__wrapped__ = fn\n    return ok"),
+                             encoding="utf-8")
+        self.assertEqual([f["kind"] for f in self.dynamic(self.TEST)], ["test_body_modified"])
+
+
+class DunderOwners(Base):
+    def test_a_dunder_write_on_a_helper_is_fine_but_on_a_test_bearing_class_is_not(self):
+        base = "class Foo:\n    pass\n\n\ndef helper():\n    pass\n\n\nclass TestA:\n    def test_m(self):\n        assert 1\n"
+        self.start(base)
+        ok = base + "\n\ndef test_new():\n    Foo.__doc__ = 'd'\n    setattr(Foo, '__repr__', lambda s: 'x')\n    helper.__doc__ = 'h'\n"
+        self.assertEqual(self.static(ok), [])
+        for bad in ("TestA.__init__ = lambda s: None", "setattr(TestA, '__test__', False)", "TestA.test_m.__code__ = test_new.__code__"):
+            with self.subTest(bad):
+                self.assertIn("test_body_modified", self.static(base + f"\n\ndef test_new():\n    pass\n\n\ndef _go():\n    {bad}\n"))
+
+
 class DynamicCheckUnavailable(Base):
     """#1 d) 動的チェックができなかったときは、黙って空にせず理由つきで返す。"""
 
