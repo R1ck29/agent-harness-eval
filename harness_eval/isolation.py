@@ -725,11 +725,13 @@ def run_process(cmd: list[str], cwd: Path, env: dict[str, str], stdin_text: str 
                                     keeper.track(chunk)
                                     continue
                                 head = chunk[:log_limit - written]
-                                log.write(head + b"\n")  # 途中で切れた行は、あとの使用量の行と混ぜない
+                                keeper.track(head)  # 切れた行は、続きを読み切ってから使用量の行かどうかを決める
+                                # 行の途中で切れたとき、ログに残る前半は JSON として読めない形で閉じる（NUL）。前半がたまたま完全な使用量の行
+                                # でも、ログの側で数えない（続きを読み切った 1 行を、keeper が 1 回だけ数える）
+                                log.write(head + (b"\x00\n" if keeper.line or keeper.skipping else b"\n"))
                                 log.flush()
                                 cut = True
                                 truncated.append(True)
-                                keeper.track(head)  # 切れた行は、続きを読み切ってから使用量の行かどうかを決める
                                 chunk = chunk[len(head):]
                             keeper.feed(chunk)
                     with log_lock:

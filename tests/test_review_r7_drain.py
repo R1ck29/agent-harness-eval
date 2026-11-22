@@ -87,6 +87,21 @@ class DrainUsageTests(unittest.TestCase):
         res, out = self.run_script(20_001 + 20, body)
         self.assertEqual(CodexAdapter().parse(list(_solver_accounting_lines(out)), usage_only=True).tokens["input"], 2000)
 
+    def test_a_cap_at_the_very_end_of_a_turn_line_does_not_count_it_twice(self):
+        """上限がちょうど使用量の行の末尾（改行の直前）に当たる。ログに残った前半を完全な行として数えず、続きの改行で読み切った行だけを数える。"""
+        pad, line = "g" * 5000, json.dumps(TURN)
+        same_chunk = f"print({pad!r})\nprint({line!r})\nprint({line!r})\n"
+        split_chunks = ("import sys, time\n"  # 行末で別のチャンクにする（ログに完全な行が改行なしで残る）
+                        f"sys.stdout.write({pad!r} + '\\n' + {line!r}); sys.stdout.flush(); time.sleep(0.4)\n"
+                        f"sys.stdout.write('\\n' + {line!r} + '\\n')\n")
+        limit = len(pad) + 1 + len(line)
+        for label, body in (("same chunk", same_chunk), ("split chunks", split_chunks)):
+            for lim in (limit - 1, limit, limit + 1):
+                with self.subTest(label, limit=lim):
+                    res, out = self.run_script(lim, body)
+                    self.assertTrue(res.log_truncated)
+                    self.assertEqual(CodexAdapter().parse(list(_solver_accounting_lines(out)), usage_only=True).tokens["input"], 2000)
+
     def test_the_latest_result_wins_and_lookalikes_are_not_counted(self):
         first, last = dict(RESULT, total_cost_usd=0.5), dict(RESULT, total_cost_usd=2.5)
         body = (f"for _ in range(300): print({'g' * 1000!r})\nprint({json.dumps(first)!r})\nprint({DECOY!r})\nprint({json.dumps(last)!r})\n"
