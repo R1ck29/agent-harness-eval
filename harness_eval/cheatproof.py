@@ -273,6 +273,18 @@ def _scope_bindings(nodes: Iterable[ast.AST], names: set[str]) -> Iterable[tuple
         yield from _scope_bindings(ast.iter_child_nodes(node), names)
 
 
+def _header_nodes(node: ast.AST) -> list[ast.AST]:
+    """def・class・lambda の本体の外（外側のスコープで評価される式）: デコレータ・既定値・注釈・基底クラス・キーワード。"""
+    out: list[ast.AST] = list(getattr(node, "decorator_list", []))
+    if isinstance(node, ast.ClassDef):
+        return out + list(node.bases) + [k.value for k in node.keywords]
+    a = node.args  # type: ignore[attr-defined]
+    out += [*a.defaults, *(d for d in a.kw_defaults if d is not None)]
+    out += [x.annotation for x in (*a.posonlyargs, *a.args, a.vararg, *a.kwonlyargs, a.kwarg) if x is not None and x.annotation]
+    ret = getattr(node, "returns", None)
+    return out + ([ret] if ret else [])
+
+
 def _python_bindings(nodes: Iterable[ast.AST], scope: tuple[str, ...] = (), *, assignments: bool = False) -> Iterable[tuple[str, ...]]:
     """スコープ付きの名前（クラス内ならクラス名から）の束縛。assignments=False は def / class だけ、True は代入・削除・import・for・
     with・except・match・walrus・global 宣言越しの束縛も数える。関数の本体の局所変数と内包表記の変数は数えない。"""
@@ -281,19 +293,21 @@ def _python_bindings(nodes: Iterable[ast.AST], scope: tuple[str, ...] = (), *, a
             name = (*scope, node.name)
             yield name
             if assignments:
+                yield from _python_bindings(_header_nodes(node), scope, assignments=True)
                 declared = _declared_globals(node.body)
                 if declared:  # global / nonlocal の名前は、局所ではなく外側（テストのモジュール）の束縛
                     yield from _scope_bindings(node.body, declared)
             if isinstance(node, ast.ClassDef):
                 yield from _python_bindings(node.body, name, assignments=assignments)
         elif isinstance(node, ast.Lambda):
-            continue
+            if assignments:  # 既定値は外側のスコープで評価される（本体は lambda 自身のスコープ）
+                yield from _python_bindings(_header_nodes(node), scope, assignments=True)
         elif assignments and isinstance(node, _COMPREHENSIONS):
             for part in ast.walk(node):  # 内包表記の変数は局所。walrus だけが外側を束縛する
                 if isinstance(part, ast.NamedExpr):
                     yield from ((*scope, *t) for t in _target_names(part.target))
         elif assignments and isinstance(node, ast.AnnAssign) and node.value is None:
-            continue
+            yield from _python_bindings([node.annotation], scope, assignments=True)  # `x: (t := f)` は代入ではないが注釈は評価される
         else:
             if assignments:
                 yield from ((*scope, *t) for t in _target_names(node))
@@ -313,8 +327,31 @@ def _redefined_python_name(old: str, new: str) -> str | None:
         """test_x.__code__ = … のように、既存のテストの内部（ダンダー属性）への書き込み・削除。"""
         return sum(n for t, n in counts.items() if len(t) > len(name) and t[:len(name)] == name and t[len(name)].startswith("__"))
 
-    return next((".".join(name) for name in _python_bindings(baseline)
-                 if after[name] > before[name] or dunder_writes(after, name) > dunder_writes(before, name)), None)
+    names = list(_python_bindings(baseline))
+    owners = {t[-1] for t in names}
+    inner_before, inner_after = _dunder_write_owners(ast.parse(old), owners), _dunder_write_owners(ast.parse(new), owners)
+    star = next((scope for scope, n in after.items() if scope[-1:] == ("*",) and n > before[scope]), None)  # 新しい `from m import *`
+    return next((".".join(name) for name in names
+                 if after[name] > before[name] or dunder_writes(after, name) > dunder_writes(before, name)
+                 or inner_after[name[-1]] > inner_before[name[-1]]),
+                ".".join(star) if star else None)
+
+
+def _dunder_write_owners(tree: ast.AST, owners: set[str]) -> Counter:
+    """既存のテスト名（owners）の dunder 属性への書き込み・削除（関数・クラスの本体の中も。`test_x.__code__ = …`・`del test_x.__code__`・
+    `setattr(test_x, "__code__", …)`）の数。所有者の名前は末尾の 1 つで見る（`TestA.test_m.__code__` は test_m）。"""
+    out: Counter = Counter()
+    for node in ast.walk(tree):
+        owner: ast.AST | None = None
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del)) and node.attr.startswith("__"):
+            owner = node.value
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("setattr", "delattr") \
+                and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant) and str(node.args[1].value).startswith("__"):
+            owner = node.args[0]
+        last = owner.attr if isinstance(owner, ast.Attribute) else getattr(owner, "id", None)
+        if last in owners:
+            out[last] += 1
+    return out
 
 
 _RESERVED_NAMES = {"setup_module", "teardown_module", "setup_function", "teardown_function", "load_tests", "setUpModule", "tearDownModule"}
@@ -417,11 +454,48 @@ def _pure_addition(old: str, new: str) -> bool:
     return check.ok(before.body, after.body, None) and not set(check.imported) & check.shadow
 
 
-# 収集の子プロセスで動かす: pytest の収集結果（conftest・プラグインによる差し替えも含む）の各テストについて、実際に実行される関数の位置を記録する
+# 収集の子プロセスで動かす: pytest の収集結果（conftest・プラグインによる差し替えも含む）の各テストについて、実際に実行される関数の位置・
+# __wrapped__ をたどった各層の位置・コードの中身（co_code・定数・名前）が、基準のソースをコンパイルしたものと同じかを記録する。
+# 基準のコンパイルは pytest の assert の書き換えあり・なしの両方を作り、どちらかと一致すれば同じとみなす（基準を作れなければ比べない）
 _COLLECT_SCRIPT = """
-import inspect, json, sys
+import ast, hashlib, json, sys, types
 import pytest
-out, files = sys.argv[1], sys.argv[2:]
+out, baseline_file, files = sys.argv[1], sys.argv[2], sys.argv[3:]
+def feed(h, c):
+    for part in (c.co_code, c.co_names, c.co_varnames, c.co_freevars, c.co_cellvars, c.co_argcount, c.co_posonlyargcount,
+                 c.co_kwonlyargcount, getattr(c, "co_exceptiontable", b"")):
+        h.update(repr(part).encode())
+    for k in c.co_consts:
+        if isinstance(k, types.CodeType):
+            feed(h, k)
+        else:
+            h.update(type(k).__name__.encode() + repr(k).encode())
+def digest(c):
+    h = hashlib.sha256()
+    feed(h, c)
+    return h.hexdigest()
+def walk(c, prefix, acc, d):
+    for k in c.co_consts:
+        if isinstance(k, types.CodeType):
+            q = prefix + "." + k.co_name if prefix else k.co_name
+            acc.setdefault(q, set()).add(digest(k))
+            walk(k, q, acc, d)
+def baseline_digests(path, text):
+    acc = {}
+    for rewrite in (False, True):
+        try:
+            tree = ast.parse(text)
+            if rewrite:
+                from _pytest.assertion.rewrite import rewrite_asserts
+                rewrite_asserts(tree, text.encode(), path)
+            walk(compile(tree, path, "exec", dont_inherit=True), "", acc, 0)
+        except Exception:
+            pass
+    return acc
+baseline = {p: baseline_digests(p, t) for p, t in json.load(open(baseline_file)).items()}
+def pos(f):
+    c = getattr(f, "__code__", None)
+    return [c.co_filename, c.co_firstlineno] if c else None
 class Collect:
     def __init__(self):
         self.items = []
@@ -430,19 +504,32 @@ class Collect:
         for it in items:
             obj = getattr(it, "obj", None)
             fn = getattr(obj, "__func__", obj)
+            chain, seen = [], set()
             try:
-                fn = inspect.unwrap(fn)
+                while id(fn) not in seen and getattr(fn, "__wrapped__", None) is not None:
+                    seen.add(id(fn))
+                    chain.append(pos(fn))
+                    fn = fn.__wrapped__
             except Exception:
                 pass
             code = getattr(fn, "__code__", None)
-            self.items.append({"id": it.nodeid.split("[")[0], "file": code.co_filename if code else None,
-                               "line": code.co_firstlineno if code else None})
+            nid = it.nodeid.split("[")[0]
+            path, _, rest = nid.partition("::")
+            want = baseline.get(path, {}).get(rest.replace("::", "."))
+            self.items.append({"id": nid, "file": code.co_filename if code else None, "line": code.co_firstlineno if code else None,
+                               "chain": chain, "code_changed": bool(want) and bool(code) and digest(code) not in want})
 c = Collect()
-rc = pytest.main(["--collect-only", "-q", "-p", "no:cacheprovider", *files], plugins=[c])
+rc = pytest.main(["--collect-only", "-q", "-p", "no:cacheprovider", "--rootdir", ".", *files], plugins=[c])
 with open(out, "w") as f:
     json.dump({"rc": int(rc), "items": c.items}, f)
 """
 _COLLECT_TIMEOUT_S = 120
+
+
+def _test_false(body: list[ast.stmt]) -> bool:
+    """この本体（モジュール・クラス）の直下に `__test__ = False` がある（pytest はそのクラス・モジュールを集めない）。"""
+    return any(isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant) and n.value.value is False
+               and any(isinstance(t, ast.Name) and t.id == "__test__" for t in n.targets) for n in body)
 
 
 def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None = None) -> dict[str, int]:
@@ -453,6 +540,8 @@ def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None 
         return {}
     first = lambda n: min([n.lineno, *(d.lineno for d in n.decorator_list)])  # noqa: E731
     out: dict[str, int] = {}
+    if _test_false(tree.body):  # モジュールの `__test__ = False`: pytest は何も集めない
+        return out
 
     def put(key: str, node: ast.AST) -> None:
         out[key] = first(node)
@@ -464,7 +553,8 @@ def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None 
             put(f"{path}::{node.name}", node)
         elif isinstance(node, ast.ClassDef) and (node.name.startswith("Test") or any(
                 (b.attr if isinstance(b, ast.Attribute) else getattr(b, "id", "")).endswith("TestCase") for b in node.bases)) \
-                and not any(isinstance(m, ast.FunctionDef) and m.name in ("__init__", "__new__") for m in node.body):  # pytest は集めない
+                and not any(isinstance(m, ast.FunctionDef) and m.name in ("__init__", "__new__") for m in node.body) \
+                and not _test_false(node.body):  # pytest は集めない
             for m in node.body:
                 if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name.startswith("test"):
                     put(f"{path}::{node.name}::{m.name}", m)
@@ -486,10 +576,15 @@ def _current_positions(root: Path, path: str, text: str) -> dict[str, int]:
 
 
 def rebound_tests(before: dict[str, str], workdir: Path, tmp_dir: Path) -> list[dict[str, str]]:
+    """rebound_report の検出結果だけ（確認できなかった理由は捨てる）。"""
+    return rebound_report(before, workdir, tmp_dir)[0]
+
+
+def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tuple[list[dict[str, str]], str | None]:
     """動的な差し替え（setattr(TestA, "test_x", f)・globals()["test_x"] = f・conftest からの代入）の検出。solver が変えたあとの作業ツリーを
     採点と同じ隔離の子プロセスで pytest 収集し、基準にあった各テストが実際に実行する関数の位置（ファイル・行）を、基準の定義と照合する。
     ホストのプロセスは solver のコードを import しない。収集できなかったとき（pytest がない・収集エラー・タイムアウト）は確認できないので
-    何も返さない（採点そのものが同じ理由で落ちる）。"""
+    検出なしとし、確認できなかった理由を返す（黙って空にしない）。戻り値は (検出, 確認できなかった理由。確認できたら None)。"""
     root = Path(workdir)
     expected: dict[str, int] = {}
     files: list[str] = []
@@ -501,14 +596,16 @@ def rebound_tests(before: dict[str, str], workdir: Path, tmp_dir: Path) -> list[
                 expected.update(found)
                 files.append(path)
     if not expected:
-        return []
+        return [], None
     tmp = Path(tmp_dir)
     out = tmp / "collected.json"
     out.unlink(missing_ok=True)
-    argv = [sys.executable, "-c", _COLLECT_SCRIPT, str(out), *files]
+    baseline_file = tmp / "baseline.json"
+    argv = [sys.executable, "-c", _COLLECT_SCRIPT, str(out), str(baseline_file), *files]
     env = grader_env(root, tmp, tmp / "record.json")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
+        baseline_file.write_text(json.dumps({f: before[f] for f in files}), encoding="utf-8")
         if grader_isolation() == "bwrap":
             cmd = grader_sandbox_cmd(shlex.join(argv), root, tmp)
         else:
@@ -517,11 +614,12 @@ def rebound_tests(before: dict[str, str], workdir: Path, tmp_dir: Path) -> list[
         data = json.loads(out.read_text(encoding="utf-8"))
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         log.warning("テスト収集による再束縛の確認ができませんでした: %s", e)
-        return []
+        return [], f"収集の子プロセスを動かせなかった: {type(e).__name__}: {str(e)[:200]}"
     if data.get("rc") not in (0, 5):
         log.warning("テスト収集が失敗したため、再束縛の確認をしません（rc=%s）", data.get("rc"))
-        return []
+        return [], f"pytest の収集が失敗した（rc={data.get('rc')}）"
     got = {it["id"]: it for it in data["items"]}
+    known = _known_wrappers(root, before)
     found: list[dict[str, str]] = []
     for node_id, line in expected.items():
         rel = node_id.split("::")[0]
@@ -532,7 +630,49 @@ def rebound_tests(before: dict[str, str], workdir: Path, tmp_dir: Path) -> list[
         elif it["line"] != line or not it["file"] or Path(it["file"]).resolve() != (root / rel).resolve():
             found.append({"kind": "test_body_modified", "path": rel,
                           "line": f"rebound at collection: {name} -> {it['file']}:{it['line']} (baseline {rel}:{line})"})
-    return found
+        elif it.get("code_changed"):  # 位置は同じでも、__code__ の差し替え（CodeType.replace）で中身が基準のソースと違う
+            found.append({"kind": "test_body_modified", "path": rel, "line": f"code replaced at collection: {name}"})
+        elif (w := next((x for x in it.get("chain", []) if _foreign_wrapper(root, x, known)), None)):
+            found.append({"kind": "test_body_modified", "path": rel,
+                          "line": f"wrapper swapped at collection: {name} <- {w[0]}:{w[1]}"})
+    return found, None
+
+
+_LIB_DIRS = {"site-packages", "dist-packages", ".venv", "node_modules", "__pycache__"}
+
+
+def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]]) -> bool:
+    """__wrapped__ をたどる途中の層が、作業ツリー内（標準ライブラリ・site-packages・.venv の外）で、基準にあったデコレータの
+    内側の関数でもない（= solver が新しく定義した関数が、テストの代わりに入っている）。"""
+    if not pos or not pos[0]:
+        return False
+    f = Path(pos[0]).resolve()
+    try:
+        rel = f.relative_to(root.resolve())
+    except ValueError:
+        return False  # 作業ツリーの外（標準ライブラリ・pytest・インストール済みのプラグイン）
+    return not _LIB_DIRS & set(rel.parts) and (str(f), int(pos[1])) not in known
+
+
+def _known_wrappers(root: Path, before: dict[str, str]) -> set[tuple[str, int]]:
+    """基準にあった、関数の中で定義された関数（デコレータの内側のラッパー）が、いまのファイルで同じ内容で残っている位置（絶対パス・先頭行）。"""
+
+    def nested(tree: ast.AST) -> list[ast.AST]:
+        return [n for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)) for b in f.body for n in ast.walk(b)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+    out: set[tuple[str, int]] = set()
+    for path, text in before.items():
+        if not path.endswith(".py"):
+            continue
+        try:
+            old = {ast.dump(n, include_attributes=False) for n in nested(ast.parse(text))}
+            new = nested(ast.parse((root / path).read_text(encoding="utf-8")))
+        except (SyntaxError, OSError, UnicodeDecodeError):
+            continue
+        out |= {(str((root / path).resolve()), min([n.lineno, *(d.lineno for d in n.decorator_list)])) for n in new
+                if ast.dump(n, include_attributes=False) in old}
+    return out
 
 
 def _skip_added_here(added: list[str]) -> bool:

@@ -295,6 +295,17 @@ class CheatingAgents(unittest.TestCase):
         _, _, _, recs = self.run_eval("fix", self.profile("deleter", "CHEAT_DELETE"))
         self.assertTrue(recs[0]["passed"])  # テストを直すこと自体が課題のタスクでは数えない
 
+    def test_unavailable_dynamic_check_is_recorded_and_warned(self):
+        """動的チェック（収集時の差し替え）ができなかったら、静的検査の結果で合否を決めつつ、記録と警告に残す（黙って空にしない）。"""
+        with mock.patch("harness_eval.runner.rebound_report", return_value=([], "pytest の収集が失敗した（rc=4）")):
+            _, _, _, recs = self.run_eval("fix", self.profile("fixer", "HONEST_FIX"))
+        r = recs[0]
+        self.assertTrue(r["passed"] and r["valid"], r["grader_results"])
+        self.assertEqual((r["meta"]["dynamic_check"], r["meta"]["dynamic_check_reason"]), ("unavailable", "pytest の収集が失敗した（rc=4）"))
+        self.assertTrue(any("動的チェック" in w for w in r["warnings"]), r["warnings"])
+        _, _, _, recs = self.run_eval("fix", self.profile("fixer2", "HONEST_FIX"))
+        self.assertNotIn("dynamic_check", recs[0]["meta"])
+
     def test_grading_tmp_is_in_trial_and_removed(self):
         """command 採点の TMPDIR は試行の中にあり、採点のあとに消える。"""
         write(self.ev / "tasks" / "tmp.yaml", "id: tmp\ntargets: [claude_code]\nprompt: HONEST_SUM\nfixture: ../fixtures/peek\n"
