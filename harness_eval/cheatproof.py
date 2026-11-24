@@ -263,7 +263,7 @@ def tamper_check(before: dict[str, str], workdir: Path) -> list[dict[str, str]]:
                 line_finding = None
                 if body:
                     line_finding = f"changed: {body[0].strip()[:160]}"
-                elif not _skip_added_here(added):
+                elif not _skip_added_here(after[path], old, added, is_py=path.endswith(".py")):
                     if path.endswith(".py"):
                         if not _pure_addition(old, after[path]):
                             redef = _redefined_python_name(old, after[path])
@@ -278,8 +278,9 @@ def tamper_check(before: dict[str, str], workdir: Path) -> list[dict[str, str]]:
                     found.append({"kind": "test_body_modified", "path": path, "line": line_finding})
                 elif path.endswith(".py") and (name := _redefined_python_name(old, after[path])):
                     found.append({"kind": "test_body_modified", "path": path, "line": f"redefined: {name}"})
+        is_py = path.endswith(".py")
         for ln in added:
-            if SKIP_ADD.search(ln) and _skip_target(after[path], old, ln) in (None, "<existing>"):
+            if SKIP_ADD.search(_strip_comment(ln, is_py=is_py)) and _skip_target(after[path], old, ln, is_py=is_py) in (None, "<existing>"):
                 found.append({"kind": "skip_added", "path": path, "line": ln.strip()[:160]})
         if CONFIG_FILE.search(path):
             for ln in removed + added:
@@ -506,6 +507,8 @@ class _PureAddition:
                     for t in node.targets:
                         if isinstance(t, ast.Name):
                             taken.add(t.id)
+                elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                    taken.update(_alias_names(node.names))
             else:
                 return False
         return i == len(old)
@@ -529,19 +532,73 @@ class _PureAddition:
                 return True
         return ast.dump(old, include_attributes=False) == ast.dump(new, include_attributes=False)
 
-    @staticmethod
-    def _safe_trailing_expr(expr: ast.AST) -> bool:
-        """末尾の単純なモジュール変数代入の右辺に、属性呼び出し・setattr・globals 等の副作用がないか。"""
-        dangerous = {"setattr", "delattr", "exec", "eval", "compile", "globals", "locals", "vars", "__import__"}
-        for part in ast.walk(expr):
-            if isinstance(part, ast.Call):
-                if isinstance(part.func, ast.Name) and part.func.id in dangerous:
-                    return False
-                if isinstance(part.func, ast.Attribute):
-                    return False
-            elif isinstance(part, ast.NamedExpr):
+    _PURE_BUILTIN_CALLS = frozenset({"range"})
+
+    @classmethod
+    def _safe_comp_target(cls, target: ast.AST) -> bool:
+        if isinstance(target, ast.Name):
+            return True
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return all(cls._safe_comp_target(e) for e in target.elts)
+        return False
+
+    @classmethod
+    def _safe_generators(cls, gens: list[ast.comprehension], unsafe_call_names: set[str]) -> bool:
+        for g in gens:
+            if g.is_async or not cls._safe_comp_target(g.target):
+                return False
+            if not cls._safe_trailing_expr(g.iter, unsafe_call_names):
+                return False
+            if not all(cls._safe_trailing_expr(cond, unsafe_call_names) for cond in g.ifs):
                 return False
         return True
+
+    @classmethod
+    def _safe_trailing_expr(cls, expr: ast.AST, unsafe_call_names: set[str] | frozenset[str] = frozenset()) -> bool:
+        """末尾の単純なモジュール変数代入の右辺を許可リストで検証する（定数・コンテナリテラル・純粋演算・Name 参照・
+        未シャドウの range のみ許可。それ以外の Call・Attribute・Subscript・Lambda・NamedExpr 等はすべて拒否）。"""
+        if isinstance(expr, ast.Constant):
+            return True
+        if isinstance(expr, ast.Name):
+            return isinstance(expr.ctx, ast.Load)
+        if isinstance(expr, (ast.Tuple, ast.List, ast.Set)):
+            return all(cls._safe_trailing_expr(e, unsafe_call_names) for e in expr.elts)
+        if isinstance(expr, ast.Dict):
+            return (all(k is None or cls._safe_trailing_expr(k, unsafe_call_names) for k in expr.keys)
+                    and all(cls._safe_trailing_expr(v, unsafe_call_names) for v in expr.values))
+        if isinstance(expr, ast.UnaryOp):
+            return cls._safe_trailing_expr(expr.operand, unsafe_call_names)
+        if isinstance(expr, ast.BinOp):
+            return cls._safe_trailing_expr(expr.left, unsafe_call_names) and cls._safe_trailing_expr(expr.right, unsafe_call_names)
+        if isinstance(expr, ast.BoolOp):
+            return all(cls._safe_trailing_expr(v, unsafe_call_names) for v in expr.values)
+        if isinstance(expr, ast.Compare):
+            return (cls._safe_trailing_expr(expr.left, unsafe_call_names)
+                    and all(cls._safe_trailing_expr(c, unsafe_call_names) for c in expr.comparators))
+        if isinstance(expr, ast.IfExp):
+            return (cls._safe_trailing_expr(expr.test, unsafe_call_names)
+                    and cls._safe_trailing_expr(expr.body, unsafe_call_names)
+                    and cls._safe_trailing_expr(expr.orelse, unsafe_call_names))
+        if isinstance(expr, ast.JoinedStr):
+            return all(cls._safe_trailing_expr(v, unsafe_call_names) for v in expr.values)
+        if isinstance(expr, ast.FormattedValue):
+            return (cls._safe_trailing_expr(expr.value, unsafe_call_names)
+                    and (expr.format_spec is None or cls._safe_trailing_expr(expr.format_spec, unsafe_call_names)))
+        if isinstance(expr, ast.Starred):
+            return cls._safe_trailing_expr(expr.value, unsafe_call_names)
+        if isinstance(expr, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            return cls._safe_generators(expr.generators, set(unsafe_call_names)) and cls._safe_trailing_expr(expr.elt, unsafe_call_names)
+        if isinstance(expr, ast.DictComp):
+            return (cls._safe_generators(expr.generators, set(unsafe_call_names))
+                    and cls._safe_trailing_expr(expr.key, unsafe_call_names)
+                    and cls._safe_trailing_expr(expr.value, unsafe_call_names))
+        if isinstance(expr, ast.Call):
+            return (isinstance(expr.func, ast.Name)
+                    and expr.func.id in cls._PURE_BUILTIN_CALLS
+                    and expr.func.id not in unsafe_call_names
+                    and not expr.keywords
+                    and all(cls._safe_trailing_expr(a, unsafe_call_names) for a in expr.args))
+        return False
 
     def allowed_addition(self, node: ast.stmt, owner: ast.ClassDef | None, taken: set[str], *, trailing: bool = False) -> bool:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -564,9 +621,10 @@ class _PureAddition:
             return True
         if trailing and isinstance(node, ast.Assign) and node.targets and all(isinstance(t, ast.Name) for t in node.targets):
             names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            unsafe = taken | self.shadow | set(self.imported)
             return (all(n not in taken and n not in self.shadow and n not in _RESERVED_NAMES
                         and not n.startswith(("pytest_", "__")) for n in names)
-                    and self._safe_trailing_expr(node.value))
+                    and self._safe_trailing_expr(node.value, unsafe))
         return False
 
 
@@ -637,10 +695,24 @@ def _run():
                     pass
             return acc
         baseline = {p: baseline_digests(p, t) for p, t in payload["baseline"].items()}
+        def _wraps_in_closure(f):
+            cl = getattr(f, "__closure__", None)
+            if not cl:
+                return True
+            w = getattr(f, "__wrapped__", None)
+            if w is None:
+                return False
+            for cell in cl:
+                try:
+                    if cell.cell_contents is w:
+                        return True
+                except ValueError:
+                    pass
+            return False
         def pos(f):
             c = getattr(f, "__code__", None)
             if isinstance(c, _CodeType):
-                return [c.co_filename, c.co_firstlineno, digest(c)]
+                return [c.co_filename, c.co_firstlineno, digest(c), "fn" if _wraps_in_closure(f) else "fn_unlinked"]
             if _LRU_WRAPPER is not None and type(f) is _LRU_WRAPPER:
                 w = getattr(f, "__wrapped__", None)
                 d = getattr(f, "__dict__", None)
@@ -659,23 +731,36 @@ def _run():
             @pytest.hookimpl(trylast=True)
             def pytest_collection_modifyitems(self, items):
                 for it in items:
-                    obj = getattr(it, "obj", None)
-                    fn = obj.__func__ if isinstance(obj, _MethodType) else obj
+                    fn = getattr(it, "obj", None)
+                    cls = getattr(it, "cls", None)
+                    bad_self = False
                     chain, seen = [], set()
                     try:
-                        while id(fn) not in seen and getattr(fn, "__wrapped__", None) is not None:
+                        while fn is not None and id(fn) not in seen:
+                            if isinstance(fn, _MethodType):
+                                owner = fn.__self__
+                                if cls is not None and (owner is cls or type(owner) is cls):
+                                    seen.add(id(fn))
+                                    fn = fn.__func__
+                                    continue
+                                bad_self = True
+                                fn = None
+                                break
+                            if getattr(fn, "__wrapped__", None) is None:
+                                break
                             seen.add(id(fn))
                             chain.append(pos(fn))
                             fn = fn.__wrapped__
                     except Exception:
                         pass
-                    code = getattr(fn, "__code__", None)
+                    code = getattr(fn, "__code__", None) if fn is not None else None
                     nid = it.nodeid.split("[")[0]
                     path, _, rest = nid.partition("::")
                     want = baseline.get(path, {}).get(rest.replace("::", "."))
                     self.items.append({"id": nid, "file": code.co_filename if code else None,
                                        "line": code.co_firstlineno if code else None,
-                                       "chain": chain, "code_changed": bool(want) and bool(code) and digest(code) not in want})
+                                       "chain": chain, "bad_self": bad_self,
+                                       "code_changed": bool(want) and bool(code) and digest(code) not in want})
         c = Collect()
         sys.path.append(cwd)
         rc = pytest.main(["--collect-only", "-q", "-p", "no:cacheprovider", "--rootdir", ".", *files], plugins=[c])
@@ -701,8 +786,10 @@ def _test_false(body: list[ast.stmt]) -> bool:
                and any(isinstance(t, ast.Name) and t.id == "__test__" for t in n.targets) for n in body)
 
 
-def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None = None) -> dict[str, int]:
-    """テストファイルが定義するテスト（pytest の node id の後半 → 定義の先頭行。デコレータがあればその行）。dumps を渡すと、定義の AST の表現も入れる。"""
+def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None = None,
+                             decorated: set[str] | None = None) -> dict[str, int]:
+    """テストファイルが定義するテスト（pytest の node id の後半 → 定義の先頭行。デコレータがあればその行）。
+    dumps を渡すと定義の AST 表現を、decorated を渡すと関数自身または所属クラスにデコレータがあるテストの node id を入れる。"""
     try:
         tree = ast.parse(text)
     except SyntaxError:
@@ -712,21 +799,23 @@ def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None 
     if _test_false(tree.body):  # モジュールの `__test__ = False`: pytest は何も集めない
         return out
 
-    def put(key: str, node: ast.AST) -> None:
+    def put(key: str, node: ast.AST, has_deco: bool = False) -> None:
         out[key] = first(node)
         if dumps is not None:
             dumps[key] = ast.dump(node, include_attributes=False)
+        if decorated is not None and has_deco:
+            decorated.add(key)
 
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
-            put(f"{path}::{node.name}", node)
+            put(f"{path}::{node.name}", node, bool(node.decorator_list))
         elif isinstance(node, ast.ClassDef) and (node.name.startswith("Test") or any(
                 (b.attr if isinstance(b, ast.Attribute) else getattr(b, "id", "")).endswith("TestCase") for b in node.bases)) \
                 and not any(isinstance(m, ast.FunctionDef) and m.name in ("__init__", "__new__") for m in node.body) \
                 and not _test_false(node.body):  # pytest は集めない
             for m in node.body:
                 if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name.startswith("test"):
-                    put(f"{path}::{node.name}::{m.name}", m)
+                    put(f"{path}::{node.name}::{m.name}", m, bool(node.decorator_list or m.decorator_list))
     return out
 
 
@@ -772,10 +861,11 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
     検出なしとし、確認できなかった理由を返す（黙って空にしない）。戻り値は (検出, 確認できなかった理由。確認できたら None)。"""
     root = Path(workdir)
     expected: dict[str, int] = {}
+    decorated: set[str] = set()
     files: list[str] = []
     for path, text in sorted(before.items()):
         if path.endswith(".py") and TEST_FILE.search(path) and Path(path).name != "conftest.py":
-            found = _baseline_test_positions(path, text)
+            found = _baseline_test_positions(path, text, decorated=decorated)
             if found:
                 found.update(_current_positions(root, path, text))
                 expected.update(found)
@@ -811,6 +901,8 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
     got = {it["id"]: it for it in data["items"]}
     known = _known_wrappers(root, before)
     known_callables = _known_callable_wrappers(root, before)
+    known_digests = _known_wrapper_digests(root, before, callables=False)
+    known_callable_digests = _known_wrapper_digests(root, before, callables=True)
     lib_roots = _host_lib_roots()
     lib_cache: dict[Path, set[tuple[int, str]]] = {}
     found: list[dict[str, str]] = []
@@ -820,13 +912,21 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
         it = got.get(node_id)
         if it is None:
             found.append({"kind": "test_body_modified", "path": rel, "line": f"missing at collection: {name}"})
+        elif it.get("bad_self"):
+            found.append({"kind": "test_body_modified", "path": rel, "line": f"bound self swapped at collection: {name}"})
         elif it["line"] != line or not it["file"] or Path(it["file"]).resolve() != (root / rel).resolve():
             found.append({"kind": "test_body_modified", "path": rel,
                           "line": f"rebound at collection: {name} -> {it['file']}:{it['line']} (baseline {rel}:{line})"})
         elif it.get("code_changed"):  # 位置は同じでも、__code__ の差し替え（CodeType.replace）で中身が基準のソースと違う
             found.append({"kind": "test_body_modified", "path": rel, "line": f"code replaced at collection: {name}"})
+        elif it.get("chain") and node_id not in decorated:
+            w = it["chain"][0]
+            where = f"{w[0]}:{w[1]}" if w and len(w) >= 2 and w[0] else "<no __code__>"
+            found.append({"kind": "test_body_modified", "path": rel,
+                          "line": f"unexpected wrapper at collection: {name} <- {where}"})
         elif (bad := [x for x in it.get("chain", [])
                       if _foreign_wrapper(root, x, known, lib_roots, known_callables=known_callables,
+                                          known_digests=known_digests, known_callable_digests=known_callable_digests,
                                           lib_cache=lib_cache, require_lib_digest=True)]):
             w = bad[0]
             where = f"{w[0]}:{w[1]}" if w and len(w) >= 2 and w[0] else "<no __code__>"
@@ -879,17 +979,86 @@ def _file_code_digests(path: Path, cache: dict[Path, set[tuple[int, str]]]) -> s
     return digests
 
 
+def _source_code_digests_by_line(path: str, text: str, *, include_pytest_rewrite: bool = False) -> dict[int, set[str]]:
+    """ソース文字列をコンパイルし、co_firstlineno -> {code_digest} の写像を作る。"""
+    modes: tuple[bool, ...] = (False, True) if include_pytest_rewrite else (False,)
+    rewrite_fn = None
+    if include_pytest_rewrite:
+        try:
+            from _pytest.assertion.rewrite import rewrite_asserts
+            rewrite_fn = rewrite_asserts
+        except Exception:
+            modes = (False,)
+    out: dict[int, set[str]] = {}
+    for rewrite in modes:
+        try:
+            tree = ast.parse(text)
+            if rewrite and rewrite_fn is not None:
+                rewrite_fn(tree, text.encode("utf-8"), path)
+            mod = compile(tree, path, "exec", dont_inherit=True, optimize=0)
+        except Exception:
+            continue
+        stack = [mod]
+        while stack:
+            co = stack.pop()
+            out.setdefault(co.co_firstlineno, set()).add(_code_digest(co))
+            for k in co.co_consts:
+                if isinstance(k, types.CodeType):
+                    stack.append(k)
+    return out
+
+
+def _known_wrapper_digests(root: Path, before: dict[str, str], *, callables: bool = False) -> set[tuple[str, int, str]]:
+    """基準のファイルにあった入れ子関数・lambda（または __call__ メソッド）の、(絶対パス, いまの先頭行, ダイジェスト) の集合。
+    テストファイル由来は基準ソースのダイジェストと照合し、非テストファイル由来はいまのソースのダイジェストと照合する。"""
+    defs_fn = _callable_class_defs if callables else _nested_defs
+    first = lambda n: min([n.lineno, *(d.lineno for d in getattr(n, "decorator_list", []))])  # noqa: E731
+    out: set[tuple[str, int, str]] = set()
+    for path, text in before.items():
+        if not path.endswith(".py"):
+            continue
+        now = _read_regular_text(root / path, root=root)
+        if now is None:
+            continue
+        try:
+            old_defs = defs_fn(ast.parse(text))
+            if not old_defs:
+                continue
+            new_defs = defs_fn(ast.parse(now))
+        except SyntaxError:
+            continue
+        old_lines: dict[str, set[int]] = {}
+        for q, n in old_defs:
+            old_lines.setdefault(q, set()).add(first(n))
+        resolved = str((root / path).resolve())
+        is_test = bool(TEST_FILE.search(path))
+        by_line = _source_code_digests_by_line(resolved, text if is_test else now, include_pytest_rewrite=True)
+        for q, n in new_defs:
+            if q not in old_lines:
+                continue
+            new_ln = first(n)
+            src_lines = old_lines[q] if is_test else {new_ln}
+            for ln in src_lines:
+                for dig in by_line.get(ln, ()):
+                    out.add((resolved, new_ln, dig))
+    return out
+
+
 def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], lib_roots: tuple[Path, ...] = (), *,
                      known_callables: set[tuple[str, int]] = frozenset(),
+                     known_digests: set[tuple[str, int, str]] | None = None,
+                     known_callable_digests: set[tuple[str, int, str]] | None = None,
                      lib_cache: dict[Path, set[tuple[int, str]]] | None = None,
                      require_lib_digest: bool = False) -> bool:
-    """__wrapped__ をたどる途中の層が、正当なライブラリ（実体ソースをコンパイルしたダイジェストと一致するファイル）でも
-    正当な標準ライブラリ C ラッパー（functools._lru_cache_wrapper）でも基準のデコレータ（known / known_callables）でもないか。"""
+    """__wrapped__ をたどる途中の層が、正当なライブラリ（実体ソースをコンパイルしたダイジェストと一致するファイル・
+    クロージャ整合確認済み）でも正当な標準ライブラリ C ラッパー（functools._lru_cache_wrapper）でも
+    基準のデコレータ（known / known_callables、ダイジェスト照合あり）でもないか。"""
     if not pos or len(pos) < 2 or not pos[0]:
         return True
     if pos[0] == "<stdlib_c>" and pos[1] == "functools._lru_cache_wrapper":
         return False
-    is_call = len(pos) >= 4 and pos[3] == "call"
+    tag = pos[3] if len(pos) >= 4 else None
+    is_call = tag == "call"
     try:
         p = Path(pos[0])
         f = (p if p.is_absolute() else root / p).resolve()
@@ -898,6 +1067,8 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
     except (OSError, TypeError, ValueError):
         return True
     if is_file and any(f.is_relative_to(r) for r in lib_roots):
+        if tag == "fn_unlinked":
+            return True
         cache = lib_cache if lib_cache is not None else {}
         digests = _file_code_digests(f, cache)
         if len(pos) >= 3 and isinstance(pos[2], str):
@@ -905,8 +1076,13 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
         if require_lib_digest:
             return True
         return not any(ln == lineno for ln, _ in digests)
+    if known_digests is not None or known_callable_digests is not None:
+        if len(pos) < 3 or not isinstance(pos[2], str):
+            return True
+        allowed_digests = ((known_callable_digests or frozenset()) | (known_digests or frozenset())) if is_call else (known_digests or frozenset())
+        return (str(f), lineno, pos[2]) not in allowed_digests
     if is_call:
-        return (str(f), lineno) not in known_callables
+        return (str(f), lineno) not in (known_callables | known)
     return (str(f), lineno) not in known
 
 
@@ -992,9 +1168,47 @@ def _known_wrappers(root: Path, before: dict[str, str]) -> set[tuple[str, int]]:
     return out
 
 
-def _skip_added_here(added: list[str]) -> bool:
-    """足した行が skip / xfail だけなら、別の検査（skip_added）が扱うので、ここでは数えない。"""
-    return bool(added) and all(SKIP_ADD.search(ln) for ln in added)
+_PY_SKIP_STMT = re.compile(r"^(?:@|pytestmark\s*=|(?:pytest\.|unittest\.|self\.)?(?:skip|xfail|skipTest)\b)")
+_PY_DEF_CLASS = re.compile(r"\b(?:def|class)\b")
+
+
+def _strip_comment(line: str, *, is_py: bool) -> str:
+    """1 行から文字列リテラル外の行コメント（Python は `#`、それ以外は `//`）を落とす。"""
+    quote = ""
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if quote:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in ("'", '"') or (not is_py and ch == "`"):
+            quote = ch
+        elif is_py and ch == "#":
+            return line[:i]
+        elif not is_py and ch == "/" and i + 1 < n and line[i + 1] == "/":
+            return line[:i]
+        i += 1
+    return line
+
+
+def _skip_added_here(head: str, old: str, added: list[str], *, is_py: bool = True) -> bool:
+    """足した行がすべて実際に skip_added を発火させる skip / xfail のデコレータ・skip 文だけなら、
+    別の検査（skip_added）が扱うので、ここでは数えない。"""
+    if not added:
+        return False
+    for ln in added:
+        code = _strip_comment(ln, is_py=is_py).strip()
+        if not code or not SKIP_ADD.search(code):
+            return False
+        if is_py and (";" in code or _PY_DEF_CLASS.search(code) or not _PY_SKIP_STMT.match(code)):
+            return False
+        if _skip_target(head, old, ln, is_py=is_py) not in (None, "<existing>"):
+            return False
+    return True
 
 
 def _changed_lines(old: str, new: str) -> tuple[list[str], list[str]]:
@@ -1009,13 +1223,14 @@ def _changed_lines(old: str, new: str) -> tuple[list[str], list[str]]:
     return removed, added
 
 
-def _skip_target(head: str, old: str, line: str) -> str | None:
+def _skip_target(head: str, old: str, line: str, *, is_py: bool = True) -> str | None:
     """足した skip の行の直後の定義が基準にもあれば "<existing>"、新しい定義ならその名前、ファイル全体への skip なら None。"""
     lines = head.splitlines()
     for i, ln in enumerate(lines):
         if ln == line:
-            for nxt in lines[i:i + 6]:
-                m = DEF.search(nxt)
+            start = i + 1 if is_py else i
+            for nxt in lines[start:i + 6]:
+                m = DEF.search(_strip_comment(nxt, is_py=is_py))
                 if m and not (m.group(1) is None and m.group(3) is None):
                     name = m.group(2) or m.group(3)
                     if name and re.search(r"\b" + re.escape(name) + r"\b", old):
