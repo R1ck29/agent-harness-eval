@@ -14,12 +14,16 @@ from __future__ import annotations
 
 import ast
 import difflib
+import hashlib
 import json
 import logging
+import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
+import types
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
@@ -493,7 +497,7 @@ def _pure_addition(old: str, new: str) -> bool:
 # __wrapped__ をたどった各層の位置・コードの中身（co_code・定数・名前）が、基準のソースをコンパイルしたものと同じかを記録する。
 # 基準のコンパイルは pytest の assert の書き換えあり・なしの両方を作り、どちらかと一致すれば同じとみなす（基準を作れなければ比べない）
 _COLLECT_SCRIPT = """
-import ast, hashlib, json, os, site, sys, sysconfig, types
+import ast, functools, gc, hashlib, json, os, site, sys, sysconfig, types
 import pytest
 out, baseline_file, files = sys.argv[1], sys.argv[2], sys.argv[3:]
 def lib_roots():
@@ -543,9 +547,23 @@ def baseline_digests(path, text):
             pass
     return acc
 baseline = {p: baseline_digests(p, t) for p, t in json.load(open(baseline_file)).items()}
+_LRU_WRAPPER = getattr(functools, "_lru_cache_wrapper", None)
 def pos(f):
     c = getattr(f, "__code__", None)
-    return [c.co_filename, c.co_firstlineno] if isinstance(c, types.CodeType) else None
+    if isinstance(c, types.CodeType):
+        return [c.co_filename, c.co_firstlineno, digest(c)]
+    if _LRU_WRAPPER is not None and type(f) is _LRU_WRAPPER:
+        w = getattr(f, "__wrapped__", None)
+        d = getattr(f, "__dict__", None)
+        if w is not None and any(r is w for r in gc.get_referents(f) if r is not d):
+            return ["<stdlib_c>", "functools._lru_cache_wrapper"]
+        return None
+    if not isinstance(f, functools.partial):
+        call = getattr(type(f), "__call__", None)
+        cc = getattr(call, "__code__", None)
+        if isinstance(cc, types.CodeType):
+            return [cc.co_filename, cc.co_firstlineno, digest(cc), "call"]
+    return None
 class Collect:
     def __init__(self):
         self.items = []
@@ -553,7 +571,7 @@ class Collect:
     def pytest_collection_modifyitems(self, items):
         for it in items:
             obj = getattr(it, "obj", None)
-            fn = getattr(obj, "__func__", obj)
+            fn = obj.__func__ if isinstance(obj, types.MethodType) else obj
             chain, seen = [], set()
             try:
                 while id(fn) not in seen and getattr(fn, "__wrapped__", None) is not None:
@@ -670,7 +688,9 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
         return [], f"pytest の収集が失敗した（rc={data.get('rc')}）"
     got = {it["id"]: it for it in data["items"]}
     known = _known_wrappers(root, before)
+    known_callables = _known_callable_wrappers(root, before)
     lib_roots = tuple(Path(p).resolve() for p in data.get("lib_roots", []) if p)
+    lib_cache: dict[Path, set[tuple[int, str]]] = {}
     found: list[dict[str, str]] = []
     for node_id, line in expected.items():
         rel = node_id.split("::")[0]
@@ -683,7 +703,9 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
                           "line": f"rebound at collection: {name} -> {it['file']}:{it['line']} (baseline {rel}:{line})"})
         elif it.get("code_changed"):  # 位置は同じでも、__code__ の差し替え（CodeType.replace）で中身が基準のソースと違う
             found.append({"kind": "test_body_modified", "path": rel, "line": f"code replaced at collection: {name}"})
-        elif (bad := [x for x in it.get("chain", []) if _foreign_wrapper(root, x, known, lib_roots)]):
+        elif (bad := [x for x in it.get("chain", [])
+                      if _foreign_wrapper(root, x, known, lib_roots, known_callables=known_callables,
+                                          lib_cache=lib_cache, require_lib_digest=True)]):
             w = bad[0]
             where = f"{w[0]}:{w[1]}" if w and len(w) >= 2 and w[0] else "<no __code__>"
             found.append({"kind": "test_body_modified", "path": rel,
@@ -691,11 +713,61 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
     return found, None
 
 
-def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], lib_roots: tuple[Path, ...] = ()) -> bool:
-    """__wrapped__ をたどる途中の層が、正当なライブラリ（子プロセスの標準ライブラリ・site-packages 配下に実在するファイル）でも
-    基準にあったデコレータの内側の関数（known）でもない（= solver が新しく定義・差し替えたラッパー）。__code__ のない層は拒否。"""
+_LIB_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _feed_code(h: Any, c: types.CodeType) -> None:
+    for part in (c.co_code, c.co_names, c.co_varnames, c.co_freevars, c.co_cellvars, c.co_argcount, c.co_posonlyargcount,
+                 c.co_kwonlyargcount, c.co_flags & 0x3FF, getattr(c, "co_exceptiontable", b"")):
+        h.update(repr(part).encode())
+    for k in c.co_consts:
+        if isinstance(k, types.CodeType):
+            _feed_code(h, k)
+        else:
+            h.update(type(k).__name__.encode() + repr(k).encode())
+
+
+def _code_digest(c: types.CodeType) -> str:
+    h = hashlib.sha256()
+    _feed_code(h, c)
+    return h.hexdigest()
+
+
+def _file_code_digests(path: Path, cache: dict[Path, set[tuple[int, str]]]) -> set[tuple[int, str]]:
+    """ライブラリファイルの実体をコンパイルして得られる (co_firstlineno, digest) の集合（ファイルごとにメモ化）。"""
+    hit = cache.get(path)
+    if hit is not None:
+        return hit
+    digests: set[tuple[int, str]] = set()
+    try:
+        st = os.stat(path)
+        if stat.S_ISREG(st.st_mode) and st.st_size <= _LIB_MAX_BYTES:
+            data = path.read_bytes()
+            mod = compile(data, str(path), "exec", dont_inherit=True, optimize=0)
+            stack = [mod]
+            while stack:
+                co = stack.pop()
+                digests.add((co.co_firstlineno, _code_digest(co)))
+                for k in co.co_consts:
+                    if isinstance(k, types.CodeType):
+                        stack.append(k)
+    except (OSError, SyntaxError, ValueError):
+        pass
+    cache[path] = digests
+    return digests
+
+
+def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], lib_roots: tuple[Path, ...] = (), *,
+                     known_callables: set[tuple[str, int]] = frozenset(),
+                     lib_cache: dict[Path, set[tuple[int, str]]] | None = None,
+                     require_lib_digest: bool = False) -> bool:
+    """__wrapped__ をたどる途中の層が、正当なライブラリ（実体ソースをコンパイルしたダイジェストと一致するファイル）でも
+    正当な標準ライブラリ C ラッパー（functools._lru_cache_wrapper）でも基準のデコレータ（known / known_callables）でもないか。"""
     if not pos or len(pos) < 2 or not pos[0]:
         return True
+    if pos[0] == "<stdlib_c>" and pos[1] == "functools._lru_cache_wrapper":
+        return False
+    is_call = len(pos) >= 4 and pos[3] == "call"
     try:
         p = Path(pos[0])
         f = (p if p.is_absolute() else root / p).resolve()
@@ -704,8 +776,55 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
     except (OSError, TypeError, ValueError):
         return True
     if is_file and any(f.is_relative_to(r) for r in lib_roots):
-        return False
+        cache = lib_cache if lib_cache is not None else {}
+        digests = _file_code_digests(f, cache)
+        if len(pos) >= 3 and isinstance(pos[2], str):
+            return (lineno, pos[2]) not in digests
+        if require_lib_digest:
+            return True
+        return not any(ln == lineno for ln, _ in digests)
+    if is_call:
+        return (str(f), lineno) not in known_callables
     return (str(f), lineno) not in known
+
+
+def _callable_class_defs(tree: ast.AST) -> list[tuple[str, ast.AST]]:
+    """クラスの本体で定義された __call__ メソッドと、その qualname（`Wrap.__call__` の形）。"""
+    out: list[tuple[str, ast.AST]] = []
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                cp = prefix + child.name + "."
+                for m in child.body:
+                    if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name == "__call__":
+                        out.append((cp + "__call__", m))
+                visit(child, cp)
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, prefix + child.name + ".<locals>.")
+            else:
+                visit(child, prefix)
+
+    visit(tree, "")
+    return out
+
+
+def _known_callable_wrappers(root: Path, before: dict[str, str]) -> set[tuple[str, int]]:
+    """基準のファイルにあった呼び出し可能クラス（__call__ メソッド）の、いまのファイルでの位置。"""
+    out: set[tuple[str, int]] = set()
+    for path, text in before.items():
+        if not path.endswith(".py"):
+            continue
+        try:
+            old = {q for q, _ in _callable_class_defs(ast.parse(text))}
+            if not old:
+                continue
+            new = _callable_class_defs(ast.parse((root / path).read_text(encoding="utf-8")))
+        except (SyntaxError, OSError, UnicodeDecodeError):
+            continue
+        out |= {(str((root / path).resolve()), min([n.lineno, *(d.lineno for d in getattr(n, "decorator_list", []))]))
+                for q, n in new if q in old}
+    return out
 
 
 def _nested_defs(tree: ast.AST) -> list[tuple[str, ast.AST]]:
