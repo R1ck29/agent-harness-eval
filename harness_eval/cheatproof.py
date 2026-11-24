@@ -19,10 +19,13 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
+import site
 import stat
 import subprocess
 import sys
+import sysconfig
 import types
 from collections import Counter
 from pathlib import Path
@@ -497,99 +500,113 @@ def _pure_addition(old: str, new: str) -> bool:
 # __wrapped__ をたどった各層の位置・コードの中身（co_code・定数・名前）が、基準のソースをコンパイルしたものと同じかを記録する。
 # 基準のコンパイルは pytest の assert の書き換えあり・なしの両方を作り、どちらかと一致すれば同じとみなす（基準を作れなければ比べない）
 _COLLECT_SCRIPT = """
-import ast, functools, gc, hashlib, json, os, site, sys, sysconfig, types
-import pytest
-out, baseline_file, files = sys.argv[1], sys.argv[2], sys.argv[3:]
-def lib_roots():
-    roots = []
-    paths = sysconfig.get_paths()
-    for k in ("stdlib", "platstdlib", "purelib", "platlib"):
-        if paths.get(k):
-            roots.append(paths[k])
-    for fn in (getattr(site, "getsitepackages", None), getattr(site, "getusersitepackages", None)):
-        if fn:
-            try:
-                v = fn()
-                roots.extend(v if isinstance(v, (list, tuple)) else [v])
-            except Exception:
-                pass
-    return sorted({os.path.realpath(p) for p in roots if p and os.path.isdir(p)})
-trusted_roots = lib_roots()
-def feed(h, c):
-    for part in (c.co_code, c.co_names, c.co_varnames, c.co_freevars, c.co_cellvars, c.co_argcount, c.co_posonlyargcount,
-                 c.co_kwonlyargcount, c.co_flags & 0x3FF, getattr(c, "co_exceptiontable", b"")):
-        h.update(repr(part).encode())
-    for k in c.co_consts:
-        if isinstance(k, types.CodeType):
-            feed(h, k)
-        else:
-            h.update(type(k).__name__.encode() + repr(k).encode())
-def digest(c):
-    h = hashlib.sha256()
-    feed(h, c)
-    return h.hexdigest()
-def walk(c, prefix, acc, d):
-    for k in c.co_consts:
-        if isinstance(k, types.CodeType):
-            q = prefix + "." + k.co_name if prefix else k.co_name
-            acc.setdefault(q, set()).add(digest(k))
-            walk(k, q, acc, d)
-def baseline_digests(path, text):
-    acc = {}
-    for rewrite in (False, True):
+import sys
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+def _run():
+    globals().pop("_run", None)
+    import os
+    cwd = os.getcwd()
+    cwds = {cwd, os.path.realpath(cwd)}
+    sys.path[:] = [p for p in sys.path if p not in cwds and os.path.realpath(p) not in cwds]
+    import ast, functools, gc, hashlib, json, types
+    import pytest
+    from _pytest.assertion.rewrite import rewrite_asserts
+    _loads, _dumps = json.loads, json.dumps
+    _sha256, _write, _close = hashlib.sha256, os.write, os.close
+    _CodeType, _MethodType = types.CodeType, types.MethodType
+    _partial = functools.partial
+    _LRU_WRAPPER = getattr(functools, "_lru_cache_wrapper", None)
+    _get_referents = gc.get_referents
+    out_fd = os.dup(1)
+    try:
+        payload = _loads(sys.stdin.read())
+        marker = payload["marker"]
+        files = list(sys.argv[1:])
+        def feed(h, c):
+            for part in (c.co_code, c.co_names, c.co_varnames, c.co_freevars, c.co_cellvars, c.co_argcount, c.co_posonlyargcount,
+                         c.co_kwonlyargcount, c.co_flags & 0x3FF, getattr(c, "co_exceptiontable", b"")):
+                h.update(repr(part).encode())
+            for k in c.co_consts:
+                if isinstance(k, _CodeType):
+                    feed(h, k)
+                else:
+                    h.update(type(k).__name__.encode() + repr(k).encode())
+        def digest(c):
+            h = _sha256()
+            feed(h, c)
+            return h.hexdigest()
+        def walk(c, prefix, acc):
+            for k in c.co_consts:
+                if isinstance(k, _CodeType):
+                    q = prefix + "." + k.co_name if prefix else k.co_name
+                    acc.setdefault(q, set()).add(digest(k))
+                    walk(k, q, acc)
+        def baseline_digests(path, text):
+            acc = {}
+            for rewrite in (False, True):
+                try:
+                    tree = ast.parse(text)
+                    if rewrite:
+                        rewrite_asserts(tree, text.encode(), path)
+                    walk(compile(tree, path, "exec", dont_inherit=True), "", acc)
+                except Exception:
+                    pass
+            return acc
+        baseline = {p: baseline_digests(p, t) for p, t in payload["baseline"].items()}
+        def pos(f):
+            c = getattr(f, "__code__", None)
+            if isinstance(c, _CodeType):
+                return [c.co_filename, c.co_firstlineno, digest(c)]
+            if _LRU_WRAPPER is not None and type(f) is _LRU_WRAPPER:
+                w = getattr(f, "__wrapped__", None)
+                d = getattr(f, "__dict__", None)
+                if w is not None and any(r is w for r in _get_referents(f) if r is not d):
+                    return ["<stdlib_c>", "functools._lru_cache_wrapper"]
+                return None
+            if not isinstance(f, _partial):
+                call = getattr(type(f), "__call__", None)
+                cc = getattr(call, "__code__", None)
+                if isinstance(cc, _CodeType):
+                    return [cc.co_filename, cc.co_firstlineno, digest(cc), "call"]
+            return None
+        class Collect:
+            def __init__(self):
+                self.items = []
+            @pytest.hookimpl(trylast=True)
+            def pytest_collection_modifyitems(self, items):
+                for it in items:
+                    obj = getattr(it, "obj", None)
+                    fn = obj.__func__ if isinstance(obj, _MethodType) else obj
+                    chain, seen = [], set()
+                    try:
+                        while id(fn) not in seen and getattr(fn, "__wrapped__", None) is not None:
+                            seen.add(id(fn))
+                            chain.append(pos(fn))
+                            fn = fn.__wrapped__
+                    except Exception:
+                        pass
+                    code = getattr(fn, "__code__", None)
+                    nid = it.nodeid.split("[")[0]
+                    path, _, rest = nid.partition("::")
+                    want = baseline.get(path, {}).get(rest.replace("::", "."))
+                    self.items.append({"id": nid, "file": code.co_filename if code else None,
+                                       "line": code.co_firstlineno if code else None,
+                                       "chain": chain, "code_changed": bool(want) and bool(code) and digest(code) not in want})
+        c = Collect()
+        sys.path.append(cwd)
+        rc = pytest.main(["--collect-only", "-q", "-p", "no:cacheprovider", "--rootdir", ".", *files], plugins=[c])
         try:
-            tree = ast.parse(text)
-            if rewrite:
-                from _pytest.assertion.rewrite import rewrite_asserts
-                rewrite_asserts(tree, text.encode(), path)
-            walk(compile(tree, path, "exec", dont_inherit=True), "", acc, 0)
+            sys.stdout.flush()
         except Exception:
             pass
-    return acc
-baseline = {p: baseline_digests(p, t) for p, t in json.load(open(baseline_file)).items()}
-_LRU_WRAPPER = getattr(functools, "_lru_cache_wrapper", None)
-def pos(f):
-    c = getattr(f, "__code__", None)
-    if isinstance(c, types.CodeType):
-        return [c.co_filename, c.co_firstlineno, digest(c)]
-    if _LRU_WRAPPER is not None and type(f) is _LRU_WRAPPER:
-        w = getattr(f, "__wrapped__", None)
-        d = getattr(f, "__dict__", None)
-        if w is not None and any(r is w for r in gc.get_referents(f) if r is not d):
-            return ["<stdlib_c>", "functools._lru_cache_wrapper"]
-        return None
-    if not isinstance(f, functools.partial):
-        call = getattr(type(f), "__call__", None)
-        cc = getattr(call, "__code__", None)
-        if isinstance(cc, types.CodeType):
-            return [cc.co_filename, cc.co_firstlineno, digest(cc), "call"]
-    return None
-class Collect:
-    def __init__(self):
-        self.items = []
-    @pytest.hookimpl(trylast=True)
-    def pytest_collection_modifyitems(self, items):
-        for it in items:
-            obj = getattr(it, "obj", None)
-            fn = obj.__func__ if isinstance(obj, types.MethodType) else obj
-            chain, seen = [], set()
-            try:
-                while id(fn) not in seen and getattr(fn, "__wrapped__", None) is not None:
-                    seen.add(id(fn))
-                    chain.append(pos(fn))
-                    fn = fn.__wrapped__
-            except Exception:
-                pass
-            code = getattr(fn, "__code__", None)
-            nid = it.nodeid.split("[")[0]
-            path, _, rest = nid.partition("::")
-            want = baseline.get(path, {}).get(rest.replace("::", "."))
-            self.items.append({"id": nid, "file": code.co_filename if code else None, "line": code.co_firstlineno if code else None,
-                               "chain": chain, "code_changed": bool(want) and bool(code) and digest(code) not in want})
-c = Collect()
-rc = pytest.main(["--collect-only", "-q", "-p", "no:cacheprovider", "--rootdir", ".", *files], plugins=[c])
-with open(out, "w") as f:
-    json.dump({"rc": int(rc), "items": c.items, "lib_roots": trusted_roots}, f)
+        blob = ("\\n" + marker + "\\n" + _dumps({"rc": int(rc), "items": c.items}) + "\\n" + marker + "\\n").encode("utf-8")
+        view = memoryview(blob)
+        while view:
+            n = _write(out_fd, view)
+            view = view[n:]
+    finally:
+        _close(out_fd)
+_run()
 """
 _COLLECT_TIMEOUT_S = 120
 
@@ -648,6 +665,23 @@ def rebound_tests(before: dict[str, str], workdir: Path, tmp_dir: Path) -> list[
     return rebound_report(before, workdir, tmp_dir)[0]
 
 
+def _host_lib_roots() -> tuple[Path, ...]:
+    """ホスト側の sysconfig / site から標準ライブラリ・site-packages の実パスを求める（子の報告を信用しない）。"""
+    roots: list[str] = []
+    paths = sysconfig.get_paths()
+    for k in ("stdlib", "platstdlib", "purelib", "platlib"):
+        if paths.get(k):
+            roots.append(paths[k])
+    for fn in (getattr(site, "getsitepackages", None), getattr(site, "getusersitepackages", None)):
+        if fn:
+            try:
+                v = fn()
+                roots.extend(v if isinstance(v, (list, tuple)) else [v])
+            except Exception:
+                pass
+    return tuple(Path(p) for p in sorted({os.path.realpath(p) for p in roots if p and os.path.isdir(p)}))
+
+
 def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tuple[list[dict[str, str]], str | None]:
     """動的な差し替え（setattr(TestA, "test_x", f)・globals()["test_x"] = f・conftest からの代入）の検出。solver が変えたあとの作業ツリーを
     採点と同じ隔離の子プロセスで pytest 収集し、基準にあった各テストが実際に実行する関数の位置（ファイル・行）を、基準の定義と照合する。
@@ -666,20 +700,25 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
     if not expected:
         return [], None
     tmp = Path(tmp_dir)
-    out = tmp / "collected.json"
-    out.unlink(missing_ok=True)
-    baseline_file = tmp / "baseline.json"
-    argv = [sys.executable, "-c", _COLLECT_SCRIPT, str(out), str(baseline_file), *files]
+    marker = f"AHE-COLLECT-{secrets.token_hex(16)}"
+    stdin_data = json.dumps({"marker": marker, "baseline": {f: before[f] for f in files}}).encode("utf-8")
+    argv = [sys.executable, "-c", _COLLECT_SCRIPT, *files]
     env = grader_env(root, tmp, tmp / "record.json")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONSAFEPATH"] = "1"
     try:
-        baseline_file.write_text(json.dumps({f: before[f] for f in files}), encoding="utf-8")
         if grader_isolation() == "bwrap":
             cmd = grader_sandbox_cmd(shlex.join(argv), root, tmp)
         else:
             cmd = argv
-        subprocess.run(cmd, cwd=root, env=env, capture_output=True, timeout=_COLLECT_TIMEOUT_S, stdin=subprocess.DEVNULL, check=False)
-        data = json.loads(out.read_text(encoding="utf-8"))
+        proc = subprocess.run(cmd, cwd=root, env=env, input=stdin_data, capture_output=True, timeout=_COLLECT_TIMEOUT_S, check=False)
+        stdout = proc.stdout.decode("utf-8", errors="replace")
+        delim = f"\n{marker}\n"
+        end = stdout.rfind(delim)
+        start = stdout.rfind(delim, 0, end) if end >= 0 else -1
+        if start < 0 or end <= start:
+            raise ValueError("収集結果のマーカーが標準出力にありません")
+        data = json.loads(stdout[start + len(delim):end])
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         log.warning("テスト収集による再束縛の確認ができませんでした: %s", e)
         return [], f"収集の子プロセスを動かせなかった: {type(e).__name__}: {str(e)[:200]}"
@@ -689,7 +728,7 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
     got = {it["id"]: it for it in data["items"]}
     known = _known_wrappers(root, before)
     known_callables = _known_callable_wrappers(root, before)
-    lib_roots = tuple(Path(p).resolve() for p in data.get("lib_roots", []) if p)
+    lib_roots = _host_lib_roots()
     lib_cache: dict[Path, set[tuple[int, str]]] = {}
     found: list[dict[str, str]] = []
     for node_id, line in expected.items():
