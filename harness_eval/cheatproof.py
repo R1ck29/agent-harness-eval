@@ -263,10 +263,14 @@ def tamper_check(before: dict[str, str], workdir: Path) -> list[dict[str, str]]:
                 line_finding = None
                 if body:
                     line_finding = f"changed: {body[0].strip()[:160]}"
-                elif not after[path].startswith(old.rstrip()) and not _skip_added_here(added):
-                    # 行を消さない弱め方（先頭に return・assert の前に代入・autouse の差し替え）: 末尾への追記ではない変更
-                    line_finding = f"inserted before the end: {(added or [''])[0].strip()[:160]}"
-                if line_finding and path.endswith(".py") and _pure_addition(old, after[path]):
+                elif not _skip_added_here(added):
+                    if path.endswith(".py"):
+                        if not _pure_addition(old, after[path]):
+                            line_finding = f"disallowed addition: {(added or [''])[0].strip()[:160]}"
+                    elif not after[path].startswith(old.rstrip()):
+                        # 行を消さない弱め方（先頭に return・assert の前に代入・autouse の差し替え）: 末尾への追記ではない変更
+                        line_finding = f"inserted before the end: {(added or [''])[0].strip()[:160]}"
+                if line_finding and body and path.endswith(".py") and _pure_addition(old, after[path]):
                     line_finding = None  # クラス途中への新しい test・import への名前の追加などは、AST で見れば純粋な追加
                 if line_finding:
                     found.append({"kind": "test_body_modified", "path": path, "line": line_finding})
@@ -493,9 +497,13 @@ class _PureAddition:
         for node in new:
             if i < len(old) and self.same(old[i], node, owner):
                 i += 1
-            elif self.allowed_addition(node, owner, taken):
+            elif self.allowed_addition(node, owner, taken, trailing=(owner is None and i == len(old))):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     taken.add(node.name)  # 追加した名前どうしも重ならない
+                elif isinstance(node, ast.Assign):
+                    for t in node.targets:
+                        if isinstance(t, ast.Name):
+                            taken.add(t.id)
             else:
                 return False
         return i == len(old)
@@ -519,18 +527,44 @@ class _PureAddition:
                 return True
         return ast.dump(old, include_attributes=False) == ast.dump(new, include_attributes=False)
 
-    def allowed_addition(self, node: ast.stmt, owner: ast.ClassDef | None, taken: set[str]) -> bool:
+    @staticmethod
+    def _safe_trailing_expr(expr: ast.AST) -> bool:
+        """末尾の単純なモジュール変数代入の右辺に、属性呼び出し・setattr・globals 等の副作用がないか。"""
+        dangerous = {"setattr", "delattr", "exec", "eval", "compile", "globals", "locals", "vars", "__import__"}
+        for part in ast.walk(expr):
+            if isinstance(part, ast.Call):
+                if isinstance(part.func, ast.Name) and part.func.id in dangerous:
+                    return False
+                if isinstance(part.func, ast.Attribute):
+                    return False
+            elif isinstance(part, ast.NamedExpr):
+                return False
+        return True
+
+    def allowed_addition(self, node: ast.stmt, owner: ast.ClassDef | None, taken: set[str], *, trailing: bool = False) -> bool:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            return (node.name.startswith("test_") and node.name not in taken
-                    and (owner is not None or node.name not in self.shadow) and not _is_fixture(node))
+            if (node.name.startswith("test_") and node.name not in taken
+                    and (owner is not None or node.name not in self.shadow) and not _is_fixture(node)):
+                return True
+            if (trailing and owner is None and not node.decorator_list
+                    and node.name not in taken and node.name not in self.shadow and node.name not in _RESERVED_NAMES
+                    and not node.name.startswith(("pytest_", "__"))
+                    and not (_declared_globals(node.body) & (taken | self.shadow))):
+                return True
+            return False
         if owner is not None:
-            return False  # 既存クラスへの非テストの追加はすべて改ざん
+            return False  # 既存クラスへの非テストの追加は末尾でもすべて改ざん
         if isinstance(node, ast.ClassDef):
             return (node.name not in taken and node.name not in self.shadow and node.name not in _RESERVED_NAMES
                     and not node.name.startswith("pytest_") and not _is_fixture(node))
         if isinstance(node, (ast.Import, ast.ImportFrom)) and all(_safe_alias(a) for a in node.names):
             self.imported += _alias_names(node.names)
             return True
+        if trailing and isinstance(node, ast.Assign) and node.targets and all(isinstance(t, ast.Name) for t in node.targets):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            return (all(n not in taken and n not in self.shadow and n not in _RESERVED_NAMES
+                        and not n.startswith(("pytest_", "__")) for n in names)
+                    and self._safe_trailing_expr(node.value))
         return False
 
 
