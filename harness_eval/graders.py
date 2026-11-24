@@ -6,19 +6,21 @@ status:
   not_run              … --no-llm で LLM 判定を実行しなかった（スコアの分母から除外）
   skipped_prior_fail   … コード判定が既に不合格なので LLM 判定を省いた（不合格扱い。
                           試行の合否は変わらないのでトークン節約のため省略する）
+  pending              … 判定待ち（runner が全試行のあとにまとめて判定する。結果には残らない）
+  judge_disagreement   … 両系統の判定役の多数決が食い違った（合格として数えない）
 """
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .isolation import fill
+from .isolation import fill, grader_env, grader_isolation, grader_sandbox_cmd, open_new
 from .record import TrialRecord
 from .spec import Grader
 
@@ -40,6 +42,34 @@ JUDGE_PROMPT = """あなたは厳格な採点者です。以下の「評価観�
 class JudgeConfig:
     enabled: bool = True
     run: Callable[[str], tuple[str | None, float | None]] | None = None  # prompt -> (text, cost)
+    # True: その場では判定せず、判定入力（最小: 評価観点と最終応答／対象ファイルだけ。会話の記録は渡さない）を
+    # rec.judge_inputs に積んで status を pending にする。runner が全試行のあとに盲検化・順序のランダム化・多数決で判定する
+    defer: bool = False
+
+
+def judge_content(focus: str, max_chars: int, rec: TrialRecord, workdir: Path) -> str | None:
+    """判定に渡す対象（最終応答か、作業フォルダの 1 ファイル）。ファイルがなければ None。"""
+    if focus == "final":
+        content = rec.final_message or ""
+    else:
+        f = _safe_path(workdir, focus)
+        if not f.is_file():
+            return None
+        content = f.read_text(encoding="utf-8", errors="replace")
+    return content[:max_chars] + "\n…(以下省略)" if len(content) > max_chars else content
+
+
+def parse_verdict(text: str | None) -> tuple[str, str]:
+    """判定役の応答の 1 行目から pass / fail / unknown を読む。"""
+    if not text:
+        return "unknown", "判定モデルの応答なし"
+    first = text.strip().splitlines()[0].strip().upper().strip("*`# ")
+    reason = " ".join(text.strip().splitlines()[1:2])[:200]
+    if first.startswith("PASS"):
+        return "pass", reason
+    if first.startswith("FAIL"):
+        return "fail", reason
+    return "unknown", reason or text[:200]
 
 
 def _safe_path(workdir: Path, rel: str) -> Path:
@@ -57,7 +87,8 @@ def _count_check(n: int, params: dict[str, Any]) -> tuple[bool, str]:
     return ok, f"{n} 回（期待: {rng}）"
 
 
-def grade_one(g: Grader, rec: TrialRecord, workdir: Path, task_dir: Path | None = None) -> tuple[bool, str]:
+def grade_one(g: Grader, rec: TrialRecord, workdir: Path, task_dir: Path | None = None,
+              tmp_dir: Path | None = None) -> tuple[bool, str]:
     t, p = g.type, g.params
     if t == "file_exists":
         f = _safe_path(workdir, p["path"])
@@ -104,14 +135,24 @@ def grade_one(g: Grader, rec: TrialRecord, workdir: Path, task_dir: Path | None 
         if task_dir is not None:
             ph["task_dir"] = str(task_dir)
         cmd = fill(str(p["run"]), ph, quote=True)
-        rec_path = workdir.parent / "record_for_grader.json"
-        rec_path.write_text(json.dumps(rec.to_dict(), ensure_ascii=False), encoding="utf-8")
-        env = {**os.environ, "TRIAL_WORKDIR": str(workdir), "TRIAL_RECORD": str(rec_path)}
-        try:
-            r = subprocess.run(cmd, shell=True, cwd=workdir, env=env, capture_output=True, text=True,
-                               timeout=int(p.get("timeout_s", 120)), stdin=subprocess.DEVNULL)
-        except subprocess.TimeoutExpired:
-            return False, "採点コマンドがタイムアウト"
+        mode = grader_isolation()
+        if rec.meta.get("grader_isolation") != "none":
+            rec.meta["grader_isolation"] = mode
+        with tempfile.TemporaryDirectory(prefix="ahe-grade-", dir=tmp_dir) as d:
+            gtmp = Path(d)
+            rec_path = gtmp / "record_for_grader.json"  # 試行ルートではなく採点の一時フォルダ（solver から見えない・採点のあとに消える）
+            with open_new(rec_path, "w") as fh:
+                fh.write(json.dumps(rec.to_dict(), ensure_ascii=False))
+            env = grader_env(workdir, gtmp, rec_path)
+            try:
+                if mode == "bwrap":
+                    r = subprocess.run(grader_sandbox_cmd(cmd, workdir, gtmp, [fill(x, ph) for x in p.get("ro", [])]), cwd=workdir, env=env,
+                                       capture_output=True, text=True, timeout=int(p.get("timeout_s", 120)), stdin=subprocess.DEVNULL)
+                else:
+                    r = subprocess.run(cmd, shell=True, cwd=workdir, env=env, capture_output=True, text=True,
+                                       timeout=int(p.get("timeout_s", 120)), stdin=subprocess.DEVNULL)
+            except subprocess.TimeoutExpired:
+                return False, "採点コマンドがタイムアウト"
         tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
         return r.returncode == 0, f"exit={r.returncode} {tail[0][:200]}"
     raise ValueError(t)
@@ -119,27 +160,13 @@ def grade_one(g: Grader, rec: TrialRecord, workdir: Path, task_dir: Path | None 
 
 def _judge(g: Grader, rec: TrialRecord, workdir: Path, judge: JudgeConfig) -> tuple[str, str, float | None]:
     focus = g.params.get("focus", "final")
-    max_chars = int(g.params.get("max_chars", 20000))
-    if focus == "final":
-        content = rec.final_message or ""
-    else:
-        f = _safe_path(workdir, focus)
-        if not f.is_file():
-            return "fail", f"{focus} がありません", 0.0  # 判定は呼んでいない
-        content = f.read_text(encoding="utf-8", errors="replace")
-    if len(content) > max_chars:
-        content = content[:max_chars] + "\n…(以下省略)"
+    content = judge_content(focus, int(g.params.get("max_chars", 20000)), rec, workdir)
+    if content is None:
+        return "fail", f"{focus} がありません", 0.0  # 判定は呼んでいない
     assert judge.run is not None
     text, cost = judge.run(JUDGE_PROMPT.format(criteria=g.params["criteria"], focus=focus, content=content))
-    if not text:
-        return "unknown", "判定モデルの応答なし", cost
-    first = text.strip().splitlines()[0].strip().upper().strip("*`# ")
-    reason = " ".join(text.strip().splitlines()[1:2])[:200]
-    if first.startswith("PASS"):
-        return "pass", reason, cost
-    if first.startswith("FAIL"):
-        return "fail", reason, cost
-    return "unknown", reason or text[:200], cost
+    st, reason = parse_verdict(text)
+    return st, reason, cost
 
 
 class JudgeUnavailable(Exception):
@@ -147,8 +174,9 @@ class JudgeUnavailable(Exception):
 
 
 def grade_all(graders: list[Grader], rec: TrialRecord, workdir: Path, judge: JudgeConfig,
-              task_dir: Path | None = None) -> None:
-    """rec.grader_results / score / judge_cost_usd を埋める。"""
+              task_dir: Path | None = None, tmp_dir: Path | None = None, precheck: dict[str, Any] | None = None) -> None:
+    """rec.grader_results / score / judge_cost_usd を埋める。
+    precheck: 採点の前の検査の結果（見えているテストの改ざんなど）。不合格の 1 行として末尾に足し、LLM 判定は走らせない。"""
     results: list[dict[str, Any]] = []
     for g in graders:
         if g.type == "llm":
@@ -160,7 +188,7 @@ def grade_all(graders: list[Grader], rec: TrialRecord, workdir: Path, judge: Jud
             results.append({**base, "status": "not_run", "reason": "hooks の実行記録がないため判定できません（Codex）"})
             continue
         try:
-            ok, why = grade_one(g, rec, workdir, task_dir)
+            ok, why = grade_one(g, rec, workdir, task_dir, tmp_dir)
             if g.negate:
                 ok = not ok
             status = "pass" if ok else "fail"
@@ -169,6 +197,8 @@ def grade_all(graders: list[Grader], rec: TrialRecord, workdir: Path, judge: Jud
         results.append({**base, "status": status, "reason": why})
     # LLM 判定を省くのは「配布物の有無に関係なく既に不合格」のときだけ。harness_only の不合格（基準側では当然）で
     # 省くと、基準との比較用スコアが出せなくなる
+    if precheck is not None:  # 判定の番号（graders の位置）をずらさないよう末尾に足す
+        results.append(precheck)
     code_ok = all(r is None or r["harness_only"] or r["status"] in ("pass", "not_run") for r in results) and rec.error is None
     jcost = 0.0
     jcost_known = True
@@ -177,10 +207,19 @@ def grade_all(graders: list[Grader], rec: TrialRecord, workdir: Path, judge: Jud
             continue
         base = {"label": g.label(), "type": g.type, "kind": g.kind, "weight": g.weight, "category": g.category,
                 "harness_only": False}
-        if not judge.enabled or judge.run is None:
+        if not judge.enabled or (judge.run is None and not judge.defer):
             results[i] = {**base, "status": "not_run", "reason": "--no-llm"}
         elif not code_ok:
             results[i] = {**base, "status": "skipped_prior_fail", "reason": "他の判定が不合格のため省略"}
+        elif judge.defer:
+            focus = g.params.get("focus", "final")
+            content = judge_content(focus, int(g.params.get("max_chars", 20000)), rec, workdir)
+            if content is None:
+                results[i] = {**base, "status": "fail", "reason": f"{focus} がありません"}
+            else:
+                rec.judge_inputs.append({"kind": "rubric", "grader": i, "criteria": str(g.params["criteria"]), "focus": focus,
+                                         "content": content, "negate": g.negate})
+                results[i] = {**base, "status": "pending", "reason": "判定待ち"}
         else:
             try:
                 st, why, cost = _judge(g, rec, workdir, judge)
@@ -196,12 +235,21 @@ def grade_all(graders: list[Grader], rec: TrialRecord, workdir: Path, judge: Jud
                 jcost += cost
             results[i] = {**base, "status": st, "reason": why}
     rec.grader_results = results
-    # 実行しなかった判定（not_run・skipped_prior_fail）は分母に入れない
+    rescore(rec)
+    # 判定を実行しなければ 0、実行して費用が分からなければ None（集計で「不明」として扱う）
+    rec.judge_cost_usd = jcost if jcost_known else None
+
+
+def rescore(rec: TrialRecord) -> None:
+    """grader_results から score / cmp_score を計算する。実行しなかった判定（not_run・skipped_prior_fail）は分母に入れない。
+    判定待ち（pending）があるうちは None（まだ採点が終わっていない）。"""
+    results = rec.grader_results
+    if any(r["status"] == "pending" for r in results):
+        rec.score = rec.cmp_score = None
+        return
     scored = [r for r in results if r["status"] not in ("not_run", "skipped_prior_fail")]
     rec.score = _weighted(scored)
     rec.cmp_score = _weighted([r for r in scored if not r["harness_only"]])
-    # 判定を実行しなければ 0、実行して費用が分からなければ None（集計で「不明」として扱う）
-    rec.judge_cost_usd = jcost if jcost_known else None
 
 
 def _weighted(results: list[dict[str, Any]]) -> float | None:

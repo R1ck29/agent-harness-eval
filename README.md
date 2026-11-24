@@ -7,11 +7,14 @@ Claude Code と Codex の「ハーネス」（CLAUDE.md / AGENTS.md・Skills・S
 
 - 「タスク × プロファイル × 試行回数」を 1 コマンドで実行し、合格率・毎回合格する率（pass^k）・費用・失敗の種類を出す
 - 差には 95% 区間と、良くなった・悪くなったタスクの数が付く。リリース判定は、事前に決めた許容幅で 通過／不通過／判定不能
+- `run` の最後に、候補がベースラインより良くなったかを `IMPROVED`／`NO CHANGE`／`REGRESSED`／`INCONCLUSIVE` の 1 つで出す。
+  妥当性のチェックは既定で有効（[評価の結論と判定役](#評価の結論と判定役既定の挙動)）
 - train タスクの失敗から、改善役（読み取りだけの `claude -p`）が配布物の変更案を作る（`improve`）。評価用のタスク（holdout）は
   権限設定で読ませず、効くことを起動のたびに確かめる
 - 配布物の変更案は、改善に使っていない評価用のタスク（holdout）で現行と比べて採否を出す（`promote`。自己改善ループの関門）
 - 毎回読み込まれる量（開始時の文脈）と成功あたりの費用を測り、成功率を落とさず費用を下げた変更案も採用できる（`promote --objective efficiency`）
-- 各試行は一時ホームで隔離し、普段の `~/.claude` / `~/.codex` には触らない
+- 各試行は一時ホームで動き、普段の `~/.claude` / `~/.codex` には触らない。Linux では bubblewrap で試行の外（参照解・採点・他の試行・本物のホーム）を見せず、
+  答えを見た形跡のある試行は無効、見えているテストを壊した試行は不合格にする（[ズル対策](#ズル対策既定で有効)）
 - 採点はコード判定が基本（独自スクリプトも可）。LLM 判定は補助
 - 依存は Python 3.10+ と PyYAML だけ。各 CLI（`claude -p` / `codex exec --json`）を直接呼ぶ
 
@@ -64,7 +67,7 @@ python -m harness_eval --version
 ```
 
 一度だけ指定するなら `python -m pip install --index-url "<社内 Artifactory の PyPI ミラー URL（管理者に確認）>" -r requirements.txt`。
-最後に `0.8.0` が表示され、終了コード 0 なら導入完了です。
+最後に `0.10.0` が表示され、終了コード 0 なら導入完了です。
 `python -m pip install .` で `harness-eval` コマンドとしても使えます（`python -m harness_eval` と同じ）。
 
 ### ② エージェント CLI
@@ -130,7 +133,7 @@ python -m harness_eval validate --tasks examples/tasks --profiles examples/profi
 python -m harness_eval doctor --profiles "examples/profiles/claude-*.yaml" --out "$OUT"
 ```
 
-`harness-eval 0.8.0 / Python … / PyYAML …`、各プロファイルの CLI 版と `経路:` が出て、終了コード 0 なら静的確認は成功です。
+`harness-eval 0.10.0 / Python … / PyYAML …`、各プロファイルの CLI 版と `経路:` が出て、終了コード 0 なら静的確認は成功です。
 `注意:` は内容を確認し、`NG:` や CLI の `見つかりません` は解消してから進みます。
 静的確認だけでは認証の成功までは分かりません。
 
@@ -148,33 +151,41 @@ python -m harness_eval doctor --profiles "examples/profiles/claude-*.yaml" --out
 python -m harness_eval plan --tasks examples/tasks --profiles "examples/profiles/claude-*.yaml" --tag smoke --no-llm --baseline claude-baseline --out "$OUT"
 ```
 
-`組み合わせ 8 × 試行 1 = 8 試行`（4 タスク × 2 プロファイル）、`LLM 判定: なし`、終了コード 0 が目印です。
-初回の例は `概算費用: $0.0000（履歴がなく見積もれない呼び出し 8 回）`。
-費用はキャッシュ内の過去の費用から概算し、キャッシュで省ける試行は除きます。
-履歴がないときの $0 や見積もれない呼び出しは、**不明・不完全という意味で、無料ではありません**。
+`組み合わせ 8 × 試行 1 = 8 試行`（4 タスク × 2 プロファイル）、`判定側（judge）: LLM 判定なし（費用 0）`、終了コード 0 が目印です。
+初回の例は `解く側（solver）の概算: $4.0000（履歴がなく、タスクの max_budget_usd か既定 $0.50 で数えた呼び出し 8 回）`。
+解く側の費用はキャッシュ内の過去の費用から概算し、キャッシュで省ける試行は除きます。
+履歴がない呼び出しは $0 と数えず、タスクの `limits.max_budget_usd`（未設定なら既定 $0.50）で多めに見積もります（実際の請求額とは異なり得ます）。
 
 ### ④ スモーク評価（1 試行）
 
 **`run` はタスク入力を設定先のモデルに送り、料金が発生し得ます。`--no-llm` は LLM 判定だけを無効にします。**
-合成データを使ってください。一時ホームは設定の隔離であり、外のファイルへのアクセスを禁止する sandbox ではありません。
+合成データを使ってください。Linux では試行を bubblewrap の中で動かします（`bwrap` が要ります。[ズル対策](#ズル対策既定で有効)）。
+macOS・Windows では隔離がなく、一時ホームは設定の隔離にとどまります（試行の外を見た形跡の検査だけ行います）。
 
 ```bash
 python -m harness_eval run --tasks examples/tasks --profiles "examples/profiles/claude-*.yaml" --tag smoke --no-llm --baseline claude-baseline --out "$OUT"
 ```
 
 終了コード 0 と `レポート:` の出力を確認します。レポートの「有効/全」・除外された試行・予算停止を確認してからスコアを読みます。
+出力の先頭の `結論` は、このスモーク（4 タスク・1 試行）では `INCONCLUSIVE` になります。
+比べたタスクが 5 件未満で、1 タスクあたりの試行も 2 回未満だからです。スモークは動作と傾向の確認用です。
 
 ### ⑤ フル評価（3 試行・LLM 判定あり）
 
 リリース前・モデル移行時には次を使います。`--max-cost-usd 5` は**この run が追跡できる費用だけ**の上限で、
-先の doctor・スモークの費用は含みません。プロバイダー側の厳密な支出制限ではなく、並列実行では超過し得ます。
-`pricing` のない Codex など不明な費用は上限計算に入りません（[費用の制限](docs/guide.html#cost)）。
+先の doctor・スモークの費用は含みません。判定の費用は含みます。実行前の見積もりが上限を超えると、何も実行せずに止まります（終了コード 2）。
+プロバイダー側の厳密な支出制限ではなく、並列実行では超過し得ます。
+試行ごとの費用は呼び出しの終了時に一度だけ確定し、予算・台帳・集計に同じ額を渡します（`pricing` のない Codex も、トークンとモデルが分かれば公開価格で換算します。分からないものだけ上限計算に入りません。[費用の制限](docs/guide.html#cost)）。
 
 ```bash
 python -m harness_eval run --tasks examples/tasks --profiles "examples/profiles/claude-*.yaml" --trials 3 --baseline claude-baseline --max-cost-usd 5 --out "$OUT"
 ```
 
 ④ と同じく、終了コード 0・`レポート:` と、有効な試行の件数を確認します。
+判定役の段階は既定の `--tier dev` です。LLM 判定が合否を決めた結論は「暫定: 採用判断には使えません」と出ます。
+**採用・マージの判断に使うなら `--tier decisive` を付けます。**decisive は強いモデルで 3 回ずつ判定するので、判定の費用が大きく増えます。
+同梱サンプルを Claude Code と Codex の両方の CLI がある環境で見積もると、判定側の上限は約 $16 でした（実測の履歴がないときの多めの仮定）。
+`--max-cost-usd 5` のままでは始まらないので、先に `plan … --tier decisive` で見積もりを確かめてから上限を決めてください。
 `improve` もモデルを呼び、料金が発生し得ます（[自己改善ループ](docs/guide.html#loop)）。
 
 ### ⑥ 実行IDを使ってリリース判定
@@ -218,6 +229,179 @@ dry-run は `（--dry-run: 書き換え・書き出しはしていません。�
 | `csv-summary-skill` / `arithmetic-no-skill` | 集計レポート／単純な質問 | スキルが必要なときだけ呼ばれるか |
 | `csv-summary-insight` | 集計＋考察 | LLM 判定（フル評価用） |
 
+## 評価の結論と判定役（既定の挙動）
+
+`run` は最後に、候補がベースラインより良くなったかを次の 1 つで出します。
+候補は `--candidate` で指定します（既定はベースライン以外のすべてのプロファイル）。
+結論は CLI の出力の先頭、`report.html` の冒頭の「結論」、`summary.json` の `verdicts` に出ます。
+
+| 結論 | 意味 |
+|---|---|
+| `IMPROVED` | 差（候補 − ベースライン）の 95% 区間の下端が 0 より上 |
+| `REGRESSED` | 区間の上端が 0 より下。または対照タスクではっきり後退した |
+| `NO CHANGE` | 区間が 0 をまたぎ、±0.10（`min_effect`）の内側に収まる |
+| `INCONCLUSIVE` | 区間が 0 をまたぎ ±0.10 より広い（検出力不足）。または下の妥当性チェックに掛かった |
+
+結論には理由が付きます。あわせて、ベースラインの合格率、差と 95% 区間（タスクでクラスタした 2 段ブートストラップ）、
+判定役の設定（段階・モデル・系統・盲検化・回数・校正の一致率）、妥当性チェックの結果を出します。
+`run` の終了コードは結論によらず 0 です。結論で止めるのは `verdict`（下）です。
+
+### 妥当性チェック（既定で有効）
+
+次のどれかに掛かると `INCONCLUSIVE` です。結論より優先します。
+
+- ベースラインの合格率が 20%〜80% の外（易しすぎる・難しすぎる。`floor`・`ceiling` で変更可）
+- エラーで結果が出なかった試行（利用上限・レート制限・認証・`agent_error` など）が 20% を超える。
+  旧版の結果が `agent_error` と記録した利用上限のメッセージも数えます
+- 比べられたタスクが 5 件未満、または 1 タスク・1 条件あたりの有効な試行が 2 回未満（10 件未満は警告）
+- 片側にしか値がないタスクがある（悪化が隠れうる）
+- 対照タスク（`--control-tag`）の後退の疑い。はっきり後退していれば `REGRESSED`。
+  指定したタグのタスクがない・対照タスクの有効な試行が足りないときも `INCONCLUSIVE`
+- LLM 判定が合否を決めた試行があるのに、判定役が同系統だけ（別系統を確認できない）、または校正が足りない（6 件未満・一致率 80% 未満）。
+  LLM 判定が合否を決めていなければ、このチェックは掛かりません
+
+`--out` の上の指示ファイルなど、これまでの漏れの検査はそのままです。
+答えを見た形跡のある試行（下の「ズル対策」）は、エラーと同じく無効な試行として数えます。
+
+### ズル対策（既定で有効）
+
+解く側のエージェントが、評価の答え（参照解・採点スクリプト・他の試行の結果・本物のホームの認証）を読んだり、
+見えているテストを壊して合格したりしないようにします。
+
+| 対策 | 既定 | 結果 |
+| --- | --- | --- |
+| 隔離（`sandbox: bwrap`） | Linux で有効 | 試行は bubblewrap の中で動く。書けるのは一時ホームと作業ディレクトリだけ（標準出力・標準エラーのログ・採点記録のある試行ルートは見えず、書けない。`TMPDIR` は隔離の中の空の `/tmp`）。見えるのは読み取り専用のシステム（`/usr` `/bin` `/lib*` `/etc` `/opt`）、CLI の本体、プロファイルの `sandbox_ro` だけ。`/home`・`/workspace`・`/tmp` は空。ネットワークはモデルの API のために残す |
+| 答えを見た形跡（leak） | 常に | ツールの入力に試行の外の絶対パス（本物のホーム・`--out`・タスクのフォルダ・採点スクリプト・AHE 自身など）、評価の名前（`trials.jsonl` など）、3 段以上の `../`、上流リポジトリへのネットワーク参照があれば、その試行は無効（`valid=false`、`invalid_reason=leak`）。合格にも不合格にも数えない。参照解・採点に埋めたカナリア（`AHE-EVAL-CANARY-5d2e9b`、タスクの `canaries`）がトランスクリプトのどこかに出ても無効 |
+| 見えているテストの改ざん（tamper） | 常に | 採点の前に、起動直前の作業ツリーと比べる。既存のテストファイルの削除・改名、確認の行が正味で減った・既存のテストの行を書き換えた・末尾への追記ではない挿入をした（確認の数が同じでも）、監視できなくなった既存のテストファイル（大きすぎる・UTF-8 でない）、既存のテストへの skip、テストの設定で対象を狭める変更があれば不合格（`failure_tag: test_tamper`）。テストを直すこと自体が課題のタスクは `allow_test_changes: true` |
+| 環境変数 | 常に | 親の環境から渡すのは許可リスト（`PATH`・`LANG`・`LC_*`・`TERM`・`TZ`・`SHELL`、文字コード（`PYTHONUTF8` など）、Windows の必須、プロキシと証明書）と `inherit_env` に書いた名前だけ。API キー・`GH_TOKEN`・親のセッションの変数は、宣言しなければ渡らない |
+| 一時ファイル | 常に | 試行の `TMPDIR` と、`command` 採点の `TMPDIR` は試行ごとのフォルダで、終わったら消す（隠しテストを当てた木を OS の `/tmp` に残さない） |
+| Web 検索 | 常に | Codex の Web 検索は、タスクの `allow_tools` に `WebSearch`・`WebFetch` があるときだけ有効（Claude と同じ条件） |
+
+verdict の検査欄 `integrity` に、無効にした試行・改ざん・隔離なしの試行の数が出ます。
+`--no-llm` の結果（必須の LLM 判定が未実施の試行）と、両条件とも全試行が無効になった対象タスクは `INCONCLUSIVE` になります（スモーク確認用。`--no-llm` の結果は LLM 判定ありの実行のキャッシュとは別です）。
+`cmp_passed` が明示的に null の試行（配布物専用の判定だけのタスク）は比較から外します。
+隔離のない試行で候補が答えを見に行った形跡があれば、トランスクリプトに出ない読み方もありうるため `INCONCLUSIVE` にします。
+
+**採点（`command` グレーダー）も隔離します**: 採点は候補の実装を import・実行しうるため、Linux + bwrap では採点コマンドも bwrap の中で動かします
+（実のホーム・他の試行・採点に要らない評価資材・認証は見えず、ネットワークなし、作業フォルダは読み取り専用、環境変数は許可リストだけ。
+`HOME`・`TMPDIR` は採点ごとの一時フォルダ）。採点コマンドに書いた実在する絶対パス（採点スクリプト・正解データ）と、`command` グレーダーの `ro:`（追加で見せるパスの一覧）だけが読み取り専用で見えます。
+bwrap のない OS（macOS・Windows）では隔離せずに採点し、結果に `grader_isolation: none` を記録します。その試行を含む結果は、`verdict` の既定（`required_tier: decisive`）では
+`INCONCLUSIVE` になります（候補のコードがホストの権限で動いたため）。
+AWS の認証ファイルは、プロファイルが Bedrock（`CLAUDE_CODE_USE_BEDROCK`）を `env` か `inherit_env` で明示したときだけ solver に渡します（`env_unset` で外した変数は戻しません）。
+
+隔離を使えない環境（`bwrap` がない・コンテナでユーザー名前空間が使えない）では、`run` が試行を始める前に止まります。
+`apt install bubblewrap` などで入れるか、隔離しない場合はプロファイルに `sandbox: off` と書きます（結果に記録され、verdict が警告します）。
+層の hook が試行の外のスクリプトを呼ぶ場合は、そのパスを `sandbox_ro` に並べます（隔離の中に読み取り専用で見せ、leak 検査でも許可します）。
+
+**認証ファイルの複製（`copy_credentials: true`）の注意**: 試行の中の CLI が複製したログインを更新すると、更新用のトークンは使い回せないため、
+本物のログインが使えなくなります（Codex の `auth.json` で実際に起きました）。そこで次のようにしています。
+
+- `run` は始める前に本物の認証の期限を確かめ、期限まで 2 時間ない・切れている、または Codex の最終更新が 7 日より前なら止まります。
+  `codex login`（または一度 `codex` を実行して更新）してからやり直してください。`doctor` が期限を表示します（値は表示しません）
+- **複製は試行のあと捨てるだけで、本物へは書き戻しません**（複製は solver が書き換えられるため、戻すと solver が本物のログインを書き換えられます）。
+  そのため事前の期限確認が唯一の防ぎ方です。確認を通っても試行の中で更新が起きた場合、Codex の更新用トークンは使用済みになり、
+  本物のログインを次回 `codex login` し直す必要があります（本物のファイルは変更されません）
+- 会社の評価では、更新の起きない API キー（Codex は `CODEX_API_KEY`、Claude は `ANTHROPIC_API_KEY`）を `inherit_env` で渡すことを勧めます
+
+**判定役の認証をその場で使う（`credentials: in_place`。Codex を ChatGPT のログインで使う場合）**: API キーがなく `~/.codex/auth.json` しかないときの、
+判定役専用の経路です。認証ファイルを複製しないので、複製側の更新で本物の refresh token が使用済みになる事故が起きません。
+`--judge-profile codex=examples/judge-profiles/codex-judge-inplace.yaml` のように、実行には使わないプロファイルを渡します。
+
+- 解く側のプロファイル（`--profiles`）に書くと `SpecError` で止まります（解く側に本物の設定ディレクトリを見せないため）。`claude_code`・`copy_credentials: true` との併用も `SpecError` です
+- `HOME` は一時ホームのままで、`CODEX_HOME` だけ本物（環境変数 `CODEX_HOME`、なければ `~/.codex`）を指します。
+  `codex exec --json --ephemeral -s read-only --skip-git-repo-check --ignore-user-config --ignore-rules --disable hooks` で呼び、
+  利用者の `config.toml`（MCP・モデル・指示）・execpolicy の `.rules`・hooks を判定に入れません
+- 同じ系統の in_place の判定は同時に 1 本だけです（`--jobs` が 2 以上でも順に呼びます。更新の競合を避けるため）。待っている判定は、起動の直前（ロックの中）に費用の残額を確かめ、先の判定の費用を計上してから次を起動します（上限に達していれば起動しません）。
+  このロックは 1 つの `run` の中だけです。別の端末で同じ `~/.codex` を使う `codex` や別の `run` を同時に動かさないでください
+- `run` は始める前に `auth.json` の存在と期限を確かめます（値は表示しません）。期限まで 2 時間ない・切れている、または最終更新が 7 日より前なら止まります。
+  `codex login`（または一度 `codex` を実行して更新）してからやり直してください
+- **判定入力が信頼できるときだけ使えます**（`--trust-judge-input` が必須。なければ `run` は始まる前に止まります）。`-s read-only` はファイルの**書き込み**を
+  制限するだけで、判定 CLI のツールが実の `CODEX_HOME`（認証）を**読む**ことは、ハーネスからは止められません。判定のプロンプトには解く側の出力が入るため、
+  出力に埋め込まれた指示で認証の中身が判定に出うる、というのがこの経路の限界です。そのため（1）自分で用意した合成データや自分のエージェントの出力など、
+  信頼できる出力だけを判定する、（2）in_place の判定の理由と、失敗時の CLI の出力（エラーメッセージ・標準エラー）は記録・キャッシュ・報告に残さない（`env` で `CODEX_HOME` を上書きして宣言を迂回することも受け付けません）、（3）`summary.json` の
+  `meta.options.judge_input_trusted` に宣言を残します。信頼できない出力を判定するなら、API キー（`inherit_env`）の経路を Linux + `bwrap` 環境で使ってください（非 `in_place` の判定は Linux + `bwrap` 利用可能時は `bwrap` で隔離して実ホーム・`--out`・タスクフォルダを隠します。macOS・Windows や `sandbox: off` など `bwrap` なしの環境では、Codex 判定の `-s read-only` にもホスト上の読み取り可能なファイルを読める同様の限界が残ります）
+- **限界**: `~/.codex/AGENTS.md` など `CODEX_HOME` に置いた指示ファイルが判定の入力に入るかは、`--ignore-user-config` の説明（`config.toml` を読まない）からは分かりません。
+  この版（0.171.0）では実機で確かめていないので、入りうるものとして扱ってください。確かめるには、外側のシェルで 1 回だけ
+  `HOME=$(mktemp -d) codex exec --json --ephemeral -s read-only --skip-git-repo-check --ignore-user-config --ignore-rules --disable hooks -C "$(mktemp -d)" "渡されている指示文の見出しだけを列挙して。なければ none"`
+  を呼び、`AGENTS.md` の内容が出るかを見ます。出るなら、その指示が判定に混ざったものとして d の結果を読むか、実測の間だけ `AGENTS.md` を退避するか、API キー（`CODEX_API_KEY` を `inherit_env`）の経路に切り替えてください（認証ファイルを別のフォルダへ複製する方法は、事故の原因なので使いません）
+- Claude は in_place にしません。本物の `~/.claude` を見せると `CLAUDE.md`・設定・フック・プラグインが判定に入るためです。
+  サブスクリプションなら `claude setup-token` で作ったトークンを `CLAUDE_CODE_OAUTH_TOKEN` に入れ、`inherit_env` で渡します（`examples/judge-profiles/claude-judge-oauth.yaml`）
+
+`--judge-profile` には、実行のプロファイルの id のほか、実行に使わない YAML のパスも渡せます（判定役の認証だけ借ります。配布物は使いません）。
+系統ごとに `--judge-profile codex=path.yaml --judge-profile claude_code=path.yaml` と指定できます（系統が合わない YAML は `SpecError`）。
+
+### 判定役（LLM 判定）
+
+- 決定的な検査（ファイル・正規表現・スクリプトなど）に合格した出力にだけ走ります。見るのはルーブリック（`type: llm`）の基準だけです
+- 渡すのは評価観点と、最終応答かファイル 1 つ（`max_chars` まで）だけです。会話の記録は渡しません
+- 盲検化します。プロファイル id・モデル名・ハーネスの名前（CLAUDE.md・`.claude`・Codex など）・パスを伏せます。判定の順番は `--seed` で入れ替えます
+- 既定は評価対象と別系統です。Claude Code の出力は Codex が、Codex の出力は Claude が判定します。
+  別系統の CLI がなければ同系統で動きますが、「同系統の判定役」と警告し、LLM 判定が決めた結論は `INCONCLUSIVE` になります
+- 判定の結果は `<--cache-dir>/judge/` に残します。キーは判定入力・モデル・ルーブリック・段階・何票目かのハッシュです。
+  試行のキャッシュは判定の設定によらないので、`--tier` を変えても解く側は再実行しません
+
+| 段階 | モデル | 回数 | 使いどころ |
+|---|---|---|---|
+| `--tier dev`（既定） | sonnet / gpt-6.2-sol | 1 系統 1 回 | 普段の確認。LLM 判定が決めた結論は「暫定: 採用判断には使えません」 |
+| `--tier decisive` | opus / gpt-6.2-astra | 1 系統 3 回の多数決。両方の CLI があれば両系統の一致を求める（不一致は `judge_disagreement` で、合格にしない） | 採用・マージの判断 |
+
+LLM 判定を使わない実行（決定的な検査だけ）は、どちらの段階でも採用判断に使えます。
+haiku など、段階が求めるより弱いモデルは止めます。`--allow-weak-judge` を付ければ使えますが、
+レポートに「弱い判定役」と出て、その判定が合否を決めた結論は採用判断に使えません。
+
+**既定を dev にした理由**: 社内の評価は API の従量課金です。普段の判定は中位モデルで 1 回にし、
+強いモデル・複数回・別系統の判定は、マージなど大事な判断のときだけ使う、という費用の方針に合わせています。
+それでも、既定のまま弱い・安い判定で採用が決まることはありません。
+LLM 判定が合否を決めた試行があれば、dev の結論は暫定です。関門の `verdict` は、そのとき decisive を求めます（dev なら終了コード 5）。
+実行前の見積もりには、dev と decisive の両方の費用が出ます。
+解く側の呼び出しに履歴（キャッシュの実測）がないときは、$0 とは数えず、タスクの `limits.max_budget_usd`（なければ $0.50）で見積もります。
+`--max-cost-usd` は、この見積もりの合計が上限を超えると、何も実行せずに止まります。
+
+### 費用
+
+- 実行前（と `plan`）に、解く側（solver）と判定側（judge）を分けて、dev と decisive の両方の見積もりを出します。
+  判定側は、全出力が決定的な検査に合格した場合の上限です。1 回あたりは判定キャッシュの実測、なければ多めの仮定を使います
+- `--max-cost-usd` は判定の費用も含みます。見積もりが上限を超えると、何も実行せずに止まります（終了コード 2）。
+  実行中に上限に達したら判定もやめます（その試行は `budget_stop` として集計から除く）
+- 実行後は、solver・judge 別のトークン（入力・キャッシュ読み・キャッシュ書き・出力）・呼び出し回数・費用・判定の割合・
+  判定キャッシュの再利用回数を出します（`summary.json` の `usage`）。費用は `harness_eval/prices.json`
+  （公開 API 価格。出典 URL と取得日 2026-11-19 つき）で換算します。表にないモデルは CLI が返す費用を使い、それもなければ推測せず「不明」にします
+
+### 事前登録と verdict
+
+`run` は試行を始める前に、判定規則・そのハッシュ・判定役の設定を `prereg.json` に書きます。
+規則は `--rules FILE.yaml` で変えられます（キーは [リファレンス「判定規則」](docs/reference.html#rules)）。
+
+```bash
+python -m harness_eval verdict "$OUT/<実行ID>"
+```
+
+`verdict` はモデルを呼ばずに既存の結果を判定し直し、`verdict.json` に書きます。旧版の結果も読めます。
+規則を変えて集計し直すと「事後」と表示し、採用判断には使えません。`prereg.json` のハッシュが合わなければ `INCONCLUSIVE` です。
+
+| 終了コード | 意味 |
+|---|---|
+| 0 | `IMPROVED`（採用してよい） |
+| 1 | `REGRESSED` |
+| 3 | `INCONCLUSIVE` |
+| 4 | `NO CHANGE` |
+| 5 | `IMPROVED` だが暫定（dev 段階・弱い判定役・事後の規則など。採用不可） |
+| 2 | 定義エラー |
+
+### 他のリポジトリの PR を関門にかける
+
+1. プロファイルを 2 つ作ります。`before` はデフォルトブランチのハーネス、`after` は PR のブランチのハーネスです。
+   2 つのブランチを別のフォルダに取り出し、それぞれの `install` の `copy` でそのフォルダを指します。`id` は `before`・`after` にします。
+   タスクは 5 件以上（推奨 10 件以上）要ります。LLM 判定を使うなら、`calibration` を書いたタスクも入れます（校正に 6 件要るため）
+2. 同じ run で両方を実行します。対照タスクがあれば `--control-tag control` も付けます
+
+   ```bash
+   python -m harness_eval run --tasks <タスク> --profiles before.yaml after.yaml --trials 3 --baseline before --candidate after --tier decisive --out "$OUT"
+   ```
+
+3. CI で `python -m harness_eval verdict "$OUT/<実行ID>"` を実行し、終了コード 0（採用してよい `IMPROVED`）のときだけマージを許します。
+   `NO CHANGE`・`REGRESSED`・`INCONCLUSIVE`・暫定（終了コード 5）はマージしません
+
 ## 開発
 
 [uv の導入手順](https://docs.astral.sh/uv/getting-started/installation/) に従って uv を用意します。
@@ -242,7 +426,8 @@ python -m unittest discover -s tests
 Remove-Item Env:HARNESS_EVAL_REAL_CLI
 ```
 
-`tests/fake_agents/` は実機で観測した出力形式を再現する偽 CLI、`tests/data/` は実機の出力を元にしたフィクスチャです
+`tests/test_cheatproof.py` の隔離の確認は、`bwrap` が使える Linux だけで走ります（ないとスキップ）。
+`tests/fake_agents/` は実機で観測した出力形式を再現する偽 CLI（`fake_cheater.py` はズルをする模擬エージェント）、`tests/data/` は実機の出力を元にしたフィクスチャです
 （Claude Code の stream-json は識別子・パス・拡張一覧を匿名化）。
 
 ## 用語

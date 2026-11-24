@@ -48,6 +48,10 @@ def _jsonl(lines: Iterable[str], warnings: list[str]) -> Iterable[dict[str, Any]
 
 def _classify_message(msg: str) -> str:
     m = msg.lower()
+    # 利用上限（サブスクリプションの上限・クレジット切れ）。数時間戻らないので再試行せず、結果から除外する
+    if re.search(r"usage limit|hit your (?:usage|rate) limit|insufficient_quota|exceeded your current quota|"
+                 r"credit balance is too low|purchase more credits", m):
+        return "usage_limit"
     if re.search(r"rate.?limit|\b429\b|too many requests", m):
         return "rate_limit"
     if re.search(r"overloaded|\b529\b", m):
@@ -108,7 +112,7 @@ class ClaudeAdapter(_Adapter):
             cmd += ["--settings", json.dumps(CLAUDE_ISOLATION_SETTINGS)]
         return cmd + (profile.extra_args if extra_args is None else extra_args)
 
-    def judge_cmd(self, model: str | None) -> list[str]:
+    def judge_cmd(self, model: str | None, in_place: bool = False) -> list[str]:
         cmd = self.exe + ["-p", "--output-format", "json", "--max-turns", "1",
                           "--tools", "", "--no-session-persistence",
                           "--settings", json.dumps(CLAUDE_ISOLATION_SETTINGS)]
@@ -126,7 +130,17 @@ class ClaudeAdapter(_Adapter):
                 return obj.get("result"), cost, None
         return None, None, "result がありません"
 
-    def parse(self, lines: Iterable[str], profile: Profile | None = None) -> ParsedRun:
+    @staticmethod
+    def judge_tokens(stdout: str) -> dict[str, int | None]:
+        """判定 1 回のトークン（input はキャッシュを含まない Claude の定義）。記録がなければ空。"""
+        for obj in _jsonl(stdout.splitlines(), []):
+            if obj.get("type") == "result" and isinstance(obj.get("usage"), dict):
+                u = obj["usage"]
+                return {"input": u.get("input_tokens"), "cache_read": u.get("cache_read_input_tokens"),
+                        "cache_write": u.get("cache_creation_input_tokens"), "output": u.get("output_tokens")}
+        return {}
+
+    def parse(self, lines: Iterable[str], profile: Profile | None = None, *, usage_only: bool = False) -> ParsedRun:
         r = ParsedRun(hook_calls=[])
         pending: dict[str, ToolCall] = {}
         result: dict[str, Any] | None = None
@@ -134,6 +148,8 @@ class ClaudeAdapter(_Adapter):
         retries: list[str] = []
         for e in _jsonl(lines, r.warnings):
             t, st = e.get("type"), e.get("subtype")
+            if usage_only and t != "result":
+                continue
             if t == "system" and st == "init":
                 r.meta.update({
                     "cli_version": e.get("claude_code_version"),
@@ -229,25 +245,39 @@ class CodexAdapter(_Adapter):
                           # 一時ホームの hooks は未信頼のため、これがないと警告なしで実行されない（0.163.0 で実測）。
                           # 普段は一度信頼すれば実行されるので、その状態を再現する
                           "--dangerously-bypass-hook-trust"]
+        # Web 検索は Claude と条件をそろえる: Claude はタスクの allow_tools に WebSearch / WebFetch がなければ使えないので、
+        # Codex もそのときは切る（既定では Codex だけ検索できる状態だった）
+        web = "live" if {"WebSearch", "WebFetch"} & set(task.allow_tools) else "disabled"
+        cmd += ["-c", f'web_search="{web}"']
         if profile.model:
             cmd += ["-m", profile.model]
         return cmd + (profile.extra_args if extra_args is None else extra_args) + ["-"]
 
-    def judge_cmd(self, model: str | None) -> list[str]:
+    def judge_cmd(self, model: str | None, in_place: bool = False) -> list[str]:
         cmd = self.exe + ["exec", "--json", "--skip-git-repo-check", "--ephemeral", "-s", "read-only"]
+        if in_place:
+            # 本物の CODEX_HOME を指すので、利用者の config.toml（MCP・モデル・指示）・execpolicy の .rules・hooks を判定に入れない。
+            # AGENTS.md は止める手段を確認できていない（README の限界）
+            cmd += ["--ignore-user-config", "--ignore-rules", "--disable", "hooks"]
         return cmd + (["-m", model] if model else []) + ["-"]
 
     def parse_judge(self, stdout: str) -> tuple[str | None, float | None, str | None]:
         r = self.parse(stdout.splitlines())
         return r.final_message, None, (f"{r.error_type}: {r.error_message}" if r.error_type else None)
 
-    def parse(self, lines: Iterable[str], profile: Profile | None = None) -> ParsedRun:
+    def judge_tokens(self, stdout: str) -> dict[str, int | None]:
+        """判定 1 回のトークン（input はキャッシュ読みを含む OpenAI の定義）。"""
+        return dict(self.parse(stdout.splitlines()).tokens)
+
+    def parse(self, lines: Iterable[str], profile: Profile | None = None, *, usage_only: bool = False) -> ParsedRun:
         r = ParsedRun(skill_detection="heuristic")
         tok = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "reasoning_output": 0}
         completed = failed = progressed = False
         reconnects = 0
         for e in _jsonl(lines, r.warnings):
             t = e.get("type")
+            if usage_only and t != "turn.completed":
+                continue
             if t == "item.completed" and ((e.get("item") or {}).get("type") or "error") != "error":
                 progressed = True
             if t == "thread.started":

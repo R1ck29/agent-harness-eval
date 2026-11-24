@@ -1,0 +1,17 @@
+# d の実測用のコピー（examples/profiles/ の同名プロファイルに、OAuth トークンの inherit_env と billing: subscription を足したもの）。
+# ハーネスなしのベースライン（Δ の基準）。install が空 = 空の設定ディレクトリで起動する。
+id: claude-baseline
+agent: claude_code
+model: sonnet
+# API キーを環境変数 ANTHROPIC_API_KEY に設定している場合（その端末で実行する。値はここに書かない）:
+# inherit_env: [ANTHROPIC_API_KEY]   # 組織のゲートウェイを ANTHROPIC_BASE_URL で指定していれば、それも並べる
+# （billing は既定の api: 呼び出しごとに課金。--max-cost-usd と月の予算が効く）
+# Bedrock を使う場合（利用先の値に置き換える）:
+# env:
+#   CLAUDE_CODE_USE_BEDROCK: "1"
+#   AWS_REGION: ap-northeast-1
+#   ANTHROPIC_MODEL: <推論プロファイル ARN>   # model より優先したい場合は model を消す
+# サブスクリプション（Pro / Max）で評価する場合: 端末で `claude setup-token` → `export CLAUDE_CODE_OAUTH_TOKEN=<トークン>` してから実行
+# （macOS のキーチェーンのログインは試行では使えない）。値はここに書かない:
+inherit_env: [CLAUDE_CODE_OAUTH_TOKEN]
+billing: subscription

@@ -20,7 +20,8 @@ from . import __version__
 from .adapters import _classify_message, _status_type
 from .candidate import (KINDS, OPS, always_loaded_breakdown, apply_deltas, changed_skills, install_targets, materialize, prechecks,
                         profile_raw, train_specific_strings, write_profile, write_skill_variants)
-from .isolation import TrialPaths, ancestor_instructions, build_env, copy_credentials, make_trial_paths, run_process
+from .isolation import (TrialPaths, ancestor_instructions, build_env, copy_credentials, make_trial_paths, release_home, replace_text,
+                        run_process)
 from .mockapi import improver_cmd, init_problem, parse_stream, read_isolation_check, special_chars, unusable_path
 from .record import TrialRecord
 from .runner import load_run
@@ -351,6 +352,7 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
         if t.split != "train" or t.content_hash() != meta["tasks"][tid].get("hash"):
             raise SpecError(f"{t.path}: 実行のあとでタスクの分割か中身が変わっています（今の split: {t.split}）。今の定義で train を実行し直してください")
     root = Path(tempfile.mkdtemp(prefix="harness-eval-improve-")).resolve()
+    tp: TrialPaths | None = None
     try:
         tp = make_trial_paths(root / "agent", ".claude")
         leaks = ancestor_instructions(tp.workdir)
@@ -364,7 +366,7 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
         if eff:
             report["skipped_material"] = write_efficiency_material(tp.workdir, o.profile, tasks, material, marks)
             if previous is not None:
-                (tp.workdir / "previous.json").write_text(json.dumps(previous, ensure_ascii=False, indent=2), encoding="utf-8")
+                replace_text(tp.workdir / "previous.json", json.dumps(previous, ensure_ascii=False, indent=2))
         else:
             report["skipped_material"] = write_material(tp.workdir, o.profile, tasks, failed, previous, marks)
         if report["skipped_material"]:
@@ -408,11 +410,13 @@ def improve(o: ImproveOptions, log: Callable[[str], None], spend: Callable[[floa
             if not built["problems"] or n == o.retries:
                 break
             # 理由の元になった train の依頼の文字列は、改善役の作業フォルダ（このあと消す）にだけ置く
-            (tp.workdir / "retry.json").write_text(json.dumps(
+            replace_text(tp.workdir / "retry.json", json.dumps(
                 {"deltas": built["deltas"], "problems": built["problems"], "train_strings": built["train_strings"]},
-                ensure_ascii=False, indent=2), encoding="utf-8")
+                ensure_ascii=False, indent=2))
             log(f"事前検査で見送りました（理由 {len(built['problems'])} 件）。理由を返して作り直させます（{n + 1}/{o.retries} 回目）")
     finally:
+        if tp is not None:
+            release_home(tp, log)
         shutil.rmtree(root, ignore_errors=True)  # 依頼文・トランスクリプトの写しと認証の複製を残さない
     return write_candidate(o, built, report, log)
 
