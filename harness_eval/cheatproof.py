@@ -162,19 +162,65 @@ def _watched(rel: str) -> bool:
     return bool(TEST_FILE.search(rel) or CONFIG_FILE.search(rel) or rel.endswith(".py"))
 
 
+def _read_regular_text(path: Path, max_bytes: int = _MAX_BYTES, root: Path | None = None) -> str | None:
+    """リンクをたどらず、FIFO 等でブロックせず、上限内の通常 UTF-8 ファイルだけを読む（それ以外は None）。"""
+    if root is not None:
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            return None
+        cur = root
+        for part in rel.parts:
+            cur = cur / part
+            try:
+                if stat.S_ISLNK(os.lstat(cur).st_mode):
+                    return None
+            except OSError:
+                return None
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode) or fst.st_size > max_bytes:
+            os.close(fd)
+            return None
+    except OSError:
+        os.close(fd)
+        return None
+    try:
+        with os.fdopen(fd, "rb") as fh:
+            data = fh.read(max_bytes + 1)
+    except OSError:
+        return None
+    if len(data) > max_bytes:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def capture_tests(workdir: Path) -> dict[str, str]:
-    """テスト・テストの設定・Python のファイルの写し（相対パス → 本文）。エージェントを起動する直前に取る。"""
+    """テスト・テストの設定・Python のファイルの写し（相対パス → 本文）。エージェントを起動する直前に取る。
+    リンクはたどらず、FIFO などの特殊ファイルは読まない（ホスト上の秘密ファイル漏洩・ブロックを防ぐ）。"""
     out: dict[str, str] = {}
     root = Path(workdir)
-    for f in root.rglob("*"):
-        rel = f.relative_to(root).as_posix()
-        if not f.is_file() or _SKIP_DIRS & set(rel.split("/")) or not _watched(rel):
-            continue
-        try:
-            if f.stat().st_size <= _MAX_BYTES:
-                out[rel] = f.read_bytes().decode("utf-8")
-        except (OSError, UnicodeDecodeError):
-            pass
+    for dirpath, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not os.path.islink(os.path.join(dirpath, d))]
+        for name in files:
+            f = Path(dirpath) / name
+            rel = f.relative_to(root).as_posix()
+            if not _watched(rel):
+                continue
+            text = _read_regular_text(f, root=root)
+            if text is not None:
+                out[rel] = text
     return out
 
 
@@ -189,13 +235,15 @@ def tamper_check(before: dict[str, str], workdir: Path) -> list[dict[str, str]]:
     found: list[dict[str, str]] = []
     new_contents = {v: k for k, v in after.items() if k not in before}
     for path in sorted(before):
-        if TEST_FILE.search(path) and path not in after and not (Path(workdir) / path).exists():
+        p = Path(workdir) / path
+        if TEST_FILE.search(path) and path not in after and not os.path.lexists(p):
             moved = new_contents.get(before[path])
             found.append({"kind": "test_file_renamed" if moved else "test_file_removed", "path": path,
                           "line": f"-> {moved}" if moved else ""})
-    for path in sorted(before):  # 消えていないのに監視できなくなった（大きすぎる・UTF-8 でない）既存のテストファイル
-        if TEST_FILE.search(path) and path not in after and (Path(workdir) / path).exists():
-            found.append({"kind": "test_file_unwatched", "path": path, "line": "読めない・大きすぎるため内容を確認できない"})
+    for path in sorted(before):  # 消えていないのに監視できなくなった（リンク・特殊ファイル・大きすぎる・UTF-8 でない）既存のテストファイル
+        p = Path(workdir) / path
+        if TEST_FILE.search(path) and path not in after and os.path.lexists(p):
+            found.append({"kind": "test_file_unwatched", "path": path, "line": "リンク・特殊ファイルまたは読めない・大きすぎるため内容を確認できない"})
     for path in sorted(after):
         old = before.get(path, "")
         if old == after[path]:
@@ -651,9 +699,8 @@ def _current_positions(root: Path, path: str, text: str) -> dict[str, int]:
     後ろの行がずれるので、収集時の位置は基準の行ではなく、いまのファイルでの同じ定義の位置と照合する。"""
     old_dumps: dict[str, str] = {}
     _baseline_test_positions(path, text, old_dumps)
-    try:
-        now = (root / path).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    now = _read_regular_text(root / path, root=root)
+    if now is None:
         return {}
     new_dumps: dict[str, str] = {}
     lines = _baseline_test_positions(path, now, new_dumps)
@@ -854,12 +901,15 @@ def _known_callable_wrappers(root: Path, before: dict[str, str]) -> set[tuple[st
     for path, text in before.items():
         if not path.endswith(".py"):
             continue
+        now = _read_regular_text(root / path, root=root)
+        if now is None:
+            continue
         try:
             old = {q for q, _ in _callable_class_defs(ast.parse(text))}
             if not old:
                 continue
-            new = _callable_class_defs(ast.parse((root / path).read_text(encoding="utf-8")))
-        except (SyntaxError, OSError, UnicodeDecodeError):
+            new = _callable_class_defs(ast.parse(now))
+        except SyntaxError:
             continue
         out |= {(str((root / path).resolve()), min([n.lineno, *(d.lineno for d in getattr(n, "decorator_list", []))]))
                 for q, n in new if q in old}
@@ -893,10 +943,13 @@ def _known_wrappers(root: Path, before: dict[str, str]) -> set[tuple[str, int]]:
     for path, text in before.items():
         if not path.endswith(".py"):
             continue
+        now = _read_regular_text(root / path, root=root)
+        if now is None:
+            continue
         try:
             old = {q for q, _ in _nested_defs(ast.parse(text))}
-            new = _nested_defs(ast.parse((root / path).read_text(encoding="utf-8")))
-        except (SyntaxError, OSError, UnicodeDecodeError):
+            new = _nested_defs(ast.parse(now))
+        except SyntaxError:
             continue
         out |= {(str((root / path).resolve()), min([n.lineno, *(d.lineno for d in getattr(n, "decorator_list", []))]))
                 for q, n in new if q in old}
