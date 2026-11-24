@@ -319,7 +319,7 @@ AWS の認証ファイルは、プロファイルが Bedrock（`CLAUDE_CODE_USE_
   制限するだけで、判定 CLI のツールが実の `CODEX_HOME`（認証）を**読む**ことは、ハーネスからは止められません。判定のプロンプトには解く側の出力が入るため、
   出力に埋め込まれた指示で認証の中身が判定に出うる、というのがこの経路の限界です。そのため（1）自分で用意した合成データや自分のエージェントの出力など、
   信頼できる出力だけを判定する、（2）in_place の判定の理由と、失敗時の CLI の出力（エラーメッセージ・標準エラー）は記録・キャッシュ・報告に残さない（`env` で `CODEX_HOME` を上書きして宣言を迂回することも受け付けません）、（3）`summary.json` の
-  `meta.options.judge_input_trusted` に宣言を残します。信頼できない出力を判定するなら、API キー（`inherit_env`）の経路にしてください
+  `meta.options.judge_input_trusted` に宣言を残します。信頼できない出力を判定するなら、API キー（`inherit_env`）の経路を Linux + `bwrap` 環境で使ってください（非 `in_place` の判定は Linux + `bwrap` 利用可能時は `bwrap` で隔離して実ホーム・`--out`・タスクフォルダを隠します。macOS・Windows や `sandbox: off` など `bwrap` なしの環境では、Codex 判定の `-s read-only` にもホスト上の読み取り可能なファイルを読める同様の限界が残ります）
 - **限界**: `~/.codex/AGENTS.md` など `CODEX_HOME` に置いた指示ファイルが判定の入力に入るかは、`--ignore-user-config` の説明（`config.toml` を読まない）からは分かりません。
   この版（0.171.0）では実機で確かめていないので、入りうるものとして扱ってください。確かめるには、外側のシェルで 1 回だけ
   `HOME=$(mktemp -d) codex exec --json --ephemeral -s read-only --skip-git-repo-check --ignore-user-config --ignore-rules --disable hooks -C "$(mktemp -d)" "渡されている指示文の見出しだけを列挙して。なければ none"`

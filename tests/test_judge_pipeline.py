@@ -54,6 +54,8 @@ class JudgePipeline(unittest.TestCase):
         return [str(self.ex / "profiles" / f"{n}.yaml") for n in names]
 
     def go(self, *extra, profiles=("claude-baseline", "claude-ds-lite"), task="csv-summary-insight"):
+        if "--judge-codex-executable" in extra and "--judge-profile" not in extra:
+            extra = (*extra, "--judge-profile", f"codex={self.ex / 'profiles' / 'codex-baseline.yaml'}")
         args = ["run", "--tasks", str(self.ex / "tasks"), "--profiles", *self.profiles(*profiles), "--task", task,
                 "--out", str(self.out), "--cache-dir", str(self.cache), "--baseline", "claude-baseline", *extra]
         code, out = run_cli(*args)

@@ -18,11 +18,12 @@ from . import credentials
 from .adapters import ClaudeAdapter, CodexAdapter, classify_stderr, get_adapter
 from .costs import add_usage, judge_call_estimate, token_cost
 from .graders import JUDGE_PROMPT, JudgeUnavailable, parse_verdict
-from .isolation import build_env, copy_credentials, fill, make_trial_paths, parent_env_names, release_home, route_signature, run_process
+from .isolation import (build_env, bwrap_problem, copy_credentials, fill, make_trial_paths, release_home, route_signature, run_process,
+                        sandbox_cmd, sandbox_mode)
 from .judging import (FAMILIES, TIER_MODELS, blind, combine_rubric, dedupe_calibration, judge_cache_key, judge_identity, majority,
                       make_settings, pick_calibration)
 from .record import TrialRecord
-from .spec import Profile, SpecError
+from .spec import ROUTE_VARS, Profile, SpecError
 
 
 class JudgeBudgetStop(Exception):
@@ -99,10 +100,12 @@ class JudgePhase:
         src = self.judge_profiles.get(family)
         return Profile(id="judge", agent=family, path=src.path if src else self.run_dir / "judge.yaml",
                        env=dict(src.env) if src else {}, env_unset=list(src.env_unset) if src else [],
-                       # 借りるプロファイルがなければ、これまでどおり親の環境で判定する（判定役は評価対象ではなく、入力は標準入力だけ）
-                       inherit_env=list(src.inherit_env) if src else parent_env_names(),
+                       # 借りるプロファイルがなければ、その系統の経路変数（ROUTE_VARS）だけを引き継ぐ（親環境の他の秘密は渡さない）
+                       inherit_env=list(src.inherit_env) if src else list(ROUTE_VARS[family]),
                        copy_credentials=src.copy_credentials if src else False, credentials=src.credentials if src else None,
-                       isolate_home=src.isolate_home if src else True)
+                       isolate_home=src.isolate_home if src else True,
+                       sandbox=src.sandbox if src else "bwrap",
+                       sandbox_ro=list(src.sandbox_ro) if src else [])
 
     def _resolve_judge_adapter(self, family: str) -> ClaudeAdapter | CodexAdapter | None:
         src = self.judge_profiles.get(family)
@@ -134,11 +137,15 @@ class JudgePhase:
         return self._identities[k]
 
     def _judge_over_budget(self, family: str) -> bool:
-        """費用の上限（--max-cost-usd・月の予算）に達しているか。"""
+        """費用の上限（--max-cost-usd・月の予算）に達しているか。月の予算は billing: api の口座だけ。"""
+        billing = self._judge_billing(family) if hasattr(self, "_judge_billing") else "api"
         with self.lock:
-            over = self.opt.max_cost_usd is not None and self.spent >= self.opt.max_cost_usd
-        rem = self.month_remaining(family)
-        return over or (rem is not None and self.spent_api[family] >= rem)
+            if self.opt.max_cost_usd is not None and self.spent >= self.opt.max_cost_usd:
+                return True
+            if billing != "api":
+                return False
+            rem = self.month_remaining(family)
+            return rem is not None and self.spent_api[family] >= rem
 
     def _settle_judge(self, adapter: Any, family: str, model: str | None, out: str) -> tuple[str | None, dict[str, Any], float | None, str | None]:
         """判定 1 回の応答を読み、トークン・費用を使量・予算・台帳に計上する。(応答, トークン, 費用, 失敗理由)。"""
@@ -176,6 +183,8 @@ class JudgePhase:
             elif prof.copy_credentials:
                 copy_credentials(prof.agent, tp)
             cmd = adapter.judge_cmd(model, in_place=True) if in_place else adapter.judge_cmd(model)
+            if not in_place and sandbox_mode(prof) == "bwrap" and bwrap_problem() is None:
+                cmd = sandbox_cmd(cmd, tp, env, prof, n_exe=len(adapter.exe))
             settled = None
             with self._inplace_locks[family] if in_place else contextlib.nullcontext():
                 if in_place and self._judge_over_budget(family):

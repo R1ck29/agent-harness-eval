@@ -476,7 +476,7 @@ class JudgeIdentity(unittest.TestCase):
         python = Path(sys.executable)
         expected_executable = python.parent.resolve() / python.name
         relative_bin = os.path.relpath(python.parent)
-        cfg = write(t.tmp / "judge.yaml", f"id: codex-judge\nagent: codex\nenv: {{PATH: {json.dumps(relative_bin)}}}\n")
+        cfg = write(t.tmp / "judge.yaml", f"id: codex-judge\nagent: codex\nsandbox: off\nenv: {{PATH: {json.dumps(relative_bin)}}}\n")
         with mock.patch("harness_eval.runner.cli_version", wraps=cli_version) as probe, \
                 mock.patch("harness_eval.judge_phase.run_process", wraps=isolation.run_process) as launch:
             code, out, s, _ = t.go(*CLAUDE_J, "--judge-codex-executable", python.name, str(FAKE_DIR / "fake_codex.py"),
