@@ -470,9 +470,24 @@ def _pure_addition(old: str, new: str) -> bool:
 # __wrapped__ をたどった各層の位置・コードの中身（co_code・定数・名前）が、基準のソースをコンパイルしたものと同じかを記録する。
 # 基準のコンパイルは pytest の assert の書き換えあり・なしの両方を作り、どちらかと一致すれば同じとみなす（基準を作れなければ比べない）
 _COLLECT_SCRIPT = """
-import ast, hashlib, json, sys, types
+import ast, hashlib, json, os, site, sys, sysconfig, types
 import pytest
 out, baseline_file, files = sys.argv[1], sys.argv[2], sys.argv[3:]
+def lib_roots():
+    roots = []
+    paths = sysconfig.get_paths()
+    for k in ("stdlib", "platstdlib", "purelib", "platlib"):
+        if paths.get(k):
+            roots.append(paths[k])
+    for fn in (getattr(site, "getsitepackages", None), getattr(site, "getusersitepackages", None)):
+        if fn:
+            try:
+                v = fn()
+                roots.extend(v if isinstance(v, (list, tuple)) else [v])
+            except Exception:
+                pass
+    return sorted({os.path.realpath(p) for p in roots if p and os.path.isdir(p)})
+trusted_roots = lib_roots()
 def feed(h, c):
     for part in (c.co_code, c.co_names, c.co_varnames, c.co_freevars, c.co_cellvars, c.co_argcount, c.co_posonlyargcount,
                  c.co_kwonlyargcount, getattr(c, "co_exceptiontable", b"")):
@@ -507,7 +522,7 @@ def baseline_digests(path, text):
 baseline = {p: baseline_digests(p, t) for p, t in json.load(open(baseline_file)).items()}
 def pos(f):
     c = getattr(f, "__code__", None)
-    return [c.co_filename, c.co_firstlineno] if c else None
+    return [c.co_filename, c.co_firstlineno] if isinstance(c, types.CodeType) else None
 class Collect:
     def __init__(self):
         self.items = []
@@ -533,7 +548,7 @@ class Collect:
 c = Collect()
 rc = pytest.main(["--collect-only", "-q", "-p", "no:cacheprovider", "--rootdir", ".", *files], plugins=[c])
 with open(out, "w") as f:
-    json.dump({"rc": int(rc), "items": c.items}, f)
+    json.dump({"rc": int(rc), "items": c.items, "lib_roots": trusted_roots}, f)
 """
 _COLLECT_TIMEOUT_S = 120
 
@@ -632,6 +647,7 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
         return [], f"pytest の収集が失敗した（rc={data.get('rc')}）"
     got = {it["id"]: it for it in data["items"]}
     known = _known_wrappers(root, before)
+    lib_roots = tuple(Path(p).resolve() for p in data.get("lib_roots", []) if p)
     found: list[dict[str, str]] = []
     for node_id, line in expected.items():
         rel = node_id.split("::")[0]
@@ -644,26 +660,29 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
                           "line": f"rebound at collection: {name} -> {it['file']}:{it['line']} (baseline {rel}:{line})"})
         elif it.get("code_changed"):  # 位置は同じでも、__code__ の差し替え（CodeType.replace）で中身が基準のソースと違う
             found.append({"kind": "test_body_modified", "path": rel, "line": f"code replaced at collection: {name}"})
-        elif (w := next((x for x in it.get("chain", []) if _foreign_wrapper(root, x, known)), None)):
+        elif (bad := [x for x in it.get("chain", []) if _foreign_wrapper(root, x, known, lib_roots)]):
+            w = bad[0]
+            where = f"{w[0]}:{w[1]}" if w and len(w) >= 2 and w[0] else "<no __code__>"
             found.append({"kind": "test_body_modified", "path": rel,
-                          "line": f"wrapper swapped at collection: {name} <- {w[0]}:{w[1]}"})
+                          "line": f"wrapper swapped at collection: {name} <- {where}"})
     return found, None
 
 
-_LIB_DIRS = {"site-packages", "dist-packages", ".venv", "node_modules", "__pycache__"}
-
-
-def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]]) -> bool:
-    """__wrapped__ をたどる途中の層が、作業ツリー内（標準ライブラリ・site-packages・.venv の外）で、基準にあったデコレータの
-    内側の関数でもない（= solver が新しく定義した関数が、テストの代わりに入っている）。"""
-    if not pos or not pos[0]:
-        return False
-    f = Path(pos[0]).resolve()
+def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], lib_roots: tuple[Path, ...] = ()) -> bool:
+    """__wrapped__ をたどる途中の層が、正当なライブラリ（子プロセスの標準ライブラリ・site-packages 配下に実在するファイル）でも
+    基準にあったデコレータの内側の関数（known）でもない（= solver が新しく定義・差し替えたラッパー）。__code__ のない層は拒否。"""
+    if not pos or len(pos) < 2 or not pos[0]:
+        return True
     try:
-        rel = f.relative_to(root.resolve())
-    except ValueError:
-        return False  # 作業ツリーの外（標準ライブラリ・pytest・インストール済みのプラグイン）
-    return not _LIB_DIRS & set(rel.parts) and (str(f), int(pos[1])) not in known
+        p = Path(pos[0])
+        f = (p if p.is_absolute() else root / p).resolve()
+        is_file = f.is_file()
+        lineno = int(pos[1])
+    except (OSError, TypeError, ValueError):
+        return True
+    if is_file and any(f.is_relative_to(r) for r in lib_roots):
+        return False
+    return (str(f), lineno) not in known
 
 
 def _nested_defs(tree: ast.AST) -> list[tuple[str, ast.AST]]:
