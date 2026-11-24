@@ -47,7 +47,7 @@ class JudgePipeline(unittest.TestCase):
 
     def tearDown(self):
         for k in [*self.env, "FAKE_JUDGE_USAGE", "FAKE_JUDGE_VERDICT", "FAKE_CODEX_JUDGE_VERDICT",
-                  "FAKE_JUDGE_ACTUAL_MODEL", "FAKE_CODEX_JUDGE_ACTUAL_MODEL"]:
+                  "FAKE_JUDGE_ACTUAL_MODEL", "FAKE_CODEX_JUDGE_ACTUAL_MODEL", "FAKE_JUDGE_FAIL"]:
             os.environ.pop(k, None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -193,6 +193,73 @@ class JudgePipeline(unittest.TestCase):
         self.assertTrue(all(self.llm(r)["status"] == "skipped_prior_fail" for r in recs))  # 決定的な検査に不合格 → 判定しない
         self.assertEqual(self.prompts(), [])
         self.assertEqual(s["usage"]["judge"]["calls"], 0)
+        trial_lines = [l for l in out.splitlines() if l.startswith("[") and "csv-summary-insight" in l]
+        self.assertTrue(trial_lines and all("FAIL" in l and "WAIT" not in l for l in trial_lines), out)
+        self.assertFalse(any(l.startswith("[judge ") for l in out.splitlines()), out)
+
+    def test_pending_progress_shows_wait_then_final_result(self):
+        """LLM 判定待ちの進行行は FAIL にせず WAIT を出し、判定後に最終結果（PASS/FAIL/SKIP）を出す。
+        判定待ちの間は passed=None で、keep=failed でも判定前に workdir を消さない。"""
+        from harness_eval.runner import RunOptions, Runner
+        from harness_eval.spec import load_profiles, load_tasks
+
+        tasks = load_tasks([str(self.ex / "tasks" / "csv-summary-insight.yaml")])
+        profs = load_profiles(self.profiles("claude-ds-lite"))
+        logs: list[str] = []
+        r = Runner(tasks, profs, RunOptions(
+            use_cache=False, keep="failed", judge_agent="claude_code",
+            judge_executable=[PY, str(FAKE / "fake_claude.py")], log=logs.append,
+        ), self.out)
+
+        snap: dict[str, object] = {}
+        orig_judge_phase = r._judge_phase
+
+        def spy_judge_phase(records):
+            snap["pre_logs"] = list(logs)
+            snap["pre_passed"] = [rec.passed for rec in records]
+            snap["pre_workdir"] = [(Path(rec.trial_dir) / "workdir").is_dir() for rec in records]
+            return orig_judge_phase(records)
+
+        r._judge_phase = spy_judge_phase  # type: ignore[method-assign]
+        run_dir, records, _ = r.run()
+
+        pre_lines = [l for l in snap["pre_logs"] if "csv-summary-insight" in l]
+        self.assertEqual(len(pre_lines), 1, logs)
+        self.assertIn("WAIT", pre_lines[0])
+        self.assertNotIn("FAIL", pre_lines[0])
+        self.assertEqual(snap["pre_passed"], [None])
+        self.assertEqual(snap["pre_workdir"], [True])  # 判定前に workdir を消していない
+
+        post_lines = [l for l in logs[len(snap["pre_logs"]):] if "csv-summary-insight" in l]
+        self.assertEqual(len(post_lines), 1, logs)
+        self.assertTrue(post_lines[0].startswith("[judge 1/1]"), post_lines[0])
+        self.assertIn("PASS", post_lines[0])
+        self.assertNotIn("FAIL", post_lines[0])
+        self.assertTrue(records[0].passed)
+        # 判定後に合格が確定したので keep=failed により workdir が消える
+        self.assertFalse((Path(records[0].trial_dir) / "workdir").exists())
+        saved = [json.loads(l) for l in (run_dir / "trials.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertIs(saved[0]["passed"], True)
+
+        # LLM 判定で不合格になった場合: 途中行は WAIT（FAIL なし）、判定後に FAIL が出て workdir は残る
+        os.environ["FAKE_CODEX_JUDGE_VERDICT"] = "FAIL"
+        code, out, _, recs = self.go("--no-cache", *CLAUDE_J, *CODEX_J)
+        self.assertEqual(code, 0, out)
+        p_lines = [l for l in out.splitlines() if l.startswith("[") and "csv-summary-insight" in l]
+        self.assertEqual(len(p_lines), 4, out)
+        self.assertTrue(all("WAIT" in l and "FAIL" not in l for l in p_lines[:2]), p_lines)
+        self.assertTrue(all(l.startswith("[judge ") and "FAIL" in l for l in p_lines[2:]), p_lines)
+        self.assertTrue(all((Path(rec["trial_dir"]) / "workdir").is_dir() for rec in recs))
+        os.environ.pop("FAKE_CODEX_JUDGE_VERDICT", None)
+
+        # LLM 判定がエラーになった場合: 途中行は WAIT、判定後に SKIP [judge_error] が出る
+        os.environ["FAKE_JUDGE_FAIL"] = "1"
+        code, out, _, recs = self.go("--no-cache", "--judge-agent", "claude_code", *CLAUDE_J)
+        self.assertEqual(code, 0, out)
+        p_lines = [l for l in out.splitlines() if l.startswith("[") and "csv-summary-insight" in l]
+        self.assertEqual(len(p_lines), 4, out)
+        self.assertTrue(all("WAIT" in l and "FAIL" not in l for l in p_lines[:2]), p_lines)
+        self.assertTrue(all(l.startswith("[judge ") and "SKIP" in l and "[judge_error]" in l for l in p_lines[2:]), p_lines)
 
     def test_judge_input_is_minimal_and_blinded(self):
         code, out, s, recs = self.go(*CLAUDE_J, *CODEX_J)

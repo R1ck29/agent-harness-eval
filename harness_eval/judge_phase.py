@@ -311,9 +311,14 @@ class JudgePhase:
                 and r.grader_results[it["grader"]]["status"] == "pending"]
         if not work:
             return
+        judged = list({id(r): r for r, _ in work}.values())
         if self.judge is None or not self.opt.llm:  # --no-llm（キャッシュの試行に判定待ちが残っていた）
             for r, it in work:
                 r.grader_results[it["grader"]].update(status="not_run", reason="--no-llm")
+            for idx, r in enumerate(judged, 1):
+                self._finalize(r, (r.error or {}).get("type"))
+                if hasattr(self, "_log_progress"):
+                    self._log_progress(f"judge {idx}/{len(judged)}", r, show_cache=False, cost_label="judge=$0.0000")
             return
         random.Random(f"judge-order:{self.judge.seed}").shuffle(work)
         failed: dict[int, tuple[str, str]] = {}
@@ -332,12 +337,15 @@ class JudgePhase:
         with ThreadPoolExecutor(max_workers=max(1, self.opt.jobs)) as ex:
             for fut in [ex.submit(one, r, it) for r, it in work]:
                 fut.result()
-        for r in {id(r): r for r, _ in work}.values():
+        for idx, r in enumerate(judged, 1):
             if id(r) in failed:
                 t, m = failed[id(r)]
                 r.error, r.valid, r.passed, r.cmp_passed, r.score, r.cmp_score = {"type": t, "message": m}, False, False, None, None, None
-                continue
-            self._finalize(r, (r.error or {}).get("type"))
+            else:
+                self._finalize(r, (r.error or {}).get("type"))
+            if hasattr(self, "_log_progress"):
+                jcost = f"judge=${r.judge_cost_usd:.4f}" if r.judge_cost_usd is not None else "judge=$?"
+                self._log_progress(f"judge {idx}/{len(judged)}", r, show_cache=False, cost_label=jcost)
         self._calibrate(records)
 
     def _calibrate(self, records: list[TrialRecord]) -> None:

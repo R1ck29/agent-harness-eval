@@ -69,7 +69,7 @@ class TrialRecord:
     tokens: dict[str, int | None] = field(default_factory=dict)
     grader_results: list[dict[str, Any]] = field(default_factory=list)
     score: float | None = None
-    passed: bool = False
+    passed: bool | None = False  # 判定待ち（pending）のあいだは None（未確定）
     # 比較用: 配布物がないと通らない判定（harness_only）を除いたスコアと合否。基準との Δ に使う。
     # 除いた後に判定が 1 つも残らなければ None（Δ に使わない）
     cmp_score: float | None = None

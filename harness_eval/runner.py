@@ -196,6 +196,20 @@ def uses_llm(task: Task) -> bool:
     return any(g.type == "llm" for g in task.graders)
 
 
+def _has_pending(rec: TrialRecord) -> bool:
+    return any(g.get("status") == "pending" for g in rec.grader_results)
+
+
+def _progress_mark(rec: TrialRecord, *, show_cache: bool = True) -> str:
+    if show_cache and rec.from_cache:
+        return "CACHE"
+    if not rec.valid:
+        return "SKIP"
+    if _has_pending(rec) or rec.passed is None:
+        return "WAIT"
+    return "PASS" if rec.passed else "FAIL"
+
+
 def cache_key(task: Task, profile: Profile, version: str | None, trial: int, opt: RunOptions, route: str = "", *,
               routes: str | None = None) -> str:
     """route: 試行に渡る経路の変数の要約（route_signature: 名前と、秘密でないものは値のハッシュ）。経路を変えれば再実行する。"""
@@ -601,8 +615,8 @@ class Runner(JudgePhase):
     def _finalize(self, rec: TrialRecord, etype: str | None) -> None:
         """grader_results から合否を決める。判定待ち（pending）が残っていれば、まだ決めない。"""
         rescore(rec)
-        if any(g["status"] == "pending" for g in rec.grader_results):
-            rec.passed, rec.cmp_passed = False, None
+        if _has_pending(rec):
+            rec.passed, rec.cmp_passed = None, None
             return
         if rec.valid and rec.score is None and rec.error is None:  # 採点できるグレーダーが 1 つもない（例: llm だけのタスクを --no-llm）
             rec.error, rec.valid = {"type": "not_graded", "message": "実行されたグレーダーがありません"}, False
@@ -618,11 +632,19 @@ class Runner(JudgePhase):
         if not rec.trial_dir:
             return
         root = Path(rec.trial_dir)
-        if self.opt.keep == "none" or (self.opt.keep == "failed" and rec.passed):
+        if self.opt.keep == "none" or (self.opt.keep == "failed" and rec.passed is True):
             shutil.rmtree(root / "workdir", ignore_errors=True)
         if self.opt.keep == "none":  # 生ログ（トランスクリプト）も残さない
             for name in ("stdout.jsonl", "stderr.txt"):
                 (root / name).unlink(missing_ok=True)
+
+    def _log_progress(self, prefix: str, rec: TrialRecord, *, show_cache: bool = True, cost_label: str | None = None) -> None:
+        mark = _progress_mark(rec, show_cache=show_cache)
+        if cost_label is None:
+            cost_label = f"${rec.cost_usd:.4f}" if rec.cost_usd is not None else "$?"
+        err = f" [{rec.error['type']}]" if rec.error else ""
+        score = rec.score if rec.score is None else round(rec.score, 2)
+        self.opt.log(f"[{prefix}] {mark:5} {rec.task_id} / {rec.profile_id} #{rec.trial} score={score} {cost_label}{err}")
 
     def _one(self, task: Task, profile: Profile, trial: int, sink) -> TrialRecord:
         key = cache_key(task, profile, self.versions[profile.id], trial, self.opt, routes=self.routes[profile.id])
@@ -719,10 +741,7 @@ class Runner(JudgePhase):
                 records.append(rec)
                 jsonl.write(json.dumps(rec.to_dict(), ensure_ascii=False) + "\n")
                 jsonl.flush()
-                mark = "CACHE" if rec.from_cache else ("PASS" if rec.passed else ("SKIP" if not rec.valid else "FAIL"))
-                cost = f"${rec.cost_usd:.4f}" if rec.cost_usd is not None else "$?"
-                err = f" [{rec.error['type']}]" if rec.error else ""
-                self.opt.log(f"[{len(records)}/{len(self.pairs) * self.opt.trials}] {mark:5} {rec.task_id} / {rec.profile_id} #{rec.trial} score={rec.score if rec.score is None else round(rec.score, 2)} {cost}{err}")
+                self._log_progress(f"{len(records)}/{len(self.pairs) * self.opt.trials}", rec)
 
         jobs = schedule(self.pairs, self.opt.trials, self.opt.seed)
         if self.judge_warning:
