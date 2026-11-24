@@ -801,10 +801,13 @@ def _run():
                 if isinstance(slots, str):
                     slots = (slots,)
                 for s in slots:
-                    if not isinstance(s, str) or s in ("__wrapped__", "__dict__", "__weakref__") or s in seen_slots:
+                    if not isinstance(s, str) or s in ("__wrapped__", "__dict__", "__weakref__"):
                         continue
-                    seen_slots.add(s)
-                    attr = f"_{base.__name__.lstrip('_')}{s}" if s.startswith("__") and not s.endswith("__") else s
+                    name = base.__name__.lstrip("_")
+                    attr = f"_{name}{s}" if s.startswith("__") and not s.endswith("__") and name else s
+                    if attr in seen_slots:
+                        continue
+                    seen_slots.add(attr)
                     try:
                         if getattr(f, attr) is w:
                             return True
@@ -1626,7 +1629,7 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
                     rec_sig = _info_sig(rec_info)
                     if not (_known_fn_code_allowed(rec_info) or (rec_sig is not None and rec_sig in sigs["recreate_sigs"])):
                         return True
-                    if not all(_known_fn_code_allowed(m) for m in meths):
+                    if not all(fn_code_allowed(m) for m in meths):
                         return True
             else:
                 return True

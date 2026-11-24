@@ -625,6 +625,47 @@ class SameClassLoopholeAndLegitimateRegressionTests(R12Base):
         self.assertEqual(self.static_kinds(base), [])
         self.assertEqual(self.dynamic_report(base), ([], None))
 
+    def test_legitimate_cm_subclass_inheriting_stdlib_cm_is_clean(self):
+        """r12 回帰: stdlib CM を多重継承した正当な ContextDecorator を誤検出しない。"""
+        base = (
+            "import contextlib\n\n\n"
+            "class MyCM(contextlib.nullcontext, contextlib.ContextDecorator):\n"
+            "    pass\n\n\n"
+            "@MyCM()\n"
+            "def test_x():\n"
+            "    assert 1 + 1 == 3\n"
+        )
+        self.start(base)
+        self.assertEqual(self.static_kinds(base), [])
+        self.assertEqual(self.dynamic_report(base), ([], None))
+
+    def test_legitimate_inherited_private_slots_wrapper_is_clean(self):
+        """継承先が同名のプライベート __slots__ を持っても、正当なラッパーを誤検出しない。"""
+        base = (
+            "import functools\n\n\n"
+            "class BaseWrap:\n"
+            "    __slots__ = ('__wrapped__', '__fn')\n"
+            "    def __init__(self, fn):\n"
+            "        self.__fn = fn\n"
+            "        self.__wrapped__ = fn\n"
+            "    def __call__(self, *a, **k):\n"
+            "        return self.__fn(*a, **k)\n\n\n"
+            "class SubWrap(BaseWrap):\n"
+            "    __slots__ = ('__fn',)\n\n\n"
+            "def keep(fn):\n"
+            "    @functools.wraps(fn)\n"
+            "    def inner(*a, **k):\n"
+            "        return fn(*a, **k)\n"
+            "    return inner\n\n\n"
+            "@keep\n"
+            "@SubWrap\n"
+            "def test_x():\n"
+            "    assert 1 + 1 == 3\n"
+        )
+        self.start(base)
+        self.assertEqual(self.static_kinds(base), [])
+        self.assertEqual(self.dynamic_report(base), ([], None))
+
 
 if __name__ == "__main__":
     unittest.main()
