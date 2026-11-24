@@ -435,12 +435,13 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <li>プロファイル定義・配布物（copy 元・<code>hash_paths</code>）の中身</li>
 <li>CLI のバージョン・試行番号・harness-eval の版（ツールを更新すると全試行を再実行）</li>
 <li>経路の変数の名前（秘密でないものは値のハッシュも。キー・トークン・ヘッダの値は使わない）</li>
+<li>LLM 判定の有無（<code>--no-llm</code>）</li>
 </ul>
 </td><td>
 <ul>
 <li>タスクの説明・タグ・<code>paired_negative</code>・<code>split</code>・<code>family</code></li>
 <li>プロファイルの説明・<code>billing</code></li>
-<li>判定役の設定（<code>--tier</code>・判定モデル・回数・<code>--no-llm</code>）。LLM 判定は別の判定キャッシュ（<code>&lt;--cache-dir&gt;/judge/</code>。6 章）で再利用する</li>
+<li>判定役の設定（<code>--tier</code>・判定モデル・回数）。LLM 判定は別の判定キャッシュ（<code>&lt;--cache-dir&gt;/judge/</code>。6 章）で再利用する</li>
 </ul>
 </td></tr>
 </table>
@@ -469,7 +470,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <li>LLM 判定の費用は判定エージェントの口座に入ります。<code>billing: subscription</code> のプロファイルは呼び出しごとの請求がないため、月の予算には数えません（<code>--max-cost-usd</code> には数えます）。</li>
 <li>実行前に、解く側（solver）と判定側（judge）を分けて、dev と decisive の両方の見積もりを出します（<code>plan</code> も同じ）。判定側は全出力が決定的な検査に合格した場合の上限で、1 回あたりは判定キャッシュの実測、なければ多めの仮定です。<code>--max-cost-usd</code> は判定の費用を含み、見積もりが上限を超えると何も実行せずに止まります（終了コード 2）。実行中に上限に達したら判定もやめます（<code>budget_stop</code>）。</li>
 <li>判定の費用は、判定のトークンを <code>harness_eval/prices.json</code>（公開 API 価格。出典 URL と取得日つき）で換算します。表にないモデルは CLI が返す費用を使い、それもなければ推測せず「不明」にします。実行後は solver・judge 別のトークン・回数・費用・判定の割合を CLI と summary.json の <code>usage</code> に出します。</li>
-<li>費用が分からない試行（<code>pricing</code> のない Codex、表にないモデルでの判定）は上限の計算に入りません。<code>--jobs</code> が 2 以上だと、実行中の分だけ上限を超えることがあります（実行前に注意を表示）。</li>
+<li>費用が分からない試行（<code>pricing</code> 未設定かつ公開価格表にないモデルの Codex、表にないモデルでの判定）は上限の計算に入りません。<code>--jobs</code> が 2 以上だと、実行中の分だけ上限を超えることがあります（実行前に注意を表示）。</li>
 <li>総額はエージェントと LLM 判定の合計です。どちらかが不明な試行が 1 つでもあれば「不明」と表示します。費用の出どころ（<code>cost_source</code>）は <a href="reference.html#cost">リファレンス「費用の出どころ」</a> にあります。</li>
 </ul>
 

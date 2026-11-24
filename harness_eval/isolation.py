@@ -369,7 +369,7 @@ def _link_chain(path: str) -> list[str]:
     out: list[str] = []
     cur = path
     for _ in range(8):
-        for a in (Path(cur), *Path(cur).parents):
+        for a in reversed((Path(cur), *Path(cur).parents)):
             if a.is_symlink() and str(a) not in out:
                 out.append(str(a))
         if not os.path.islink(cur):
@@ -400,7 +400,8 @@ def grader_sandbox_cmd(cmd: str, workdir: Path, tmp_dir: Path, extra_ro: list[st
         args += ["--dir", d]
     bound = [p for p in ro + [wd, tmp]]
     links = [lk for src in py for lk in _link_chain(src)
-             if not any(lk == b or lk.startswith(b.rstrip("/") + "/") for b in bound) and not lk.startswith(tuple(SANDBOX_SYSTEM))]
+             if not any(lk == b or lk.startswith(b.rstrip("/") + "/") for b in bound)
+             and not any(lk == s or lk.startswith(s + "/") for s in SANDBOX_SYSTEM)]
     for link in dict.fromkeys(links):  # venv の python は別名のフォルダ（uv の cpython-3.12-… など）を経由する。bind した実体への道筋のリンクを張る
         args += ["--symlink", os.path.realpath(link), link]
     args += ["--chdir", wd]
@@ -491,7 +492,7 @@ def fresh_dir(path: Path) -> Path:
     return path
 
 
-_HAS_WAITID = hasattr(os, "waitid")  # Unix（macOS を除く）。ない OS は従来の poll() で判定する
+_HAS_WAITID = hasattr(os, "waitid") and hasattr(os, "WNOWAIT")  # Unix（macOS を除く）。ない OS は従来の poll() で判定する
 
 
 def _exited_unreaped(p: subprocess.Popen) -> bool:

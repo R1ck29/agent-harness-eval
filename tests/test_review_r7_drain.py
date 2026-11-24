@@ -5,10 +5,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from harness_eval import isolation  # noqa: E402
 from harness_eval.adapters import ClaudeAdapter, CodexAdapter  # noqa: E402
 from harness_eval.isolation import run_process  # noqa: E402
 from harness_eval.runner import _solver_accounting_lines  # noqa: E402
@@ -110,9 +112,11 @@ class DrainUsageTests(unittest.TestCase):
         self.assertEqual(self.accounting(ClaudeAdapter(), out)[0], 2.5)
 
     def test_a_huge_line_is_dropped_but_later_usage_is_kept(self):
-        body = ("import sys\nsys.stdout.write('x' * 600000 + '\\n')\n"  # 1 行の上限を超える長い行（上限は一時的に小さくできないので別途）
+        body = ("import sys\nsys.stdout.write('x' * 100000 + '\\n')\n"
                 f"print({json.dumps(RESULT)!r})\n")
-        res, out = self.run_script(1024, body)
+        with mock.patch.object(isolation, "_USAGE_LINE_MAX", 64 * 1024):
+            res, out = self.run_script(1024, body)
+        self.assertTrue(res.log_truncated)
         self.assertEqual(self.accounting(ClaudeAdapter(), out)[0], 1.25)
 
     def test_usage_is_kept_when_a_detached_descendant_holds_the_pipe(self):

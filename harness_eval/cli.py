@@ -202,14 +202,25 @@ def _print_verdicts(summary: dict) -> None:
             print(f"    [{c['status']}] {c['id']}: {c['message']}")
 
 
+def _load_prereg(pf: Path) -> dict | None:
+    if not pf.is_file():
+        return None
+    try:
+        data = json.loads(pf.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise SpecError(f"{pf}: 事前登録（prereg.json）を読めません: {e}") from e
+    if not isinstance(data, dict):
+        raise SpecError(f"{pf}: 事前登録（prereg.json）の形式が不正です")
+    return data
+
+
 def cmd_verdict(a) -> int:
     """既存の結果を、モデルを呼ばずに事前登録の規則（なければ既定の規則）で判定し直す。終了コードで結論を返す
     （0 IMPROVED / 1 REGRESSED / 3 INCONCLUSIVE / 4 NO CHANGE / 5 IMPROVED だが暫定で採用不可 / 2 定義エラー）。"""
     from .soundness import verdict
     run_dir = Path(a.run)
     recs, summary = load_run(run_dir)
-    pf = run_dir / "prereg.json"
-    prereg = json.loads(pf.read_text(encoding="utf-8")) if pf.is_file() else None
+    prereg = _load_prereg(run_dir / "prereg.json")
     start = dict((prereg or {}).get("rules") or {})
     base = a.baseline or start.get("baseline") or default_baseline(summary) or summary.get("meta", {}).get("options", {}).get("baseline")
     if not base:
@@ -251,9 +262,9 @@ def _budget_warnings(a, profiles) -> list[str]:
     if a.max_cost_usd is None and a.monthly_budget_usd is None:
         return []
     w = []
-    unpriced = [p.id for p in profiles if p.agent == "codex" and not p.pricing]
+    unpriced = [p.id for p in profiles if p.agent == "codex" and not p.pricing and resolve(p.model, "codex")[1] is None]
     if unpriced:
-        w.append(f"{unpriced} は費用が分からない（pricing 未設定）ため、費用の上限の計算に入りません")
+        w.append(f"{unpriced} は費用が分からない（pricing 未設定・公開価格表にないモデル）ため、費用の上限の計算に入りません")
     unpriced_judge = sorted(f"{f}={m}" for f, m in _judge_models(a).items() if resolve(m, f)[1] is None) if not a.no_llm else []
     if unpriced_judge:
         w.append(f"判定モデル {unpriced_judge} は公開価格表（prices.json）にないため、CLI が費用を返さなければ費用の上限の計算に入りません")
@@ -298,8 +309,7 @@ def cmd_report(a) -> int:
     recs, summary = load_run(Path(a.run))
     if "verdicts" not in summary:  # 旧版の結果: 既定の規則で結論を付ける（モデルは呼ばない。summary.json は書き換えない）
         base = a.baseline or default_baseline(summary) or summary.get("meta", {}).get("options", {}).get("baseline")
-        pf = Path(a.run) / "prereg.json"
-        prereg = json.loads(pf.read_text(encoding="utf-8")) if pf.is_file() else None
+        prereg = _load_prereg(Path(a.run) / "prereg.json")
         summary["verdicts"] = run_verdicts(recs, summary, Rules(baseline=base), prereg) if base else []
     _print_verdicts(summary)
     out = Path(a.run) / "report.html"
@@ -528,10 +538,12 @@ def cmd_doctor(a) -> int:
         else:
             print("  隔離: " + ("なし（sandbox: off。結果に記録され、verdict が警告します）" if mode == "off"
                               else "なし（bwrap は Linux だけ。試行の外を見た形跡の検査だけ行います）"))
-        if p.copy_credentials:
+        if p.copy_credentials or p.credentials == "in_place":
+            in_place = p.credentials == "in_place"
             src = source_path(p.agent)
-            print(f"  認証の複製: {describe_credentials(inspect_credentials(p.agent, src)) if src else '対象外'}")
-            msg = credentials_preflight(p.agent, src) if src else None
+            label = "認証（in_place）" if in_place else "認証の複製"
+            print(f"  {label}: {describe_credentials(inspect_credentials(p.agent, src)) if src else '対象外'}")
+            msg = credentials_preflight(p.agent, src, in_place=in_place) if src else None
             if msg:
                 static_ok = False
                 print(f"  NG: {msg}")

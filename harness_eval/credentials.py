@@ -183,7 +183,10 @@ def lend(agent: str, dst_dir: Path) -> Lent | None:
     dst = dst_dir / src.name
     with _FileLock(src):
         data = src.read_bytes()
-        dst.write_bytes(data)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        fd = os.open(dst, flags, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
         try:
             os.chmod(dst, 0o600)
         except OSError:

@@ -470,6 +470,7 @@ class Runner(JudgePhase):
             return rec
         pr = run_process(cmd, tp.workdir, env, task.prompt, tp.stdout, tp.stderr, task.timeout_s)
         rec.wall_ms = pr.wall_ms
+        rec.meta["sandbox"] = sandbox_mode(profile)
         if pr.log_truncated or any(log.is_file() and log.stat().st_size > _SOLVER_LOG_LIMIT for log in (tp.stdout, tp.stderr)):
             parsed = adapter.parse(_solver_accounting_lines(tp.stdout), profile, usage_only=True)
             rec.tokens, rec.cost_usd, rec.cost_source = parsed.tokens, parsed.cost_usd, parsed.cost_source
@@ -651,7 +652,7 @@ class Runner(JudgePhase):
                 raise SpecError(msg)
         for f, p in self.judge_profiles.items():  # 設定ディレクトリを env で上書きして in_place の宣言（--trust-judge-input）を迂回させない
             var = "CODEX_HOME" if f == "codex" else "CLAUDE_CONFIG_DIR"
-            if p and p.credentials != "in_place" and var in p.env:
+            if p and p.credentials != "in_place" and any(k.upper() == var for k in p.env):
                 raise SpecError(f"判定役のプロファイル {p.id} が env で {var} を指定しています。実の認証ディレクトリを使う場合は "
                                 "credentials: in_place（と --trust-judge-input）を使ってください（env での上書きは受け付けません）")
         in_place = sorted({p.agent for p in self.judge_profiles.values() if p and p.credentials == "in_place"})

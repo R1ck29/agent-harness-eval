@@ -327,6 +327,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <h2 id="cost">8. 費用の出どころ</h2>
 <table>
 <tr><th><code>cost_source</code></th><th>意味</th></tr>
+<tr><td><code>price_table</code></td><td><code>harness_eval/prices.json</code> の公開 API 価格とトークン数から換算した額（<code>pricing</code> 未設定の Codex でも掲載モデルなら換算）</td></tr>
 <tr><td><code>client_estimate</code></td><td>Claude Code が API 単価で計算した推定額（<code>total_cost_usd</code>）。請求額とは異なりうる。サブスクリプションでは呼び出しごとの請求はない</td></tr>
 <tr><td><code>token_estimate</code></td><td>Codex のトークン数とプロファイルの <code>pricing</code> から計算した概算。式は <code>(input − cached) × input単価 + cached × cached単価 + output × output単価</code>（100 万トークンあたり。OpenAI API の usage 定義で cached は input の内数）。実際の請求と照合してから使う</td></tr>
 <tr><td>null（不明）</td><td>取得できない（<code>pricing</code> のない Codex など）。0 で埋めず、総額・合格あたり費用は「不明」</td></tr>
