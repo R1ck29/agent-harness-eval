@@ -52,7 +52,7 @@ class StartBudget(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def args(self, cmd: str, task: str, *extra: str):
-        return [cmd, "--tasks", str(self.ex / "tasks" / f"{task}.yaml"),
+        return [cmd, "--tasks", str(self.ex / "tasks" / f"{task}.yaml"), "--include-sample-harness",
                 "--profiles", str(self.ex / "profiles" / "claude-baseline.yaml"), str(self.ex / "profiles" / "claude-ds-lite.yaml"),
                 "--out", str(self.tmp / "out"), "--cache-dir", str(self.tmp / "cache"), "--baseline", "claude-baseline", "--no-llm", *extra]
 

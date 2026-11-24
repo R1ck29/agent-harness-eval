@@ -15,13 +15,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from harness_eval.adapters import ClaudeAdapter, CodexAdapter  # noqa: E402
-from harness_eval.graders import JudgeConfig, grade_all  # noqa: E402
+from harness_eval.graders import JudgeConfig, grade_all, is_clarification_question  # noqa: E402
 from harness_eval.isolation import (build_env, make_trial_paths, run_install, run_process)  # noqa: E402
 from harness_eval.metrics import decide, deltas, gate, paired_bootstrap, pass_hat_k, summarize  # noqa: E402
-from harness_eval.runner import append_spend, month_spent, schedule  # noqa: E402
+from harness_eval.runner import RunOptions, Runner, append_spend, month_spent, schedule, select_pairs  # noqa: E402
 from harness_eval.adapters import older_than_verified  # noqa: E402
-from harness_eval.isolation import (INHERITED_UNSET, ancestor_instructions, missing_inherited,  # noqa: E402
-                                    dropped_vars, route_signature, route_variables)
+from harness_eval.isolation import (INHERITED_UNSET, ancestor_instructions, missing_gateway_models,  # noqa: E402
+                                    missing_inherited, dropped_vars, route_signature, route_variables)
 from harness_eval.record import TrialRecord  # noqa: E402
 from harness_eval.spec import (ROUTE_VARS, Grader, SpecError, lint, load_profile, load_profiles, load_task,  # noqa: E402
                                load_tasks)
@@ -465,6 +465,49 @@ class GraderTests(unittest.TestCase):
         self.assertEqual(self.run_g([self.g("llm", criteria="c")], r4, unk), ["unknown"])
         self.assertEqual(r4.score, 0.0)
 
+    def test_clarification_grader_japanese_and_punctuation(self):
+        """確認の質問: ? / ？ だけでなく、句点止めの確認質問や確認のための「ください / いただけますか」も通す。誤検出は低く保つ。"""
+        ref = (ROOT / "examples" / "references" / "request-ambiguous.final_answer.txt").read_text(encoding="utf-8")
+        positives = [
+            ref,
+            "対象期間は2026年3月でしょうか？",
+            "Which store should I extract?",
+            "どちらで進めますか。",
+            "対象期間はいつでしょうか。",
+            "確認させていただけますでしょうか。",
+            "対象期間をご指定ください。",
+            "詳細を教えていただけますか。",
+            "対象の店舗をお知らせください。",
+            "条件を確認させてください。",
+            "対象店舗はどちらですか。",
+            "詳細を教えてください。",
+        ]
+        for msg in positives:
+            with self.subTest(positive=msg):
+                self.assertTrue(is_clarification_question(msg), msg)
+                r = rec(final_message=msg)
+                self.assertEqual(self.run_g([self.g("clarification")], r), ["pass"], msg)
+        negatives = [
+            "",
+            "   ",
+            "わかりました。",
+            "作業を進めます。",
+            "抽出しました。",
+            "391",
+            "保存してください。",
+            "抽出してください。",
+            "先月の売上データを抽出してください。",
+            "作業を進めますから、お待ちください。",
+            "必要ですから抽出しました。",
+            "ご指定のファイルに保存してください。",
+            "この処理は終わるでしょうから、次に進みます。",
+        ]
+        for msg in negatives:
+            with self.subTest(negative=msg):
+                self.assertFalse(is_clarification_question(msg), msg)
+                r = rec(final_message=msg)
+                self.assertEqual(self.run_g([self.g("clarification")], r), ["fail"], msg)
+
 
 class BudgetTests(unittest.TestCase):
     def test_month_spent_per_agent_and_billing(self):
@@ -490,6 +533,61 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(load_profile(write(tmp / "b.yaml", "id: b\nagent: claude_code\nbilling: subscription\n")).billing, "subscription")
         with self.assertRaisesRegex(SpecError, "billing"):
             load_profile(write(tmp / "c.yaml", "id: c\nagent: claude_code\nbilling: free\n"))
+
+    def test_budget_exceeded_cost_not_zero_and_zero_success_kept(self):
+        """error_max_budget_usd で total_cost_usd が 0 や欠落のときはトークン換算または上限額で見積もり、0 費用の成功試行は埋めない。"""
+        from harness_eval.costs import usage_summary
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        prof = load_profile(write(tmp / "p.yaml", "id: p\nagent: claude_code\nmodel: sonnet\n"))
+        adapter = ClaudeAdapter(executable=["x"])
+
+        # 1. error_max_budget_usd + total_cost_usd: 0 + usage あり → 公開価格で見積もる（0 にならない）
+        line_usage = json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": False, "num_turns": 1,
+                                 "total_cost_usd": 0, "usage": {"input_tokens": 50000, "output_tokens": 1000,
+                                                                "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}})
+        p1 = adapter.parse([line_usage])
+        self.assertEqual((p1.error_type, p1.cost_usd, p1.cost_source), ("budget_exceeded", None, None))
+        r1 = rec(profile_id="p", error={"type": p1.error_type, "message": p1.error_message},
+                 tokens=p1.tokens, cost_usd=p1.cost_usd, cost_source=p1.cost_source)
+        r1.cost_usd, r1.cost_source = Runner._settle_cost(r1, prof, max_budget_usd=0.5)
+        self.assertGreater(r1.cost_usd, 0.0)
+        self.assertEqual(r1.cost_source, "price_table")
+
+        # 2. error_max_budget_usd + total_cost_usd: 0 + usage なし → タスクの max_budget_usd を見積もりとして使う
+        line_nousage = json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": False, "num_turns": 1,
+                                   "total_cost_usd": 0})
+        p2 = adapter.parse([line_nousage])
+        r2 = rec(profile_id="p", error={"type": p2.error_type, "message": p2.error_message},
+                 tokens=p2.tokens, cost_usd=p2.cost_usd, cost_source=p2.cost_source)
+        r2.cost_usd, r2.cost_source = Runner._settle_cost(r2, prof, max_budget_usd=0.5)
+        self.assertEqual((r2.cost_usd, r2.cost_source), (0.5, "budget_cap_estimate"))
+        u2 = usage_summary([r2], None, {"p": "sonnet"}, "dev")
+        self.assertAlmostEqual(u2["solver"]["cost_usd"], 0.5)
+        self.assertEqual(u2["solver"]["cost_sources"], {"budget_cap_estimate": 1})
+
+        # 3. error_max_budget_usd + total_cost_usd 欠落 + 全 0 usage → max_budget_usd にフォールバック
+        line_zero_u = json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": False, "num_turns": 1,
+                                  "usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
+                                            "cache_creation_input_tokens": 0}})
+        p3 = adapter.parse([line_zero_u])
+        r3 = rec(profile_id="p", error={"type": p3.error_type, "message": p3.error_message},
+                 tokens=p3.tokens, cost_usd=p3.cost_usd, cost_source=p3.cost_source)
+        r3.cost_usd, r3.cost_source = Runner._settle_cost(r3, prof, max_budget_usd=0.5)
+        self.assertEqual((r3.cost_usd, r3.cost_source), (0.5, "budget_cap_estimate"))
+        self.assertAlmostEqual(usage_summary([r3], None, {"p": "sonnet"}, "dev")["solver"]["cost_usd"], 0.5)
+
+        # 4. 本当に費用 0 の成功試行は、誤って予算額で埋めない
+        line_ok0 = json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+                               "result": "391", "total_cost_usd": 0})
+        p4 = adapter.parse([line_ok0])
+        r4 = rec(profile_id="p", tokens=p4.tokens, cost_usd=p4.cost_usd, cost_source=p4.cost_source)
+        r4.cost_usd, r4.cost_source = Runner._settle_cost(r4, prof, max_budget_usd=0.5)
+        self.assertEqual((r4.cost_usd, r4.cost_source), (0.0, "client_estimate"))
+
+        # 同梱タスクの予算見直し（arithmetic-no-skill / request-ambiguous とも 0.50）
+        for tid in ("arithmetic-no-skill", "request-ambiguous"):
+            self.assertEqual(load_task(ROOT / "examples" / "tasks" / f"{tid}.yaml").max_budget_usd, 0.5, tid)
 
 
 class DoctorTests(unittest.TestCase):
@@ -559,6 +657,29 @@ class DoctorTests(unittest.TestCase):
         self.assertIsNone(older_than_verified("codex", "unknown"))
         self.assertIsNone(older_than_verified("codex", None))
 
+    def test_missing_gateway_models(self):
+        """ANTHROPIC_BASE_URL があるのに ANTHROPIC_DEFAULT_*_MODEL が env にも inherit_env にも無ければ不足分を返す。"""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        plain = load_profile(write(tmp / "a.yaml", "id: a\nagent: claude_code\n"))
+        self.assertEqual(missing_gateway_models(plain, {}), [])
+        want_all = ["ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"]
+        # 親の環境に ANTHROPIC_BASE_URL がある
+        self.assertEqual(missing_gateway_models(plain, {"ANTHROPIC_BASE_URL": "https://gw.example"}), want_all)
+        # プロファイルの inherit_env / env で宣言されている
+        decl = load_profile(write(tmp / "b.yaml", "id: b\nagent: claude_code\ninherit_env: [ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_SONNET_MODEL]\n"
+                                                  "env: {ANTHROPIC_DEFAULT_HAIKU_MODEL: haiku-id}\n"))
+        self.assertEqual(missing_gateway_models(decl, {}), ["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+        # 3 つすべて揃っていれば空
+        full = load_profile(write(tmp / "c.yaml", "id: c\nagent: claude_code\ninherit_env: [ANTHROPIC_BASE_URL, "
+                                                  "ANTHROPIC_DEFAULT_OPUS_MODEL, ANTHROPIC_DEFAULT_SONNET_MODEL, ANTHROPIC_DEFAULT_HAIKU_MODEL]\n"))
+        self.assertEqual(missing_gateway_models(full, {"ANTHROPIC_BASE_URL": "https://gw.example"}), [])
+        # env_unset で ANTHROPIC_BASE_URL を消している・Codex プロファイルは対象外
+        unset = load_profile(write(tmp / "d.yaml", "id: d\nagent: claude_code\nenv_unset: [ANTHROPIC_BASE_URL]\n"))
+        self.assertEqual(missing_gateway_models(unset, {"ANTHROPIC_BASE_URL": "https://gw.example"}), [])
+        codex = load_profile(write(tmp / "e.yaml", "id: e\nagent: codex\n"))
+        self.assertEqual(missing_gateway_models(codex, {"ANTHROPIC_BASE_URL": "https://gw.example"}), [])
+
 
 class AncestorTests(unittest.TestCase):
     def test_ancestor_instructions(self):
@@ -603,6 +724,28 @@ class ScheduleTests(unittest.TestCase):
         t = load_task(write(tmp / "t.yaml", "id: t\nprompt: x\ntargets: [codex]\ngraders: [{type: regex, pattern: x}]\n"))
         p = load_profile(write(tmp / "p.yaml", "id: c\nagent: codex\n"))
         self.assertEqual([(a.id, b.id, i) for a, b, i in schedule([(t, p)], 3, 1)], [("t", "c", 0), ("t", "c", 1), ("t", "c", 2)])
+
+    def test_select_pairs_excludes_sample_harness_by_default(self):
+        """sample-harness タグのタスクは既定で除外され、明示指定（--task / --tag sample-harness / --include-sample-harness）で含まれる。"""
+        tasks = load_tasks([str(ROOT / "examples" / "tasks")])
+        profs = [load_profile(ROOT / "examples" / "profiles" / "claude-baseline.yaml")]
+        pick = lambda **kw: sorted(t.id for t, _ in select_pairs(tasks, profs, RunOptions(**kw)))
+        # 既定フル: 4 タスク
+        self.assertEqual(pick(), ["arithmetic-no-skill", "csv-summary-insight", "request-ambiguous", "request-extract"])
+        # 既定スモーク: 3 タスク
+        self.assertEqual(pick(tags=["smoke"]), ["arithmetic-no-skill", "request-ambiguous", "request-extract"])
+        # --include-sample-harness: 全 6 タスク
+        self.assertEqual(pick(include_sample_harness=True),
+                         ["arithmetic-no-skill", "csv-summary-format", "csv-summary-insight", "csv-summary-skill",
+                          "request-ambiguous", "request-extract"])
+        # --tag sample-harness: 2 タスク
+        self.assertEqual(pick(tags=["sample-harness"]), ["csv-summary-format", "csv-summary-skill"])
+        # --tag smoke --tag instructions --include-sample-harness: 従来のスモーク 4 タスク
+        self.assertEqual(pick(tags=["smoke", "instructions"], include_sample_harness=True),
+                         ["arithmetic-no-skill", "csv-summary-format", "request-ambiguous", "request-extract"])
+        # 明示の --task は既定除外を上書きする
+        self.assertEqual(pick(task_ids=["csv-summary-format"]), ["csv-summary-format"])
+        self.assertEqual(pick(task_ids=["csv-summary-skill"]), ["csv-summary-skill"])
 
 
 class IsolationTests(unittest.TestCase):
@@ -795,6 +938,8 @@ class HarvestTests(unittest.TestCase):
         self.assertFalse(allowed_grader({"type": "file_exists", "path": "other.csv"}, d))   # 依頼に出てこないファイル
         self.assertFalse(allowed_grader({"type": "regex", "pattern": "つばめ旅行"}, d))      # 求めていない最終応答の内容
         self.assertTrue(allowed_grader({"type": "regex", "pattern": "[?？]"}, {**d, "needs_clarification": True}))
+        self.assertFalse(allowed_grader({"type": "clarification"}, d))
+        self.assertTrue(allowed_grader({"type": "clarification"}, {**d, "needs_clarification": True}))
         self.assertTrue(allowed_grader({"type": "tool_used", "tool": "Write", "max": 0}, d))
 
     def test_check_and_selftest(self):

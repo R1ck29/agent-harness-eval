@@ -46,7 +46,8 @@ class JudgePipeline(unittest.TestCase):
         os.environ.update(self.env)
 
     def tearDown(self):
-        for k in [*self.env, "FAKE_JUDGE_USAGE", "FAKE_JUDGE_VERDICT", "FAKE_CODEX_JUDGE_VERDICT"]:
+        for k in [*self.env, "FAKE_JUDGE_USAGE", "FAKE_JUDGE_VERDICT", "FAKE_CODEX_JUDGE_VERDICT",
+                  "FAKE_JUDGE_ACTUAL_MODEL", "FAKE_CODEX_JUDGE_ACTUAL_MODEL"]:
             os.environ.pop(k, None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -116,6 +117,72 @@ class JudgePipeline(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(s["meta"]["judge"]["weak"], ["claude_code: haiku"])
         self.assertIn("弱い判定役", out)
+
+    def test_full_judge_model_id_and_actual_model_recorded(self):
+        """完全なモデル ID（プロバイダ付きを含む）を --judge-model や --judge-profile の model: で渡せ、実 ID が結果とレポートに残る。"""
+        from harness_eval.adapters import ClaudeAdapter
+        from harness_eval.judging import infer_family
+        self.assertEqual(infer_family("openai/gpt-6.2-sol"), "codex")
+        self.assertEqual(infer_family("anthropic/claude-sonnet-5-5"), "claude_code")
+        # ClaudeAdapter.judge_model は result.model / modelUsage / init から実 ID を拾う
+        self.assertEqual(ClaudeAdapter.judge_model(json.dumps({"type": "result", "modelUsage": {"claude-sonnet-5-5-20261101": {}}})),
+                         "claude-sonnet-5-5-20261101")
+        self.assertEqual(ClaudeAdapter.judge_model(json.dumps({"type": "system", "subtype": "init", "model": "claude-opus-5-5"}) + "\n"
+                                                   + json.dumps({"type": "result", "subtype": "success", "result": "PASS"})),
+                         "claude-opus-5-5")
+
+        # 1. --judge-model にプロバイダ付き完全 ID をそのまま渡せる + 判定 CLI の実 ID が残る
+        full_id = "anthropic/claude-sonnet-5-5-20261101"
+        actual_id = "claude-sonnet-5-5-20261101"
+        os.environ["FAKE_JUDGE_ACTUAL_MODEL"] = actual_id
+        code, out, s, recs = self.go("--judge-agent", "claude_code", "--judge-model", full_id, *CLAUDE_J)
+        self.assertEqual(code, 0, out)
+        calls = self.prompts()
+        self.assertTrue(calls and all(c["model"] == full_id for c in calls))
+        self.assertEqual(s["meta"]["judge"]["models"], {"claude_code": full_id})
+        self.assertEqual(s["meta"]["judge"]["actual_models"], {"claude_code": actual_id})
+        self.assertEqual(s["verdicts"][0]["judge"]["actual_models"], {"claude_code": actual_id})
+        ds = next(r for r in recs if r["profile_id"] == "claude-ds-lite")
+        self.assertEqual(ds["judge_votes"][0]["families"]["claude_code"]["model"], full_id)
+        self.assertEqual(ds["judge_votes"][0]["families"]["claude_code"]["actual_model"], actual_id)
+        run_dir = sorted(d for d in self.out.iterdir() if d.is_dir())[-1]
+        html = (run_dir / "report.html").read_text(encoding="utf-8")
+        self.assertIn(full_id, html)
+        self.assertIn(actual_id, html)
+        # キャッシュ再利用でも実 ID が残る
+        code, out, s_cached, _ = self.go("--judge-agent", "claude_code", "--judge-model", full_id, *CLAUDE_J)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(s_cached["meta"]["judge"]["actual_models"], {"claude_code": actual_id})
+
+        # 2. 未知の完全 ID は安全側で止まる（--allow-weak-judge で許可）
+        os.environ.pop("FAKE_JUDGE_ACTUAL_MODEL", None)
+        code, out, _, _ = self.go("--judge-agent", "claude_code", "--judge-model", "provider/unknown-model-v1", "--no-cache", *CLAUDE_J)
+        self.assertEqual(code, 2, out)
+        self.assertIn("--allow-weak-judge", out)
+
+        # 3. 判定プロファイル YAML の model: を借りて使い、--judge-model があればそちらを優先する
+        jp = self.tmp / "claude-judge.yaml"
+        jp.write_text(f"id: cj\nagent: claude_code\nmodel: claude-sonnet-5-5\n"
+                      f"executable: [{json.dumps(PY)}, {json.dumps(str(FAKE / 'fake_claude.py'))}]\n" + SUFFIX, encoding="utf-8")
+        self.prompt_log.unlink(missing_ok=True)
+        code, out, s, _ = self.go("--judge-agent", "claude_code", "--judge-profile", f"claude_code={jp}", "--no-cache")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(s["meta"]["judge"]["models"], {"claude_code": "claude-sonnet-5-5"})
+        self.assertTrue(all(c["model"] == "claude-sonnet-5-5" for c in self.prompts()))
+        self.assertNotIn("actual_models", s["meta"]["judge"])  # 実 ID が取れないときは models のみ
+        self.prompt_log.unlink(missing_ok=True)
+        code, out, s, _ = self.go("--judge-agent", "claude_code", "--judge-profile", f"claude_code={jp}",
+                                  "--judge-model", "claude-opus-5-5", "--no-cache")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(s["meta"]["judge"]["models"], {"claude_code": "claude-opus-5-5"})
+        self.assertTrue(all(c["model"] == "claude-opus-5-5" for c in self.prompts()))
+
+        # 4. Codex 判定でも実 ID が取れれば actual_models に残る
+        os.environ["FAKE_CODEX_JUDGE_ACTUAL_MODEL"] = "gpt-6.2-sol-20261101"
+        code, out, s, recs = self.go("--no-cache", *CLAUDE_J, *CODEX_J)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(s["meta"]["judge"]["models"], {"codex": "gpt-6.2-sol"})
+        self.assertEqual(s["meta"]["judge"]["actual_models"], {"codex": "gpt-6.2-sol-20261101"})
 
     # ---------------------------------------------------------------- 決定的な検査が先・最小の入力・盲検
     def test_failed_output_is_not_judged(self):

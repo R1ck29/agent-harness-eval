@@ -13,7 +13,8 @@ import yaml
 
 from . import __version__
 from .credentials import describe as describe_credentials, inspect as inspect_credentials, preflight as credentials_preflight, source_path
-from .isolation import ancestor_instructions, bwrap_problem, dropped_vars, missing_inherited, route_variables, sandbox_mode
+from .isolation import (ancestor_instructions, bwrap_problem, dropped_vars, missing_gateway_models, missing_inherited,
+                        route_variables, sandbox_mode)
 from .metrics import EFFICIENCY_METRICS, HARD_CATEGORIES, gate, holdout_comparisons, promote, promote_efficiency
 from .report import render
 from .costs import DEFAULT_SOLVER_CALL_USD, resolve
@@ -37,7 +38,8 @@ def _judge_models(a: argparse.Namespace) -> dict[str, str]:
 
 def _opts(a: argparse.Namespace) -> RunOptions:
     return RunOptions(
-        trials=a.trials, k=a.k, tags=a.tag or [], task_ids=a.task or [], splits=a.split or [], jobs=a.jobs, llm=not a.no_llm,
+        trials=a.trials, k=a.k, tags=a.tag or [], include_sample_harness=a.include_sample_harness,
+        task_ids=a.task or [], splits=a.split or [], jobs=a.jobs, llm=not a.no_llm,
         tier=a.tier, judge_agent=a.judge_agent, judge_models=_judge_models(a), judge_votes=a.judge_votes,
         allow_weak_judge=a.allow_weak_judge, judge_families=a.judge_family, calibration_items=a.calibration_items,
         judge_executable=a.judge_executable,
@@ -191,7 +193,8 @@ def _print_verdicts(summary: dict) -> None:
         j = v["judge"]
         if j.get("llm"):
             cal = j.get("calibration_rate")
-            print(f"  判定役: 段階 {j.get('tier')}・モデル {j.get('models')}・盲検 {'あり' if j.get('blind') else 'なし'}・"
+            actual = f"（実ID {j['actual_models']}）" if j.get("actual_models") else ""
+            print(f"  判定役: 段階 {j.get('tier')}・モデル {j.get('models')}{actual}・盲検 {'あり' if j.get('blind') else 'なし'}・"
                   f"{j.get('votes')} 回・校正一致率 {'—' if cal is None else f'{cal:.0%}'}（{j.get('calibration_items') or 0} 件）"
                   + ("・弱い判定役" if j.get("weak_allowed") and any(s != "strong" for s in (j.get("strength") or {}).values()) else ""))
         else:
@@ -530,6 +533,10 @@ def cmd_doctor(a) -> int:
         dropped = dropped_vars(p, dict(os.environ))
         if dropped:
             print(f"  注意: 親の環境にある {dropped} は試行に渡しません。組織で意図して設定したもの（クライアント証明書など）なら inherit_env に書いてください")
+        gw_missing = missing_gateway_models(p, dict(os.environ))
+        if gw_missing:
+            print(f"  注意: ANTHROPIC_BASE_URL が使われていますが {gw_missing} が env にも inherit_env にもありません。"
+                  "ハーネス内のモデル別名（opus 等）が解決できず、ハーネス側だけが不利になり得ます（親の環境にあるなら inherit_env に名前だけ並べてください）")
         mode = sandbox_mode(p)
         if mode == "bwrap":
             problem = bwrap_problem()
@@ -718,6 +725,8 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--trials", type=int, default=1, help="1 組あたりの試行回数（スモーク 1、フル 3 を推奨）")
         sp.add_argument("--k", type=int, help="pass^k の k（既定: --trials と同じ）")
         sp.add_argument("--tag", action="append", help="このタグを持つタスクだけ（複数可）")
+        sp.add_argument("--include-sample-harness", action="store_true",
+                        help="既定で除外される sample-harness タグのタスクも含める（同梱サンプルのハーネス評価用）")
         sp.add_argument("--task", action="append", help="このタスク id だけ（複数可）")
         sp.add_argument("--split", action="append", choices=[*SPLITS, NO_SPLIT],
                         help="この分割のタスクだけ（複数可。none は分割なし）。holdout は他と混ぜられない")

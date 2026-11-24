@@ -135,7 +135,8 @@ def majority(votes: list[str]) -> str:
 
 def infer_family(model: str) -> str:
     """モデル名から系統を推定する（--judge-model に系統を書かなかったとき）。gpt-* は codex、それ以外は claude_code。"""
-    return "codex" if model.strip().lower().startswith(("gpt", "o1", "o3", "o4")) else "claude_code"
+    tail = model.strip().lower().rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    return "codex" if tail.startswith(("gpt", "o1", "o3", "o4")) else "claude_code"
 
 
 @dataclass(frozen=True)
@@ -160,14 +161,18 @@ class JudgeSettings:
     def weak(self) -> list[str]:
         return [f"{f}: {self.models.get(f) or 'CLI の既定'}" for f in self.used_families() if not strength_ok(self.models.get(f), self.tier)]
 
-    def meta(self, calibration: dict[str, Any] | None = None, usage: dict[str, Any] | None = None) -> dict[str, Any]:
+    def meta(self, calibration: dict[str, Any] | None = None, usage: dict[str, Any] | None = None,
+             actual_models: dict[str, Any] | None = None) -> dict[str, Any]:
         used = self.used_families()
-        return {"tier": self.tier, "llm": True, "models": {f: self.models.get(f) for f in used},
-                "strength": {f: model_strength(self.models.get(f)) for f in used}, "weak_allowed": self.weak_allowed,
-                "weak": self.weak(), "blind": True, "votes": self.votes, "seed": self.seed, "order": "seed で並べ替えた順",
-                "plan": self.plan, "available": list(self.available), "forced": self.forced,
-                "input": "評価観点 + 最終応答か対象ファイル 1 つ（盲検化済み。会話の記録・ツールの入出力は渡さない）",
-                "calibration": calibration, "usage": usage}
+        out: dict[str, Any] = {"tier": self.tier, "llm": True, "models": {f: self.models.get(f) for f in used},
+                               "strength": {f: model_strength(self.models.get(f)) for f in used}, "weak_allowed": self.weak_allowed,
+                               "weak": self.weak(), "blind": True, "votes": self.votes, "seed": self.seed, "order": "seed で並べ替えた順",
+                               "plan": self.plan, "available": list(self.available), "forced": self.forced,
+                               "input": "評価観点 + 最終応答か対象ファイル 1 つ（盲検化済み。会話の記録・ツールの入出力は渡さない）",
+                               "calibration": calibration, "usage": usage}
+        if actual_models:
+            out["actual_models"] = dict(actual_models)
+        return out
 
 
 def make_settings(tier: str, evaluated: Iterable[str], available: Iterable[str], forced: str | None = None,

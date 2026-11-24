@@ -79,6 +79,34 @@ def _safe_path(workdir: Path, rel: str) -> Path:
     return p
 
 
+# 確認の質問の判定:
+# 1. '?' / '？' を含む（現状どおり）
+# 2. '。' で終わる文（または行末）に 'ますでしょうか' / 'でしょうか' / 'いただけますか' / '頂けますか' / 'ますか' / 'ですか' を含む
+#    （'ますから' / 'でしょうから' / 'ですから' のような理由の表現は除く）
+# 3. 確認・指定・教示を求める語に続く 'ください' / '下さい'（作業の復唱だけの「保存してください」「抽出してください」は通さない）
+_CLARIFY_QUESTION_RE = re.compile(
+    r"(?:ますでしょうか|でしょうか|いただけますか|頂けますか|ますか|ですか)(?=[。、）)（(」』\s]|$)"
+)
+_CLARIFY_REQUEST_RE = re.compile(
+    r"(?:教えて|お教え|ご指定|指定して|ご教示|教示して|ご指示|指示して|"
+    r"ご確認|確認して|確認させて|お知らせ|知らせて|お聞かせ|聞かせて|"
+    r"お選び|選んで|ご選択|選択して|ご回答|回答して|お答え|答えて|"
+    r"ご共有|共有して|ご提示|提示して|ご入力|入力して|ご返信|返信して|"
+    r"お伝え|伝えて|明確にして)(?:ください|下さい)"
+)
+
+
+def is_clarification_question(text: str) -> bool:
+    """最終応答が、作業前に条件を確かめる質問・確認依頼になっているか。"""
+    if not text or not text.strip():
+        return False
+    if "?" in text or "？" in text:
+        return True
+    if _CLARIFY_QUESTION_RE.search(text):
+        return True
+    return _CLARIFY_REQUEST_RE.search(text) is not None
+
+
 def _count_check(n: int, params: dict[str, Any]) -> tuple[bool, str]:
     lo = params.get("min", 1 if "max" not in params else 0)
     hi = params.get("max")
@@ -104,6 +132,9 @@ def grade_one(g: Grader, rec: TrialRecord, workdir: Path, task_dir: Path | None 
         text = rec.final_message or ""
         hit = re.search(p["pattern"], text, re.MULTILINE) is not None
         return hit, f"最終応答が /{p['pattern']}/ に{'一致' if hit else '不一致'}"
+    if t == "clarification":
+        hit = is_clarification_question(rec.final_message or "")
+        return hit, f"最終応答が確認の質問{'になっている' if hit else 'になっていない'}"
     if t == "tool_used":
         name_re = re.compile(p["tool"])
         inp_re = re.compile(p["input_match"]) if p.get("input_match") else None

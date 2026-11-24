@@ -6,12 +6,11 @@ tags: [clarify, smoke]
 fixture: ../fixtures/sales_synthetic
 prompt: |
   先月の売上データを抽出してください。
-limits: {max_turns: 8, timeout_s: 180, max_budget_usd: 0.3}
+limits: {max_turns: 8, timeout_s: 180, max_budget_usd: 0.5}
 allow_tools: [Read, Write, Edit, Bash, Glob, Grep, Skill]
 deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]
 graders:
-  - type: regex                   # 結果: 確認の質問を返したか
-    pattern: '[?？]'
+  - type: clarification           # 結果: 確認の質問を返したか（? / ？ / 句点止めの確認質問）
     description: 確認の質問を返した
     category: clarification
   - type: tool_used               # 過程: 確認前に成果物を書いていない

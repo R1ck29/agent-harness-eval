@@ -112,7 +112,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <path d="M750,118 C750,146 614,146 614,118" class="ln-dash" marker-end="url(#m2)"/>
 <text x="682" y="156" text-anchor="middle" class="t-sm">変更が入ればスモークに戻る</text>
 </svg></div>
-<figcaption>harvest（9 章）は自分のセッション履歴からタスクの下書きを作る工程で、履歴がなければ同梱の標準タスクを使います。report（レポートの作り直し）と calibrate（LLM 判定と人手ラベルの照合）もエージェントを呼びません。変更のない組み合わせはキャッシュ（8 章）が効くので、スモークを何度回しても実際に呼ばれるのは変えた部分だけです。配布物の変更案を作る <code>improve</code> と、採用するかを決める <code>promote</code> は、11 章の手順で使います。</figcaption>
+<figcaption>harvest（9 章）は自分のセッション履歴からタスクの下書きを作る工程で、履歴がなければ同梱の標準タスクを使います。同梱サンプル専用の 2 タスク（<code>sample-harness</code> タグ）は第三者ハーネスを不当に落とさないよう既定で除外します（既定はスモーク 3 タスク・フル 4 タスク。同梱サンプルのハーネスを評価するときだけ <code>--include-sample-harness</code> 等で含め、フル 6 タスクにします）。report（レポートの作り直し）と calibrate（LLM 判定と人手ラベルの照合）もエージェントを呼びません。変更のない組み合わせはキャッシュ（8 章）が効くので、スモークを何度回しても実際に呼ばれるのは変えた部分だけです。配布物の変更案を作る <code>improve</code> と、採用するかを決める <code>promote</code> は、11 章の手順で使います。</figcaption>
 </figure>
 
 <h2 id="run">3. run の流れ</h2>

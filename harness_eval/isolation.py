@@ -106,6 +106,31 @@ def missing_inherited(profile: Profile, environ: dict[str, str]) -> list[str]:
             and (not environ.get(n) or n in dropped)]
 
 
+# ゲートウェイ経由で Claude Code を使うとき、モデル別名（opus / sonnet / haiku）の解決に要る環境変数
+GATEWAY_MODEL_VARS = (
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+)
+
+
+def missing_gateway_models(profile: Profile, environ: dict[str, str]) -> list[str]:
+    """親の環境またはプロファイルで ANTHROPIC_BASE_URL が使われているのに、env にも inherit_env にも無い
+    ANTHROPIC_DEFAULT_*_MODEL を返す。無ければ空。"""
+    if profile.agent != "claude_code":
+        return []
+    unset = set(profile.env_unset)
+    has_base_url = (
+        bool(profile.env.get("ANTHROPIC_BASE_URL"))
+        or ("ANTHROPIC_BASE_URL" in profile.inherit_env and "ANTHROPIC_BASE_URL" not in unset)
+        or (bool(environ.get("ANTHROPIC_BASE_URL")) and "ANTHROPIC_BASE_URL" not in unset)
+    )
+    if not has_base_url:
+        return []
+    declared = set(profile.env) | (set(profile.inherit_env) - unset)
+    return [n for n in GATEWAY_MODEL_VARS if n not in declared]
+
+
 def dropped_vars(profile: Profile, environ: dict[str, str]) -> list[str]:
     """親の環境にあるが許可リストにも inherit_env にもないので試行に渡さない、エージェントの設定になりうる変数（名前だけ。
     経路の変数は route_variables が別に出す）。組織で意図して設定したもの（クライアント証明書など）なら inherit_env に書く。"""

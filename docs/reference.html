@@ -88,6 +88,7 @@ graders:
 <tr><td><code>file_exists</code></td><td>作業ディレクトリのファイルの有無</td><td><code>path</code></td><td>結果</td></tr>
 <tr><td><code>file_contains</code></td><td>ファイル内容の正規表現（複数行モード）</td><td><code>path</code>, <code>pattern</code></td><td>結果</td></tr>
 <tr><td><code>regex</code></td><td>最終応答の正規表現</td><td><code>pattern</code></td><td>結果</td></tr>
+<tr><td><code>clarification</code></td><td>最終応答が確認の質問か（<code>?</code>・<code>？</code>・句点止めの確認質問・確認依頼）</td><td>なし</td><td>結果</td></tr>
 <tr><td><code>command</code></td><td>独自スクリプト。終了コード 0 で合格</td><td><code>run</code>, <code>timeout_s</code></td><td>結果</td></tr>
 <tr><td><code>llm</code></td><td>LLM 判定（PASS / FAIL / UNKNOWN）。ルーブリックでしか見られない基準に使う。決定的な検査がすべて合格した出力にだけ、全試行のあとで走る</td><td><code>criteria</code>, <code>focus</code>（<code>final</code> かファイルパス）, <code>max_chars</code></td><td>結果</td></tr>
 <tr><td><code>tool_used</code></td><td>ツール呼び出しの回数</td><td><code>tool</code>（名前の正規表現・完全一致）, <code>input_match</code>, <code>min</code>, <code>max</code>, <code>include_subagents</code></td><td>過程</td></tr>
@@ -186,6 +187,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <table>
 <tr><th>方式</th><th>プロファイルに書くこと</th></tr>
 <tr><td>API キー・トークン</td><td><code>inherit_env: [ANTHROPIC_API_KEY]</code> のように<b>名前だけ</b>（値は書かない）</td></tr>
+<tr><td>組織のゲートウェイ（Claude Code）</td><td>実際に使う認証変数と合わせて <code>inherit_env: [ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_OPUS_MODEL, ANTHROPIC_DEFAULT_SONNET_MODEL, ANTHROPIC_DEFAULT_HAIKU_MODEL]</code> のように名前だけ並べる（API キーや <code>CLAUDE_CODE_OAUTH_TOKEN</code> との併用も可）。<code>ANTHROPIC_DEFAULT_*_MODEL</code> を欠くと、ハーネス内の opus サブエージェント等がモデル別名を解決できず失敗し、ハーネス側だけが不利になる（<code>doctor</code> が注意を出す）</td></tr>
 <tr><td>Bedrock（Claude Code）</td><td><code>env</code> に <code>CLAUDE_CODE_USE_BEDROCK: "1"</code>・<code>AWS_REGION</code> など。AWS の認証ファイルは本物を参照させる（<a href="guide.html#isolation">図解ガイド 5 章</a>）</td></tr>
 <tr><td>ファイルに保存されたログイン（<code>~/.codex/auth.json</code>、Linux の <code>~/.claude/.credentials.json</code>）</td><td><code>copy_credentials: true</code>。下の「認証ファイルの複製」の注意を読む。会社の評価では API キー（<code>CODEX_API_KEY</code>・<code>ANTHROPIC_API_KEY</code>）を勧める</td></tr>
 <tr><td>サブスクリプション（Pro / Max）</td><td>端末で <code>claude setup-token</code> を実行して長期トークン（推論専用）を作り、<code>export CLAUDE_CODE_OAUTH_TOKEN=…</code> してから実行。プロファイルには <code>inherit_env: [CLAUDE_CODE_OAUTH_TOKEN]</code> と <code>billing: subscription</code>（トークンはチャットやファイルに貼らない）</td></tr>
@@ -252,7 +254,8 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <tr><th>オプション</th><th>意味</th><th>既定</th></tr>
 <tr><td><code>--tasks</code>・<code>--profiles</code></td><td>YAML のファイル・ディレクトリ・ワイルドカード（<code>claude-*.yaml</code>。PowerShell でもツール側で展開する）。必須</td><td>—</td></tr>
 <tr><td><code>--trials</code>・<code>--k</code></td><td>1 組あたりの試行回数・pass^k の k</td><td>1・<code>--trials</code> と同じ</td></tr>
-<tr><td><code>--tag</code>・<code>--task</code></td><td>このタグ・id のタスクだけ（複数可）</td><td>すべて</td></tr>
+<tr><td><code>--tag</code>・<code>--task</code></td><td>このタグ・id のタスクだけ（複数可）。タグ <code>sample-harness</code> のタスクは既定で除外され、<code>--task &lt;id&gt;</code>・<code>--tag sample-harness</code>・<code>--include-sample-harness</code> で含める</td><td><code>sample-harness</code> 以外のすべて</td></tr>
+<tr><td><code>--include-sample-harness</code></td><td>既定で除外される <code>sample-harness</code> タグのタスク（同梱サンプルのハーネス評価用）も含める。同梱サンプルのフル評価は既定 4 タスク → 6 タスクになる</td><td>含めない</td></tr>
 <tr><td><code>--split</code></td><td>この分割のタスクだけ（<code>train</code>／<code>dev</code>／<code>holdout</code>／<code>none</code>＝分割なし。複数可）。holdout は他のタスクと混ぜられない</td><td>すべて</td></tr>
 <tr><td><code>--baseline</code></td><td>Δ と結論の基準にするプロファイル id</td><td>なし（結論は配布物なしのプロファイルが 1 つならそれ）</td></tr>
 <tr><td><code>--candidate</code></td><td>結論を出す候補のプロファイル id</td><td>ベースライン以外のすべて</td></tr>
@@ -263,7 +266,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <tr><td><code>--no-llm</code></td><td>LLM 判定を実行しない（スモーク用）</td><td>—</td></tr>
 <tr><td id="run-judge"><code>--tier</code></td><td>判定役の段階。<code>dev</code>: 中位モデル（sonnet / gpt-6.2-sol）1 回。LLM 判定が決めた結論は「暫定: 採用判断には使えません」。<code>decisive</code>: 強いモデル（opus / gpt-6.2-astra）3 回の多数決・別系統（両方の CLI があれば両系統の一致を求め、不一致は <code>judge_disagreement</code> で合格にしない）。採用・マージの判断には decisive が要る。LLM 判定が合否を決めていなければ、どちらでも採用判断に使える</td><td><code>dev</code></td></tr>
 <tr><td><code>--judge-agent</code></td><td>判定役の系統を 1 つに固定する（<code>claude_code</code>／<code>codex</code>）</td><td>自動（評価対象の別系統。Claude Code の出力は Codex、Codex の出力は Claude。別系統の CLI がなければ同系統で動き「同系統の判定役」と警告）</td></tr>
-<tr><td><code>--judge-model</code></td><td>判定モデルの上書き。<code>MODEL</code>（<code>--judge-agent</code> の系統。なければモデル名から推定）か <code>系統=MODEL</code>。複数可</td><td>段階のモデル</td></tr>
+<tr><td><code>--judge-model</code></td><td>判定モデルの上書き。別名だけでなく完全なモデル ID（プロバイダ付き ID を含む）もそのまま渡せる。<code>MODEL</code>（<code>--judge-agent</code> の系統。なければモデル名から推定）か <code>系統=MODEL</code>。複数可。<code>--judge-profile</code> の YAML に <code>model:</code> があればそれも使う（<code>--judge-model</code> を優先）</td><td>段階のモデル</td></tr>
 <tr><td><code>--judge-votes</code></td><td>1 系統あたりの判定回数（多数決）</td><td>dev 1・decisive 3</td></tr>
 <tr><td><code>--allow-weak-judge</code></td><td>段階が求める強さ未満の判定モデル（haiku など）を許す。レポートに「弱い判定役」と出て、結論は採用判断に使えない</td><td>—（弱いモデルは止める）</td></tr>
 <tr><td><code>--judge-family</code></td><td>判定役に使ってよい系統（複数可）</td><td>CLI が見つかった系統すべて</td></tr>

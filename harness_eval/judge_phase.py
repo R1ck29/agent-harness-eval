@@ -151,10 +151,18 @@ class JudgePhase:
         """判定 1 回の応答を読み、トークン・費用を使量・予算・台帳に計上する。(応答, トークン, 費用, 失敗理由)。"""
         text, cli_cost, jerr = adapter.parse_judge(out)
         tokens = adapter.judge_tokens(out)
+        actual_model = adapter.judge_model(out) if hasattr(adapter, "judge_model") else None
+        meta = getattr(self, "_judge_call_meta", None)
+        if meta is not None:
+            meta.actual_model = actual_model
         cost = token_cost(tokens, model, family)
+        if cost is None and actual_model:
+            cost = token_cost(tokens, actual_model, family)
         if cost is None:
             cost = cli_cost
         with self.lock:
+            if actual_model and hasattr(self, "judge_actual_models"):
+                self.judge_actual_models.setdefault(family, set()).add(actual_model)
             add_usage(self.judge_usage, tokens, cost)
             bm = self.judge_usage["by_model"].setdefault(f"{family}:{model}", {"calls": 0, "cost_usd": 0.0})
             bm["calls"] += 1
@@ -219,17 +227,25 @@ class JudgePhase:
                 hit = json.loads(f.read_text(encoding="utf-8"))
                 with self.lock:
                     self.judge_usage["cache_hits"] += 1
+                    if hit.get("actual_model") and hasattr(self, "judge_actual_models"):
+                        self.judge_actual_models.setdefault(family, set()).add(hit["actual_model"])
                 return {**hit, "cached": True}
             except (OSError, json.JSONDecodeError):
                 pass
         if self._judge_over_budget(family):
             raise JudgeBudgetStop("費用の上限に到達したため判定を実行していません")
+        meta = getattr(self, "_judge_call_meta", None)
+        if meta is not None:
+            meta.actual_model = None
         text, tokens, cost = self._judge_call(family, model, prompt)
+        actual_model = getattr(meta, "actual_model", None) if meta is not None else None
         status, reason = parse_verdict(text)
         if self._judge_profile(family).credentials == "in_place":
             reason = "（in_place の判定: 理由は記録しません）"  # 実認証を指す CLI の出力は、記録・キャッシュ・報告に載せない
-        row = {"family": family, "model": model, "tier": self.judge.tier, "vote": vote, "status": status, "reason": reason,
-               "tokens": tokens, "cost_usd": cost, "at": datetime.now(timezone.utc).isoformat()}
+        row: dict[str, Any] = {"family": family, "model": model, "tier": self.judge.tier, "vote": vote, "status": status, "reason": reason,
+                               "tokens": tokens, "cost_usd": cost, "at": datetime.now(timezone.utc).isoformat()}
+        if actual_model:
+            row["actual_model"] = actual_model
         if self.opt.use_cache:  # 判定の応答の本文・判定入力は残さない（キーはハッシュ）
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text(json.dumps(row, ensure_ascii=False), encoding="utf-8")
@@ -275,11 +291,17 @@ class JudgePhase:
                     if not v["cached"]:
                         c = v.get("cost_usd")
                         rec.judge_cost_usd = None if c is None or rec.judge_cost_usd is None else rec.judge_cost_usd + c
-            per[f] = {"model": model, "votes": [v["status"] for v in votes], "majority": majority([v["status"] for v in votes]),
-                      "cached": sum(v["cached"] for v in votes), "reason": votes[0].get("reason", "")}
+            actuals = list(dict.fromkeys(v["actual_model"] for v in votes if v.get("actual_model")))
+            fam_rec: dict[str, Any] = {"model": model, "votes": [v["status"] for v in votes],
+                                       "majority": majority([v["status"] for v in votes]),
+                                       "cached": sum(v["cached"] for v in votes), "reason": votes[0].get("reason", "")}
+            if actuals:
+                fam_rec["actual_model"] = actuals[0] if len(actuals) == 1 else actuals
+            per[f] = fam_rec
         status = combine_rubric({f: v["majority"] for f, v in per.items()}, bool(item.get("negate")))
         rec.judge_votes.append({"kind": item["kind"], "grader": item.get("grader"), "status": status,
-                                "families": {f: {k: v[k] for k in ("model", "votes", "majority", "cached")} for f, v in per.items()}})
+                                "families": {f: {k: v[k] for k in ("model", "actual_model", "votes", "majority", "cached") if k in v}
+                                             for f, v in per.items()}})
         item["_reason"] = "; ".join(f"{f}: {v['majority']}（{'/'.join(v['votes'])}）{v['reason']}" for f, v in per.items())[:300]
         return status
 

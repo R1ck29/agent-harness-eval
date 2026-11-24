@@ -3,7 +3,11 @@ id: claude-baseline
 agent: claude_code
 model: sonnet
 # API キーを環境変数 ANTHROPIC_API_KEY に設定している場合（その端末で実行する。値はここに書かない）:
-# inherit_env: [ANTHROPIC_API_KEY]   # 組織のゲートウェイを ANTHROPIC_BASE_URL で指定していれば、それも並べる
+# inherit_env: [ANTHROPIC_API_KEY]
+# 組織のゲートウェイ経由で使う場合（値はここに書かず、実際に使う認証変数と合わせて名前だけ並べる。
+# API キーや CLAUDE_CODE_OAUTH_TOKEN と併用する形でも同様）:
+# inherit_env: [ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_OPUS_MODEL, ANTHROPIC_DEFAULT_SONNET_MODEL, ANTHROPIC_DEFAULT_HAIKU_MODEL]
+# （ANTHROPIC_DEFAULT_*_MODEL を並べないと、ハーネス内の opus サブエージェント等が別名を解決できず失敗し、ハーネス側だけが不当に不利になる）
 # （billing は既定の api: 呼び出しごとに課金。--max-cost-usd と月の予算が効く）
 # Bedrock を使う場合（利用先の値に置き換える）:
 # env:
