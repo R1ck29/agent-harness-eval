@@ -266,7 +266,9 @@ def tamper_check(before: dict[str, str], workdir: Path) -> list[dict[str, str]]:
                 elif not _skip_added_here(added):
                     if path.endswith(".py"):
                         if not _pure_addition(old, after[path]):
-                            line_finding = f"disallowed addition: {(added or [''])[0].strip()[:160]}"
+                            redef = _redefined_python_name(old, after[path])
+                            first_added = next((ln.strip() for ln in added if ln.strip()), "")
+                            line_finding = f"redefined: {redef}" if redef else f"disallowed addition: {first_added[:160]}"
                     elif not after[path].startswith(old.rstrip()):
                         # 行を消さない弱め方（先頭に return・assert の前に代入・autouse の差し替え）: 末尾への追記ではない変更
                         line_finding = f"inserted before the end: {(added or [''])[0].strip()[:160]}"
