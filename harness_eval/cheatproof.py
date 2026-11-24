@@ -384,33 +384,56 @@ def _alias_names(aliases: Iterable[ast.alias]) -> list[str]:
     return [(a.asname or a.name).split(".")[0] for a in aliases]
 
 
+def _safe_alias(a: ast.alias) -> bool:
+    """`*` import や fixture の別名（`from pytest import fixture as fx`）ではない安全な alias か。"""
+    return a.name != "*" and not (a.asname and a.name.split(".")[-1] in _FIXTURE_NAMES)
+
+
 class _PureAddition:
     """基準の文の列が、順序・内容そのままで残り、許す追加だけが挿入されているか（クラスの本体は再帰。関数の本体は 1 文でも変われば不可）。
 
-    許す追加: 既存のモジュール・クラス直下の新しい test_* 関数（名前が既存・基底クラスのものと重ならない・fixture でない）、モジュール直下の新しいクラス、
-    新しい import 文、既存の `from m import a` への名前の追加。追加の import の束縛名が、基準で束縛されている名前・基準が参照している名前
-    （組み込み・`*` import が供給する名前・fixture を受ける引数名）と重なれば不可。それ以外の追加（代入・式文・global・非テストのメソッド・属性・フック・fixture）はすべて不可。"""
+    許す追加: 既存のモジュール・クラス直下の新しい test_* 関数（名前が既存・基底クラス・同一ファイル内多重継承の他基底と重ならない・
+    モジュール直下は基準の参照名も上書きしない・fixture でない）、モジュール直下の新しいクラス、新しい import 文、既存の `from m import a`
+    への名前の追加。追加の import の束縛名が、基準で束縛されている名前・基準が参照している名前（組み込み・`*` import が供給する名前・
+    fixture を受ける引数名）と重なれば不可。それ以外の追加（代入・式文・global・非テストのメソッド・属性・フック・fixture）はすべて不可。"""
 
     def __init__(self, old: ast.Module):
         self.classes = {n.name: n for n in ast.walk(old) if isinstance(n, ast.ClassDef)}
-        # 追加の import・クラスで上書きしてはいけない名前: 基準で束縛されている名前、基準が参照している名前（組み込み・`*` import が
-        # 供給する名前・conftest の fixture を受ける引数名を含む）
+        # 追加の import・クラス・モジュール直下関数で上書きしてはいけない名前: 基準で束縛されている名前、基準が参照している名前
+        # （組み込み・`*` import が供給する名前・conftest の fixture を受ける引数名を含む）
         used = {n.id for n in ast.walk(old) if isinstance(n, ast.Name)} | {a.arg for a in ast.walk(old) if isinstance(a, ast.arg)}
         self.shadow = _bound_names(old.body) | used
         self.imported: list[str] = []
 
-    def base_names(self, cls: ast.ClassDef, seen: set[str]) -> set[str]:
-        """同じファイル（基準）にある基底クラスの本体の名前（再帰）。ほかのファイルから import した基底クラスは見えない。"""
+    def ancestors(self, cls: ast.ClassDef, seen: set[str] | None = None) -> set[str]:
+        """同じファイル（基準）にある基底クラスの名前（再帰）。ほかのファイルから import した基底クラスは見えない。"""
+        seen = {cls.name} if seen is None else seen
         out: set[str] = set()
         for b in cls.bases:
             name = b.attr if isinstance(b, ast.Attribute) else getattr(b, "id", "")
             if name in self.classes and name not in seen:
                 seen.add(name)
-                out |= _bound_names(self.classes[name].body) | self.base_names(self.classes[name], seen)
+                out.add(name)
+                out |= self.ancestors(self.classes[name], seen)
+        return out
+
+    def base_names(self, cls: ast.ClassDef) -> set[str]:
+        """同じファイル（基準）にある基底クラスの本体の名前（再帰）。"""
+        out: set[str] = set()
+        for name in self.ancestors(cls):
+            out |= _bound_names(self.classes[name].body)
+        return out
+
+    def mro_names(self, cls: ast.ClassDef) -> set[str]:
+        """cls の基底クラスと、cls を継承する同一ファイル内の各サブクラスの他の基底クラスの本体の名前（再帰）。"""
+        out = self.base_names(cls)
+        for sub in self.classes.values():
+            if cls.name in self.ancestors(sub):
+                out |= self.base_names(sub)
         return out
 
     def ok(self, old: list[ast.stmt], new: list[ast.stmt], owner: ast.ClassDef | None) -> bool:
-        taken = _bound_names(old) | (self.base_names(owner, {owner.name}) if owner else set())
+        taken = _bound_names(old) | (self.mro_names(owner) if owner else set())
         i = 0
         for node in new:
             if i < len(old) and self.same(old[i], node, owner):
@@ -436,21 +459,21 @@ class _PureAddition:
                     j += 1
                 else:
                     extra.append(a)
-            if j == len(kept) and all(a.name != "*" for a in extra):
+            if j == len(kept) and all(_safe_alias(a) for a in extra):
                 self.imported += _alias_names(extra)
                 return True
         return ast.dump(old, include_attributes=False) == ast.dump(new, include_attributes=False)
 
     def allowed_addition(self, node: ast.stmt, owner: ast.ClassDef | None, taken: set[str]) -> bool:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            return node.name.startswith("test_") and node.name not in taken and not _is_fixture(node)
+            return (node.name.startswith("test_") and node.name not in taken
+                    and (owner is not None or node.name not in self.shadow) and not _is_fixture(node))
         if owner is not None:
             return False  # 既存クラスへの非テストの追加はすべて改ざん
         if isinstance(node, ast.ClassDef):
             return (node.name not in taken and node.name not in self.shadow and node.name not in _RESERVED_NAMES
                     and not node.name.startswith("pytest_") and not _is_fixture(node))
-        if isinstance(node, (ast.Import, ast.ImportFrom)) and all(
-                a.name != "*" and not (a.asname and a.name.split(".")[-1] in _FIXTURE_NAMES) for a in node.names):  # fixture の別名は不可
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and all(_safe_alias(a) for a in node.names):
             self.imported += _alias_names(node.names)
             return True
         return False
