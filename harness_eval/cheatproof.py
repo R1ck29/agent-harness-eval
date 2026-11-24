@@ -503,6 +503,10 @@ class _PureAddition:
             elif self.allowed_addition(node, owner, taken, trailing=(owner is None and i == len(old))):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     taken.add(node.name)  # 追加した名前どうしも重ならない
+                    if owner is None and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        for part in ast.walk(node.args):
+                            if isinstance(part, ast.NamedExpr) and isinstance(part.target, ast.Name):
+                                taken.add(part.target.id)
                 elif isinstance(node, ast.Assign):
                     for t in node.targets:
                         if isinstance(t, ast.Name):
@@ -535,23 +539,53 @@ class _PureAddition:
     _PURE_BUILTIN_CALLS = frozenset({"range"})
 
     @classmethod
-    def _safe_comp_target(cls, target: ast.AST) -> bool:
+    def _comp_target_names(cls, target: ast.AST) -> set[str] | None:
         if isinstance(target, ast.Name):
-            return True
+            return {target.id}
         if isinstance(target, (ast.Tuple, ast.List)):
-            return all(cls._safe_comp_target(e) for e in target.elts)
-        return False
+            out: set[str] = set()
+            for e in target.elts:
+                sub = cls._comp_target_names(e)
+                if sub is None:
+                    return None
+                out |= sub
+            return out
+        return None
 
     @classmethod
-    def _safe_generators(cls, gens: list[ast.comprehension], unsafe_call_names: set[str]) -> bool:
+    def _safe_generators(cls, gens: list[ast.comprehension], unsafe_call_names: set[str] | frozenset[str]) -> set[str] | None:
+        local_unsafe = set(unsafe_call_names)
         for g in gens:
-            if g.is_async or not cls._safe_comp_target(g.target):
-                return False
-            if not cls._safe_trailing_expr(g.iter, unsafe_call_names):
-                return False
-            if not all(cls._safe_trailing_expr(cond, unsafe_call_names) for cond in g.ifs):
-                return False
-        return True
+            if g.is_async:
+                return None
+            if not cls._safe_trailing_expr(g.iter, local_unsafe):
+                return None
+            names = cls._comp_target_names(g.target)
+            if names is None:
+                return None
+            local_unsafe |= names
+            if not all(cls._safe_trailing_expr(cond, local_unsafe) for cond in g.ifs):
+                return None
+        return local_unsafe
+
+    @classmethod
+    def _safe_annotation_expr(cls, expr: ast.AST) -> bool:
+        """末尾の補助関数の型注釈に許す式（インポート時副作用を起こす Call・Lambda・NamedExpr 等は拒否）。"""
+        if isinstance(expr, ast.Constant):
+            return True
+        if isinstance(expr, ast.Name):
+            return isinstance(expr.ctx, ast.Load)
+        if isinstance(expr, ast.Attribute):
+            return isinstance(expr.ctx, ast.Load) and cls._safe_annotation_expr(expr.value)
+        if isinstance(expr, ast.Subscript):
+            return (isinstance(expr.ctx, ast.Load)
+                    and cls._safe_annotation_expr(expr.value)
+                    and cls._safe_annotation_expr(expr.slice))
+        if isinstance(expr, (ast.Tuple, ast.List)):
+            return all(cls._safe_annotation_expr(e) for e in expr.elts)
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.BitOr):
+            return cls._safe_annotation_expr(expr.left) and cls._safe_annotation_expr(expr.right)
+        return False
 
     @classmethod
     def _safe_trailing_expr(cls, expr: ast.AST, unsafe_call_names: set[str] | frozenset[str] = frozenset()) -> bool:
@@ -587,11 +621,13 @@ class _PureAddition:
         if isinstance(expr, ast.Starred):
             return cls._safe_trailing_expr(expr.value, unsafe_call_names)
         if isinstance(expr, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-            return cls._safe_generators(expr.generators, set(unsafe_call_names)) and cls._safe_trailing_expr(expr.elt, unsafe_call_names)
+            scoped = cls._safe_generators(expr.generators, unsafe_call_names)
+            return scoped is not None and cls._safe_trailing_expr(expr.elt, scoped)
         if isinstance(expr, ast.DictComp):
-            return (cls._safe_generators(expr.generators, set(unsafe_call_names))
-                    and cls._safe_trailing_expr(expr.key, unsafe_call_names)
-                    and cls._safe_trailing_expr(expr.value, unsafe_call_names))
+            scoped = cls._safe_generators(expr.generators, unsafe_call_names)
+            return (scoped is not None
+                    and cls._safe_trailing_expr(expr.key, scoped)
+                    and cls._safe_trailing_expr(expr.value, scoped))
         if isinstance(expr, ast.Call):
             return (isinstance(expr.func, ast.Name)
                     and expr.func.id in cls._PURE_BUILTIN_CALLS
@@ -599,6 +635,21 @@ class _PureAddition:
                     and not expr.keywords
                     and all(cls._safe_trailing_expr(a, unsafe_call_names) for a in expr.args))
         return False
+
+    def _safe_helper_default(self, expr: ast.AST, unsafe: set[str], forbidden: set[str]) -> bool:
+        """末尾補助関数の既定値式を検証する（`_safe_trailing_expr` に加え、安全名への単純な walrus を許可）。"""
+        if isinstance(expr, ast.NamedExpr):
+            if not isinstance(expr.target, ast.Name):
+                return False
+            name = expr.target.id
+            if name in forbidden or name in _RESERVED_NAMES or name.startswith(("pytest_", "__")):
+                return False
+            if not self._safe_helper_default(expr.value, unsafe, forbidden):
+                return False
+            unsafe.add(name)
+            forbidden.add(name)
+            return True
+        return self._safe_trailing_expr(expr, unsafe)
 
     def allowed_addition(self, node: ast.stmt, owner: ast.ClassDef | None, taken: set[str], *, trailing: bool = False) -> bool:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -609,7 +660,16 @@ class _PureAddition:
                     and node.name not in taken and node.name not in self.shadow and node.name not in _RESERVED_NAMES
                     and not node.name.startswith(("pytest_", "__"))
                     and not (_declared_globals(node.body) & (taken | self.shadow))):
-                return True
+                unsafe = taken | self.shadow | set(self.imported)
+                forbidden = taken | self.shadow | {node.name}
+                a = node.args
+                defaults = [*a.defaults, *(d for d in a.kw_defaults if d is not None)]
+                annots = [x.annotation for x in (*a.posonlyargs, *a.args, a.vararg, *a.kwonlyargs, a.kwarg)
+                          if x is not None and x.annotation]
+                if node.returns is not None:
+                    annots.append(node.returns)
+                return (all(self._safe_helper_default(d, unsafe, forbidden) for d in defaults)
+                        and all(self._safe_annotation_expr(an) for an in annots))
             return False
         if owner is not None:
             return False  # 既存クラスへの非テストの追加は末尾でもすべて改ざん
@@ -650,7 +710,7 @@ def _run():
     cwd = os.getcwd()
     cwds = {cwd, os.path.realpath(cwd)}
     sys.path[:] = [p for p in sys.path if p not in cwds and os.path.realpath(p) not in cwds]
-    import ast, functools, gc, hashlib, json, types
+    import ast, contextlib, functools, gc, hashlib, json, types
     import pytest
     from _pytest.assertion.rewrite import rewrite_asserts
     _loads, _dumps = json.loads, json.dumps
@@ -658,6 +718,14 @@ def _run():
     _CodeType, _MethodType = types.CodeType, types.MethodType
     _partial = functools.partial
     _LRU_WRAPPER = getattr(functools, "_lru_cache_wrapper", None)
+    _CD_TYPES = tuple(t for t in (
+        getattr(contextlib, "ContextDecorator", None),
+        getattr(contextlib, "AsyncContextDecorator", None),
+    ) if isinstance(t, type))
+    _GCM_TYPES = tuple(t for t in (
+        getattr(contextlib, "_GeneratorContextManager", None),
+        getattr(contextlib, "_AsyncGeneratorContextManager", None),
+    ) if isinstance(t, type))
     _get_referents = gc.get_referents
     out_fd = os.dup(1)
     try:
@@ -697,10 +765,8 @@ def _run():
         baseline = {p: baseline_digests(p, t) for p, t in payload["baseline"].items()}
         def _wraps_in_closure(f):
             cl = getattr(f, "__closure__", None)
-            if not cl:
-                return True
             w = getattr(f, "__wrapped__", None)
-            if w is None:
+            if not cl or w is None:
                 return False
             for cell in cl:
                 try:
@@ -709,21 +775,90 @@ def _run():
                 except ValueError:
                     pass
             return False
-        def pos(f):
+        def _wraps_in_obj(f):
+            w = getattr(f, "__wrapped__", None)
+            if w is None:
+                return False
+            d = getattr(f, "__dict__", None)
+            if isinstance(d, dict) and any(k != "__wrapped__" and v is w for k, v in d.items()):
+                return True
+            for r in _get_referents(f):
+                if r is w:
+                    return True
+            return False
+        def _cls_origin(cls_t):
+            mod = sys.modules.get(getattr(cls_t, "__module__", None))
+            mod_file = getattr(mod, "__file__", None)
+            qual = getattr(cls_t, "__qualname__", None)
+            verified = False
+            if mod is not None and isinstance(qual, str) and qual and "<locals>" not in qual:
+                obj = mod
+                for part in qual.split("."):
+                    obj = getattr(obj, part, None)
+                    if obj is None:
+                        break
+                verified = obj is cls_t
+            return [mod_file, qual, verified]
+        def _code_info(obj):
+            c = getattr(obj, "__code__", None) if obj is not None else None
+            return [c.co_filename, c.co_firstlineno, digest(c)] if isinstance(c, _CodeType) else None
+        def _extra_for_fn(f):
+            cl = getattr(f, "__closure__", None)
+            if not cl or not _CD_TYPES:
+                return None
+            cds = []
+            for cell in cl:
+                try:
+                    val = cell.cell_contents
+                except ValueError:
+                    continue
+                if isinstance(val, _CD_TYPES):
+                    if _GCM_TYPES and type(val) in _GCM_TYPES:
+                        info = _code_info(getattr(val, "func", None))
+                        cds.append(["cm_fn", *info] if info else ["cm_bad"])
+                    else:
+                        cm_cls = type(val)
+                        ex = getattr(cm_cls, "__exit__", None) or getattr(cm_cls, "__aexit__", None)
+                        en = getattr(cm_cls, "__enter__", None) or getattr(cm_cls, "__aenter__", None)
+                        cds.append(["cm_cls", _cls_origin(cm_cls), _code_info(ex), _code_info(en)])
+            return cds or None
+        def pos(f, allow_call=True):
             c = getattr(f, "__code__", None)
             if isinstance(c, _CodeType):
-                return [c.co_filename, c.co_firstlineno, digest(c), "fn" if _wraps_in_closure(f) else "fn_unlinked"]
+                linked = _wraps_in_closure(f)
+                entry = [c.co_filename, c.co_firstlineno, digest(c), "fn" if linked else "fn_unlinked"]
+                if linked:
+                    cds = _extra_for_fn(f)
+                    if cds:
+                        entry.append({"cd": cds})
+                return entry
             if _LRU_WRAPPER is not None and type(f) is _LRU_WRAPPER:
                 w = getattr(f, "__wrapped__", None)
                 d = getattr(f, "__dict__", None)
                 if w is not None and any(r is w for r in _get_referents(f) if r is not d):
                     return ["<stdlib_c>", "functools._lru_cache_wrapper"]
                 return None
-            if not isinstance(f, _partial):
-                call = getattr(type(f), "__call__", None)
-                cc = getattr(call, "__code__", None)
+            if allow_call and not isinstance(f, _partial):
+                if not _wraps_in_obj(f):
+                    return None
+                cls_t = type(f)
+                call = getattr(cls_t, "__call__", None)
+                if call is None:
+                    return None
+                call_layers, call_seen, cur = [], set(), call
+                while cur is not None and id(cur) not in call_seen and getattr(cur, "__wrapped__", None) is not None:
+                    call_seen.add(id(cur))
+                    layer = pos(cur, allow_call=False)
+                    if layer is None:
+                        return None
+                    call_layers.append(layer)
+                    cur = cur.__wrapped__
+                cc = getattr(cur, "__code__", None)
                 if isinstance(cc, _CodeType):
-                    return [cc.co_filename, cc.co_firstlineno, digest(cc), "call"]
+                    meta = {"cls": _cls_origin(cls_t)}
+                    if call_layers:
+                        meta["call_chain"] = call_layers
+                    return [cc.co_filename, cc.co_firstlineno, digest(cc), "call", meta]
             return None
         class Collect:
             def __init__(self):
@@ -733,13 +868,24 @@ def _run():
                 for it in items:
                     fn = getattr(it, "obj", None)
                     cls = getattr(it, "cls", None)
+                    inst = getattr(it, "instance", None)
                     bad_self = False
+                    if cls is not None:
+                        meth_name = getattr(it, "originalname", None) or it.name.split("[")[0]
+                        for base in getattr(cls, "__mro__", ()):
+                            if meth_name in base.__dict__:
+                                raw = base.__dict__[meth_name]
+                                if isinstance(raw, _MethodType) and raw.__self__ is not cls and raw.__self__ is not base:
+                                    bad_self = True
+                                break
                     chain, seen = [], set()
                     try:
-                        while fn is not None and id(fn) not in seen:
+                        while not bad_self and fn is not None and id(fn) not in seen:
                             if isinstance(fn, _MethodType):
                                 owner = fn.__self__
-                                if cls is not None and (owner is cls or type(owner) is cls):
+                                if not chain and cls is not None and (
+                                    owner is cls or (inst is not None and owner is inst and type(inst) is cls)
+                                ):
                                     seen.add(id(fn))
                                     fn = fn.__func__
                                     continue
@@ -786,10 +932,43 @@ def _test_false(body: list[ast.stmt]) -> bool:
                and any(isinstance(t, ast.Name) and t.id == "__test__" for t in n.targets) for n in body)
 
 
+_WRAPPING_PYTEST_MARKS = frozenset({"asyncio", "anyio", "trio"})
+
+
+def _pytest_mark_aliases(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """ファイル内の `import pytest [as p]` と `from pytest import mark [as m]` の別名集合。"""
+    pytest_names: set[str] = set()
+    mark_names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name == "pytest":
+                    pytest_names.add(a.asname or "pytest")
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "pytest":
+            for a in node.names:
+                if a.name == "mark":
+                    mark_names.add(a.asname or "mark")
+    return pytest_names, mark_names
+
+
+def _is_non_wrapping_decorator(deco: ast.AST, pytest_names: set[str], mark_names: set[str]) -> bool:
+    """`__wrapped__` ラッパー層を作らない既知のデコレータ（`pytest.mark.*`・`staticmethod`・`classmethod`）か。"""
+    if isinstance(deco, ast.Name) and deco.id in ("staticmethod", "classmethod"):
+        return True
+    base = deco.func if isinstance(deco, ast.Call) else deco
+    if isinstance(base, ast.Attribute) and base.attr not in _WRAPPING_PYTEST_MARKS:
+        if isinstance(base.value, ast.Name) and base.value.id in mark_names:
+            return True
+        if (isinstance(base.value, ast.Attribute) and base.value.attr == "mark"
+                and isinstance(base.value.value, ast.Name) and base.value.value.id in pytest_names):
+            return True
+    return False
+
+
 def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None = None,
                              decorated: set[str] | None = None) -> dict[str, int]:
     """テストファイルが定義するテスト（pytest の node id の後半 → 定義の先頭行。デコレータがあればその行）。
-    dumps を渡すと定義の AST 表現を、decorated を渡すと関数自身または所属クラスにデコレータがあるテストの node id を入れる。"""
+    dumps を渡すと定義の AST 表現を、decorated を渡すと関数自身または所属クラスにラップし得るデコレータがあるテストの node id を入れる。"""
     try:
         tree = ast.parse(text)
     except SyntaxError:
@@ -798,6 +977,10 @@ def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None 
     out: dict[str, int] = {}
     if _test_false(tree.body):  # モジュールの `__test__ = False`: pytest は何も集めない
         return out
+    pytest_names, mark_names = _pytest_mark_aliases(tree)
+
+    def has_wrapping_deco(decos: Iterable[ast.AST]) -> bool:
+        return any(not _is_non_wrapping_decorator(d, pytest_names, mark_names) for d in decos)
 
     def put(key: str, node: ast.AST, has_deco: bool = False) -> None:
         out[key] = first(node)
@@ -808,14 +991,14 @@ def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None 
 
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
-            put(f"{path}::{node.name}", node, bool(node.decorator_list))
+            put(f"{path}::{node.name}", node, has_wrapping_deco(node.decorator_list))
         elif isinstance(node, ast.ClassDef) and (node.name.startswith("Test") or any(
                 (b.attr if isinstance(b, ast.Attribute) else getattr(b, "id", "")).endswith("TestCase") for b in node.bases)) \
                 and not any(isinstance(m, ast.FunctionDef) and m.name in ("__init__", "__new__") for m in node.body) \
                 and not _test_false(node.body):  # pytest は集めない
             for m in node.body:
                 if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name.startswith("test"):
-                    put(f"{path}::{node.name}::{m.name}", m, bool(node.decorator_list or m.decorator_list))
+                    put(f"{path}::{node.name}::{m.name}", m, has_wrapping_deco((*node.decorator_list, *m.decorator_list)))
     return out
 
 
@@ -903,8 +1086,11 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
     known_callables = _known_callable_wrappers(root, before)
     known_digests = _known_wrapper_digests(root, before, callables=False)
     known_callable_digests = _known_wrapper_digests(root, before, callables=True)
+    known_fn_digests = _known_wrapper_digests(root, before, all_fns=True)
+    known_classes = _known_classes(root, before)
     lib_roots = _host_lib_roots()
     lib_cache: dict[Path, set[tuple[int, str]]] = {}
+    lib_call_cache: dict[Path, set[tuple[int, str]]] = {}
     found: list[dict[str, str]] = []
     for node_id, line in expected.items():
         rel = node_id.split("::")[0]
@@ -927,7 +1113,8 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
         elif (bad := [x for x in it.get("chain", [])
                       if _foreign_wrapper(root, x, known, lib_roots, known_callables=known_callables,
                                           known_digests=known_digests, known_callable_digests=known_callable_digests,
-                                          lib_cache=lib_cache, require_lib_digest=True)]):
+                                          known_classes=known_classes, known_fn_digests=known_fn_digests,
+                                          lib_cache=lib_cache, lib_call_cache=lib_call_cache, require_lib_digest=True)]):
             w = bad[0]
             where = f"{w[0]}:{w[1]}" if w and len(w) >= 2 and w[0] else "<no __code__>"
             found.append({"kind": "test_body_modified", "path": rel,
@@ -979,6 +1166,31 @@ def _file_code_digests(path: Path, cache: dict[Path, set[tuple[int, str]]]) -> s
     return digests
 
 
+def _file_call_digests(path: Path, cache: dict[Path, set[tuple[int, str]]]) -> set[tuple[int, str]]:
+    """ライブラリファイルの実体をコンパイルして得られる __call__ メソッドの (co_firstlineno, digest) の集合。"""
+    hit = cache.get(path)
+    if hit is not None:
+        return hit
+    digests: set[tuple[int, str]] = set()
+    try:
+        st = os.stat(path)
+        if stat.S_ISREG(st.st_mode) and st.st_size <= _LIB_MAX_BYTES:
+            data = path.read_bytes()
+            mod = compile(data, str(path), "exec", dont_inherit=True, optimize=0)
+            stack = [mod]
+            while stack:
+                co = stack.pop()
+                if co.co_name == "__call__":
+                    digests.add((co.co_firstlineno, _code_digest(co)))
+                for k in co.co_consts:
+                    if isinstance(k, types.CodeType):
+                        stack.append(k)
+    except (OSError, SyntaxError, ValueError):
+        pass
+    cache[path] = digests
+    return digests
+
+
 def _source_code_digests_by_line(path: str, text: str, *, include_pytest_rewrite: bool = False) -> dict[int, set[str]]:
     """ソース文字列をコンパイルし、co_firstlineno -> {code_digest} の写像を作る。"""
     modes: tuple[bool, ...] = (False, True) if include_pytest_rewrite else (False,)
@@ -1008,10 +1220,11 @@ def _source_code_digests_by_line(path: str, text: str, *, include_pytest_rewrite
     return out
 
 
-def _known_wrapper_digests(root: Path, before: dict[str, str], *, callables: bool = False) -> set[tuple[str, int, str]]:
-    """基準のファイルにあった入れ子関数・lambda（または __call__ メソッド）の、(絶対パス, いまの先頭行, ダイジェスト) の集合。
+def _known_wrapper_digests(root: Path, before: dict[str, str], *, callables: bool = False,
+                           all_fns: bool = False) -> set[tuple[str, int, str]]:
+    """基準のファイルにあった入れ子関数・lambda（または __call__ メソッド、または全関数）の、(絶対パス, いまの先頭行, ダイジェスト) の集合。
     テストファイル由来は基準ソースのダイジェストと照合し、非テストファイル由来はいまのソースのダイジェストと照合する。"""
-    defs_fn = _callable_class_defs if callables else _nested_defs
+    defs_fn = _all_fn_defs if all_fns else (_callable_class_defs if callables else _nested_defs)
     first = lambda n: min([n.lineno, *(d.lineno for d in getattr(n, "decorator_list", []))])  # noqa: E731
     out: set[tuple[str, int, str]] = set()
     for path, text in before.items():
@@ -1048,17 +1261,25 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
                      known_callables: set[tuple[str, int]] = frozenset(),
                      known_digests: set[tuple[str, int, str]] | None = None,
                      known_callable_digests: set[tuple[str, int, str]] | None = None,
+                     known_classes: set[tuple[str, str]] | None = None,
+                     known_fn_digests: set[tuple[str, int, str]] | None = None,
                      lib_cache: dict[Path, set[tuple[int, str]]] | None = None,
+                     lib_call_cache: dict[Path, set[tuple[int, str]]] | None = None,
                      require_lib_digest: bool = False) -> bool:
     """__wrapped__ をたどる途中の層が、正当なライブラリ（実体ソースをコンパイルしたダイジェストと一致するファイル・
     クロージャ整合確認済み）でも正当な標準ライブラリ C ラッパー（functools._lru_cache_wrapper）でも
-    基準のデコレータ（known / known_callables、ダイジェスト照合あり）でもないか。"""
+    基準のデコレータ（known / known_callables、クラス由来・ダイジェスト照合あり）でもないか。"""
     if not pos or len(pos) < 2 or not pos[0]:
         return True
     if pos[0] == "<stdlib_c>" and pos[1] == "functools._lru_cache_wrapper":
         return False
     tag = pos[3] if len(pos) >= 4 else None
+    if tag == "fn_unlinked":
+        return True
+    meta = pos[4] if len(pos) >= 5 and isinstance(pos[4], dict) else None
     is_call = tag == "call"
+    cache = lib_cache if lib_cache is not None else {}
+    call_cache = lib_call_cache if lib_call_cache is not None else {}
     try:
         p = Path(pos[0])
         f = (p if p.is_absolute() else root / p).resolve()
@@ -1066,24 +1287,155 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
         lineno = int(pos[1])
     except (OSError, TypeError, ValueError):
         return True
-    if is_file and any(f.is_relative_to(r) for r in lib_roots):
-        if tag == "fn_unlinked":
+
+    def fn_code_allowed(info: Any) -> bool:
+        if not isinstance(info, list) or len(info) < 3 or not info[0] or not isinstance(info[2], str):
+            return False
+        try:
+            cp = Path(info[0])
+            cf = (cp if cp.is_absolute() else root / cp).resolve()
+            cln = int(info[1])
+        except (OSError, TypeError, ValueError):
+            return False
+        if cf.is_file() and any(cf.is_relative_to(r) for r in lib_roots):
+            return (cln, info[2]) in _file_code_digests(cf, cache)
+        return known_fn_digests is not None and (str(cf), cln, info[2]) in known_fn_digests
+
+    def cls_origin_kind(origin: Any) -> str | None:
+        if not isinstance(origin, list) or len(origin) < 3 or not origin[0] or not isinstance(origin[1], str):
+            return None
+        mod_file, qual, verified = origin[0], origin[1], bool(origin[2])
+        try:
+            mp = Path(mod_file)
+            mf = (mp if mp.is_absolute() else root / mp).resolve()
+        except (OSError, TypeError, ValueError):
+            return None
+        if mf.is_file() and any(mf.is_relative_to(r) for r in lib_roots):
+            return "lib" if verified else None
+        if known_classes is not None and (str(mf), qual) in known_classes:
+            if "<locals>" not in qual and not verified:
+                return None
+            return "known"
+        return None
+
+    if meta and "cd" in meta:
+        cds = meta["cd"]
+        if not isinstance(cds, list) or not cds:
             return True
-        cache = lib_cache if lib_cache is not None else {}
+        for item in cds:
+            if not isinstance(item, list) or not item:
+                return True
+            if item[0] == "cm_fn":
+                if not fn_code_allowed(item[1:]):
+                    return True
+            elif item[0] == "cm_cls" and len(item) >= 4:
+                kind = cls_origin_kind(item[1])
+                if kind is None:
+                    return True
+                for meth_info in (item[2], item[3]):
+                    if meth_info is not None:
+                        if not fn_code_allowed(meth_info):
+                            return True
+                    elif kind != "lib":
+                        return True
+            else:
+                return True
+
+    if is_call:
+        if not meta or "cls" not in meta:
+            return True
+        cls_kind = cls_origin_kind(meta["cls"])
+        if cls_kind is None:
+            return True
+        for layer in meta.get("call_chain", ()):
+            if _foreign_wrapper(root, layer, known, lib_roots, known_callables=known_callables,
+                                known_digests=known_digests, known_callable_digests=known_callable_digests,
+                                known_classes=known_classes, known_fn_digests=known_fn_digests,
+                                lib_cache=cache, lib_call_cache=call_cache, require_lib_digest=require_lib_digest):
+                return True
+        if len(pos) < 3 or not isinstance(pos[2], str):
+            return True
+        if cls_kind == "lib":
+            if not (is_file and any(f.is_relative_to(r) for r in lib_roots)):
+                return True
+            return (lineno, pos[2]) not in _file_call_digests(f, call_cache)
+        if known_callable_digests is not None and (str(f), lineno, pos[2]) in known_callable_digests:
+            return False
+        if is_file and any(f.is_relative_to(r) for r in lib_roots):
+            return (lineno, pos[2]) not in _file_call_digests(f, call_cache)
+        return True
+
+    if is_file and any(f.is_relative_to(r) for r in lib_roots):
         digests = _file_code_digests(f, cache)
         if len(pos) >= 3 and isinstance(pos[2], str):
             return (lineno, pos[2]) not in digests
         if require_lib_digest:
             return True
         return not any(ln == lineno for ln, _ in digests)
-    if known_digests is not None or known_callable_digests is not None:
+    if known_digests is not None:
         if len(pos) < 3 or not isinstance(pos[2], str):
             return True
-        allowed_digests = ((known_callable_digests or frozenset()) | (known_digests or frozenset())) if is_call else (known_digests or frozenset())
-        return (str(f), lineno, pos[2]) not in allowed_digests
-    if is_call:
-        return (str(f), lineno) not in (known_callables | known)
+        return (str(f), lineno, pos[2]) not in known_digests
     return (str(f), lineno) not in known
+
+
+def _class_defs(tree: ast.AST) -> list[tuple[str, ast.ClassDef]]:
+    """モジュール内の全クラス定義と、その qualname（`Outer.Inner`・`f.<locals>.Cls` の形）。"""
+    out: list[tuple[str, ast.ClassDef]] = []
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                q = prefix + child.name
+                out.append((q, child))
+                visit(child, q + ".")
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, prefix + child.name + ".<locals>.")
+            else:
+                visit(child, prefix)
+
+    visit(tree, "")
+    return out
+
+
+def _known_classes(root: Path, before: dict[str, str]) -> set[tuple[str, str]]:
+    """基準のファイルにあり、いまも残っているクラスの (絶対パス, qualname) の集合。"""
+    out: set[tuple[str, str]] = set()
+    for path, text in before.items():
+        if not path.endswith(".py"):
+            continue
+        now = _read_regular_text(root / path, root=root)
+        if now is None:
+            continue
+        try:
+            old = {q for q, _ in _class_defs(ast.parse(text))}
+            if not old:
+                continue
+            new = {q for q, _ in _class_defs(ast.parse(now))}
+        except SyntaxError:
+            continue
+        resolved = str((root / path).resolve())
+        out |= {(resolved, q) for q in (old & new)}
+    return out
+
+
+def _all_fn_defs(tree: ast.AST) -> list[tuple[str, ast.AST]]:
+    """モジュール内の全関数・メソッド・入れ子関数・lambda と、その qualname。"""
+    out: list[tuple[str, ast.AST]] = []
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                name = prefix + (getattr(child, "name", None) or "<lambda>")
+                out.append((name, child))
+                visit(child, name + ".<locals>.")
+            elif isinstance(child, ast.ClassDef):
+                visit(child, prefix + child.name + ".")
+            else:
+                visit(child, prefix)
+
+    visit(tree, "")
+    return out
 
 
 def _callable_class_defs(tree: ast.AST) -> list[tuple[str, ast.AST]]:
