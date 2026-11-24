@@ -183,3 +183,18 @@ held-out の P0 スモーク（Claude sonnet 素のベースライン、6 罠 ×
 | 指摘 | 対応 | テスト |
 |---|---|---|
 | #1(a) `_foreign_wrapper` 3 経路・#1(b) `co_flags`・#6 `_PureAddition` 3 点（ブロッキング） | `_foreign_wrapper` で `__code__` なし（`pos is None`）を拒否し、`_LIB_DIRS` 名除外を廃止。収集子プロセスが求めた stdlib/site-packages ルート配下に実在するファイル（`is_file()`）または基準の `known` のみ許可。`_COLLECT_SCRIPT` の `feed()` に `c.co_flags & 0x3FF` を追加。`_PureAddition` で `same()` の `ImportFrom` 拡張にも `_FIXTURE_NAMES` 別名禁止を適用し、モジュール直下の `FunctionDef`/`AsyncFunctionDef` に `self.shadow` チェックを追加、既存クラスへの追加時に同一ファイル内サブクラスの他基底クラス名（MRO）も `taken` に含める | `tests/test_review_r8.py`（偽パス exec・TMPDIR・partial・`__call__`・`.venv`/`__pycache__`/`site-packages` 名偽装・`CO_GENERATOR`/`CO_COROUTINE`・`ImportFrom` fixture 別名・モジュール直下 shadow・Mixin MRO・正当デコレータ非誤検出） |
+
+## PR 5 r9: Gemini 全体レビュー round 1（対象 3479e11）
+
+| 指摘 | 対応 | テスト | 残る穴・限界 |
+|---|---|---|---|
+| B1〜B6（ブロッキング全 6 件）・N2（正当デコレータ誤検出）・N4/N5 一部/N6 | B1: `lib_roots` 配下のラッパーも実体ファイルからコンパイルした `(co_firstlineno, digest)` 集合と照合（ファイル単位メモ化）、`__func__` アンラップを `types.MethodType` 限定に。N2: `functools._lru_cache_wrapper`（`gc.get_referents` で実体一致確認済みのみ）と基準の呼び出し可能クラス `__call__` を許可（`functools.partial`・新規クラス・`__wrapped__` 差し替え済み `lru_cache` は拒否）。B2: `_COLLECT_SCRIPT` 冒頭で他 import より前に `sys.path` から `""`/`"."`/`cwd` を除外（`PYTHONSAFEPATH=1` 併用）、`lib_roots` をホスト側で算出、収集処理・結果出力を関数クロージャ＋stdin 経由ランダムマーカー付き fd 出力に閉じて `__main__` に露出しない。B3: ホスト側 `cheatproof.py` の全読込を `lstat` + `S_ISREG` + `O_NOFOLLOW | O_NONBLOCK` + 親ディレクトリ symlink 検査の共通ヘルパー化し `tamper_check` に `lexists` を使用。B4: `.py` テストファイル末尾追記でも `_pure_addition` を通し、既存クラスへの非テストメンバー・fixture・予約フック・shadow を拒否（モジュール末尾の無害な無装飾補助関数・単純代入のみ許可）。B5: 判定役フォールバックの `inherit_env` を `ROUTE_VARS[family]` に絞り、非 `in_place` 判定も Linux + `bwrap` 利用可能時は `sandbox_cmd` で隔離（`README.md` に bwrap なし環境の限界を追記）。B6: `_judge_over_budget` をロック内で判定し月間予算は `billing == "api"` のみ適用。N4: `_USAGE_LINE_MAX` パッチで実超過分岐を検証。N5 一部・N6: `_budget_warnings`・`README.md`・`guide.html`・`reference.html` の矛盾修正、`log_overflow` の `sandbox` 記録、`env` 大文字小文字無視、`_link_chain` 親→子順と境界チェック、`WNOWAIT` 確認、`credentials.lend` の `0o600` 作成、`prereg.json` 破損→`SpecError`、`doctor` の `in_place` 期限表示 | `tests/test_review_r9.py`（B1〜B6・N2・N5/N6・正当デコレータ/staticmethod/classmethod/IsolatedAsyncioTestCase 非誤検出）、`tests/test_review_r7_drain.py` | B2 構造的限界: 同一 Python プロセス内で収集コードを実行するため、solver が `gc.get_objects()` / `sys._getframe()` / `sys.settrace` / `ctypes` 等で `_run()` クロージャのローカル変数（ランダムマーカーや `c.items`）を探索・改ざんする攻撃は原理的に完全には防げない。B5: `bwrap` のない OS（macOS/Windows や `sandbox: off`）では非 `in_place` Codex 判定の `-s read-only` にホストファイル読み取り限界が残る |
+
+### r9 で未対応・今後の課題（非ブロッキング）
+
+- **N1 (`leak_check` の `own_glob` / プレフィックス境界 / 2 段 `../`)**: `allowed` 置換の終端境界（`/..` 続行拒否・試行番号プレフィックス `1` vs `10` 境界）と `own_glob` の `trials/<task>/<profile>/<trial>` 部分の `*` および全セグメント `*` 禁止（macOS/Windows の主防御のため早めに対応推奨）。
+- **N3 (`_PureAddition` / `_baseline_test_positions` の継承・別名・新規クラス本体)**: 別名参照された基底クラス（`Alias = Base`）の `ancestors()` 追跡、継承メソッドと `TestCase` 孫クラスの `_baseline_test_positions` 収録、新規クラス本体での既存クラス・グローバル書き換え制限。
+- **N5 残り（ドキュメント・結果レポートの網羅更新）**:
+  - `docs/reference.html`: `command` グレーダーの `ro` キー、`--trust-judge-input`、`grader_isolation`、bwrap 可視範囲の現行仕様（`home/` と `workdir/` のみ）反映。
+  - `docs/guide.html`・`docs/design.html`: AWS 認証 Bedrock 限定、除外理由（`usage_limit`/`leak`）・失敗分類（`test_tamper`/`log_overflow`）、新規 6 モジュール構成図、`design.html` §6（sandbox 不採用記述）・§11（Windows 未検証記述）の現行実装・CI との整合。
+  - `docs/results/2026-11-19-sound-eval-defaults.md`・`tasks/todo.md`: 項目 `b` の `--no-llm` + `csv-summary-insight` 注記、テスト件数更新、過去チェックリストの整理。
