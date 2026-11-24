@@ -490,7 +490,7 @@ def lib_roots():
 trusted_roots = lib_roots()
 def feed(h, c):
     for part in (c.co_code, c.co_names, c.co_varnames, c.co_freevars, c.co_cellvars, c.co_argcount, c.co_posonlyargcount,
-                 c.co_kwonlyargcount, getattr(c, "co_exceptiontable", b"")):
+                 c.co_kwonlyargcount, c.co_flags & 0x3FF, getattr(c, "co_exceptiontable", b"")):
         h.update(repr(part).encode())
     for k in c.co_consts:
         if isinstance(k, types.CodeType):
