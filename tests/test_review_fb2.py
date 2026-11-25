@@ -30,8 +30,8 @@ def rec(**kw) -> TrialRecord:
 
 
 class SchemaAndPromptTests(unittest.TestCase):
-    def test_cache_schema_is_10(self):
-        self.assertEqual(CACHE_SCHEMA, "10")
+    def test_cache_schema_is_11(self):
+        self.assertEqual(CACHE_SCHEMA, "11")
 
     def test_convert_prompt_says_trial_record_is_a_path(self):
         self.assertIn("JSON ファイルへのパス", CONVERT_PROMPT)

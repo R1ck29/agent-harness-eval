@@ -13,9 +13,8 @@ leak が見つかった試行は INVALID（合格にも不合格にも数えな�
 from __future__ import annotations
 
 import ast
-import contextlib
+import builtins
 import difflib
-import functools
 import hashlib
 import json
 import logging
@@ -29,11 +28,9 @@ import subprocess
 import sys
 import sysconfig
 import types
-import unittest
-import unittest.mock
 from collections import Counter
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .isolation import grader_env, grader_isolation, grader_sandbox_cmd
 
@@ -839,13 +836,15 @@ def _run():
     cwd = os.getcwd()
     cwds = {cwd, os.path.realpath(cwd)}
     sys.path[:] = [p for p in sys.path if p not in cwds and os.path.realpath(p) not in cwds]
-    import ast, contextlib, functools, gc, hashlib, json, types, unittest.mock as _umock
+    import ast, contextlib, functools, gc, hashlib, json, pkgutil, re, types, unittest.case, unittest.mock as _umock
     import pytest
     from _pytest.assertion.rewrite import rewrite_asserts
     _loads, _dumps = json.loads, json.dumps
     _sha256, _write, _close = hashlib.sha256, os.write, os.close
     _CodeType, _MethodType = types.CodeType, types.MethodType
+    _FunctionType, _ModuleType, _Pattern = types.FunctionType, types.ModuleType, re.Pattern
     _partial = functools.partial
+    _EMPTY = object()
     _LRU_WRAPPER = getattr(functools, "_lru_cache_wrapper", None)
     _SYNC_CD = getattr(contextlib, "ContextDecorator", None)
     _ASYNC_CD = getattr(contextlib, "AsyncContextDecorator", None)
@@ -859,6 +858,106 @@ def _run():
     _PATCH_BAD_INST_ATTRS = ("decoration_helper", "__enter__", "__exit__", "start", "stop", "get_original", "copy")
     _PATCH_DICT_BAD_INST_ATTRS = ("_patch_dict", "_unpatch_dict", "__enter__", "__exit__", "start", "stop")
     _get_referents = gc.get_referents
+    # 安全な stdlib ラッパー（ContextDecorator・mock.patch・patch.dict・unittest.skip）の内側関数のコードオブジェクト。
+    # solver のコード（conftest・作業ツリーのモジュール）を読む前に採取するので、同一性（is）で本物と判定できる
+    def _dummy():
+        return None
+    async def _adummy():
+        return None
+    _sw_samples = [("skip", unittest.skip("")(_dummy))]
+    for _d in (_dummy, _adummy):
+        _sw_samples.append(("mp", _umock.patch("os.getcwd")(_d)))
+        _sw_samples.append(("mpd", _umock.patch.dict("os.environ", {})(_d)))
+    _sw_samples += [("cd", _t()(_dummy)) for _t in _CD_TYPES]
+    _SW_CODES = {id(f.__code__): (k, f.__code__) for k, f in _sw_samples}
+    # ラッパー実行基盤 5 モジュールの収集前スナップショット。収集中（conftest・app.py の import 時を含む）の改変を一律に検出する
+    def _cells(fn):
+        out = []
+        for cell in fn.__closure__ or ():
+            try:
+                out.append(cell.cell_contents)
+            except ValueError:
+                out.append(_EMPTY)
+        return out
+    def _fn_state(fn):
+        kw = fn.__kwdefaults__
+        flat = [fn.__code__, fn.__defaults__, kw]
+        for k, v in (kw or {}).items():
+            flat += [k, v]
+        flat.append(_EMPTY)
+        return flat + _cells(fn)
+    def _same(a, b):
+        return len(a) == len(b) and all(x is y for x, y in zip(a, b))
+    def _members(v):
+        if type(v) in (staticmethod, classmethod):
+            return (v.__func__,)
+        if type(v) is property:
+            return (v.fget, v.fset, v.fdel)
+        return (v,)
+    _snap_fns, _snap_mods, _snap_cls, _seen_cls = {}, [], [], set()
+    def _track(fn, label):
+        n = 0
+        while type(fn) is _FunctionType and id(fn) not in _snap_fns and n < 8:
+            _snap_fns[id(fn)] = (fn, label, _fn_state(fn))
+            fn = vars(fn).get("__wrapped__")
+            n += 1
+    for _name in ("contextlib", "unittest.mock", "unittest.case", "functools", "pkgutil"):
+        _mod = sys.modules[_name]
+        _vals = dict(vars(_mod))
+        _snap_mods.append((_name, _mod, _vals))
+        for _k, _v in _vals.items():
+            for _f in _members(_v):
+                _track(_f, _name + "." + _k)
+            if isinstance(_v, type) and getattr(_v, "__module__", None) == _name and id(_v) not in _seen_cls:
+                _seen_cls.add(id(_v))
+                # TestCase は maxDiff などの設定属性の変更を許し、関数の差し替えだけを見る
+                _strict = _v is not unittest.case.TestCase
+                _ents = {}
+                for _kk, _vv in vars(_v).items():
+                    if _kk.startswith("_abc_"):
+                        continue
+                    for _f in _members(_vv):
+                        _track(_f, _name + "." + _k + "." + _kk)
+                    if _strict or type(_vv) is _FunctionType:
+                        _ents[_kk] = _vv
+                _snap_cls.append((_v, _name + "." + _k, type(_v), _v.__bases__, _v.__name__, _v.__qualname__, _ents, _strict))
+    def _lazy_ok(v):
+        # 初期値 None の遅延キャッシュ（pkgutil._NAME_PATTERN・mock.file_spec / open_spec）は、無害な型の値になるのだけ許す
+        if v is None or type(v) in (str, _Pattern):
+            return True
+        return type(v) in (list, tuple, set, frozenset) and all(type(x) is str for x in v)
+    def _stdlib_diff():
+        bad = []
+        for name, mod, vals in _snap_mods:
+            if sys.modules.get(name) is not mod or type(mod) is not _ModuleType:
+                bad.append("sys.modules[" + name + "]")
+                continue
+            parent, _, child = name.rpartition(".")
+            if parent and getattr(sys.modules.get(parent), child, None) is not mod:
+                bad.append(name)
+            cur = vars(mod)
+            bad += [name + "." + k + " (added)" for k in cur if k not in vals and k != "__warningregistry__"]
+            for k, v in vals.items():
+                nv = cur.get(k, _EMPTY)
+                if nv is not v and not (v is None and _lazy_ok(nv)):
+                    bad.append(name + "." + k)
+        for cls, label, meta, bases, nm, qn, ents, strict in _snap_cls:
+            if type(cls) is not meta or not _same(cls.__bases__, bases) or cls.__name__ != nm or cls.__qualname__ != qn:
+                bad.append(label)
+                continue
+            cur = vars(cls)
+            bad += [label + "." + k for k, v in ents.items() if cur.get(k, _EMPTY) is not v]
+            if strict:
+                bad += [label + "." + k + " (added)" for k in cur if k not in ents and not k.startswith("_abc_")]
+        for fn, label, st in _snap_fns.values():
+            if not _same(_fn_state(fn), st):
+                bad.append(label + " (code/defaults/closure)")
+        return bad
+    def _stdlib_check():
+        try:
+            return _stdlib_diff()
+        except Exception as e:
+            return ["<snapshot check failed: " + type(e).__name__ + ">"]
     out_fd = os.dup(1)
     try:
         payload = _loads(sys.stdin.read())
@@ -877,6 +976,12 @@ def _run():
             h = _sha256()
             feed(h, c)
             return h.hexdigest()
+        _SW_DIGESTS = {digest(c) for _, c in _SW_CODES.values()}
+        def _sw_kind(c, dg):
+            hit = _SW_CODES.get(id(c))
+            if hit is not None and hit[1] is c:
+                return hit[0]
+            return "forged" if dg in _SW_DIGESTS else None
         def walk(c, prefix, acc):
             for k in c.co_consts:
                 if isinstance(k, _CodeType):
@@ -974,26 +1079,33 @@ def _run():
                     continue
                 if _CD_TYPES and isinstance(val, _CD_TYPES):
                     d = getattr(val, "__dict__", None)
-                    if isinstance(d, dict) and any(k in d for k in _CD_BAD_INST_ATTRS):
+                    cm_cls = type(val)
+                    # 素の ContextDecorator / AsyncContextDecorator は CM として働かないので拒否
+                    if (isinstance(d, dict) and any(k in d for k in _CD_BAD_INST_ATTRS)) or cm_cls in _CD_TYPES:
                         cds.append(["cm_bad"])
                         continue
-                    cm_cls = type(val)
-                    rec = _code_info(getattr(cm_cls, "_recreate_cm", None))
-                    need_sync = isinstance(_SYNC_CD, type) and isinstance(val, _SYNC_CD)
-                    need_async = isinstance(_ASYNC_CD, type) and isinstance(val, _ASYNC_CD)
-                    meths = []
-                    if need_sync:
-                        meths.append(_code_info(getattr(cm_cls, "__enter__", None)))
-                        meths.append(_code_info(getattr(cm_cls, "__exit__", None)))
-                    if need_async:
-                        meths.append(_code_info(getattr(cm_cls, "__aenter__", None)))
-                        meths.append(_code_info(getattr(cm_cls, "__aexit__", None)))
-                    if _GCM_TYPES and cm_cls in _GCM_TYPES:
-                        gcm_kind = "async" if (isinstance(_AGCM_TYPE, type) and cm_cls is _AGCM_TYPE) else "sync"
+                    if cm_cls in _GCM_TYPES:  # @contextmanager 由来: クラス自体はスナップショットで守る。中身の関数だけ照合
                         info = _code_info(getattr(val, "func", None))
-                        cds.append(["cm_fn", gcm_kind, info, rec, meths] if info else ["cm_bad"])
+                        cds.append(["cm_fn", info] if info else ["cm_bad"])
+                        continue
+                    need = ["_recreate_cm"]
+                    if isinstance(_SYNC_CD, type) and isinstance(val, _SYNC_CD):
+                        need += ["__enter__", "__exit__"]
+                    if isinstance(_ASYNC_CD, type) and isinstance(val, _ASYNC_CD):
+                        need += ["__aenter__", "__aexit__"]
+                    # 必須メソッドごとに MRO 上の定義元クラスを記録する（ホストが定義元単位でコードを照合する）
+                    owners = []
+                    for a in need:
+                        owner = next((b for b in cm_cls.__mro__ if a in vars(b)), None)
+                        if owner is None or (owner in _CD_TYPES and a != "_recreate_cm"):
+                            owners = None
+                            break
+                        owners.append([a, _cls_origin(owner), _code_info(vars(owner)[a])])
+                    if owners is None:
+                        cds.append(["cm_bad"])
                     else:
-                        cds.append(["cm_cls", _cls_origin(cm_cls), rec, meths, len(getattr(cm_cls, "__bases__", ()))])
+                        cds.append(["cm_cls", _cls_origin(cm_cls), owners,
+                                    [getattr(b, "__name__", None) for b in cm_cls.__bases__]])
                 elif isinstance(_PATCH_TYPE, type) and isinstance(val, _PATCH_TYPE):
                     has_patch = True
                     patch_objs.append(val)
@@ -1030,18 +1142,7 @@ def _run():
                             ok = False
                             break
                         stack.extend(add)
-                if ok:
-                    dh = getattr(_PATCH_TYPE, "decoration_helper", None)
-                    dh_w = getattr(dh, "__wrapped__", None)
-                    extra["mp"] = [
-                        "mp_ok",
-                        _code_info(getattr(_PATCH_TYPE, "__enter__", None)),
-                        _code_info(getattr(_PATCH_TYPE, "__exit__", None)),
-                        _code_info(dh),
-                        _code_info(dh_w) if dh_w is not None else None,
-                    ]
-                else:
-                    extra["mp"] = ["mp_bad"]
+                extra["mp"] = ["mp_ok"] if ok else ["mp_bad"]
             if pdict_objs:
                 ok = (
                     isinstance(_PATCH_DICT_TYPE, type)
@@ -1054,24 +1155,20 @@ def _run():
                             or any(k in pd for k in _PATCH_DICT_BAD_INST_ATTRS)):
                         ok = False
                         break
-                if ok:
-                    extra["mpd"] = [
-                        "mpd_ok",
-                        _code_info(getattr(_PATCH_DICT_TYPE, "_patch_dict", None)),
-                        _code_info(getattr(_PATCH_DICT_TYPE, "_unpatch_dict", None)),
-                    ]
-                else:
-                    extra["mpd"] = ["mpd_bad"]
+                extra["mpd"] = ["mpd_ok"] if ok else ["mpd_bad"]
             return extra or None
         def pos(f, allow_call=True):
             c = getattr(f, "__code__", None)
             if isinstance(c, _CodeType):
                 linked = _wraps_in_closure(f)
-                entry = [c.co_filename, c.co_firstlineno, digest(c), "fn" if linked else "fn_unlinked"]
-                if linked:
-                    extra = _extra_for_fn(f)
-                    if extra:
-                        entry.append(extra)
+                dg = digest(c)
+                entry = [c.co_filename, c.co_firstlineno, dg, "fn" if linked else "fn_unlinked"]
+                extra = (_extra_for_fn(f) if linked else None) or {}
+                sw = _sw_kind(c, dg)
+                if sw is not None:
+                    extra["sw"] = sw
+                if extra:
+                    entry.append(extra)
                 return entry
             if _LRU_WRAPPER is not None and type(f) is _LRU_WRAPPER:
                 w = getattr(f, "__wrapped__", None)
@@ -1104,8 +1201,10 @@ def _run():
         class Collect:
             def __init__(self):
                 self.items = []
+                self.tampered = []
             @pytest.hookimpl(trylast=True)
             def pytest_collection_modifyitems(self, items):
+                self.tampered += _stdlib_check()
                 for it in items:
                     fn = getattr(it, "obj", None)
                     cls = getattr(it, "cls", None)
@@ -1151,11 +1250,13 @@ def _run():
         c = Collect()
         sys.path.append(cwd)
         rc = pytest.main(["--collect-only", "-q", "-p", "no:cacheprovider", "--rootdir", ".", *files], plugins=[c])
+        tampered = sorted(set(c.tampered + _stdlib_check()))[:20]
         try:
             sys.stdout.flush()
         except Exception:
             pass
-        blob = ("\\n" + marker + "\\n" + _dumps({"rc": int(rc), "items": c.items}) + "\\n" + marker + "\\n").encode("utf-8")
+        result = {"rc": int(rc), "items": c.items, "stdlib_tampered": tampered}
+        blob = ("\\n" + marker + "\\n" + _dumps(result) + "\\n" + marker + "\\n").encode("utf-8")
         view = memoryview(blob)
         while view:
             n = _write(out_fd, view)
@@ -1383,6 +1484,12 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         log.warning("テスト収集による再束縛の確認ができませんでした: %s", e)
         return [], f"収集の子プロセスを動かせなかった: {type(e).__name__}: {str(e)[:200]}"
+    tampered = data.get("stdlib_tampered")
+    if not isinstance(tampered, list):
+        return [], "収集結果に標準ライブラリのスナップショット照合がない"
+    if tampered:  # ラッパー実行基盤（contextlib・unittest.mock など）が収集中に書き換えられた: どのテストも信用できない
+        what = ", ".join(str(x) for x in tampered[:5])
+        return [{"kind": "test_body_modified", "path": files[0], "line": f"stdlib mutated at collection: {what}"}], None
     if data.get("rc") not in (0, 5):
         log.warning("テスト収集が失敗したため、再束縛の確認をしません（rc=%s）", data.get("rc"))
         return [], f"pytest の収集が失敗した（rc={data.get('rc')}）"
@@ -1395,7 +1502,7 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
     known_classes = _known_classes(root, before)
     known_cm_classes = _known_cm_classes(root, before)
     lib_roots = _host_lib_roots()
-    lib_cache: dict[Path, set[tuple[int, str]]] = {}
+    lib_cache: dict[Path, set[tuple[str, int, str]]] = {}
     found: list[dict[str, str]] = []
     for node_id, line in expected.items():
         rel = node_id.split("::")[0]
@@ -1449,28 +1556,38 @@ def _code_digest(c: types.CodeType) -> str:
     return h.hexdigest()
 
 
-def _file_code_digests(path: Path, cache: dict[Path, set[tuple[int, str]]]) -> set[tuple[int, str]]:
-    """ライブラリファイルの実体をコンパイルして得られる (co_firstlineno, digest) の集合（ファイルごとにメモ化）。"""
+_CO_NEWLOCALS = 0x2
+
+
+def _file_code_digests(path: Path, cache: dict[Path, set[tuple[str, int, str]]]) -> set[tuple[str, int, str]]:
+    """ライブラリファイルの実体をコンパイルして得られる (qualname, co_firstlineno, digest) の集合（ファイルごとにメモ化）。
+    qualname はクラス本体なら `Cls.`、関数なら `fn.<locals>.` を前置して求める（3.10 には co_qualname がないため）。"""
     hit = cache.get(path)
     if hit is not None:
         return hit
-    digests: set[tuple[int, str]] = set()
+    digests: set[tuple[str, int, str]] = set()
     try:
         st = os.stat(path)
         if stat.S_ISREG(st.st_mode) and st.st_size <= _LIB_MAX_BYTES:
             data = path.read_bytes()
             mod = compile(data, str(path), "exec", dont_inherit=True, optimize=0)
-            stack = [mod]
+            stack: list[tuple[types.CodeType, str]] = [(mod, "")]
             while stack:
-                co = stack.pop()
-                digests.add((co.co_firstlineno, _code_digest(co)))
+                co, prefix = stack.pop()
                 for k in co.co_consts:
                     if isinstance(k, types.CodeType):
-                        stack.append(k)
+                        q = prefix + k.co_name
+                        digests.add((q, k.co_firstlineno, _code_digest(k)))
+                        stack.append((k, q + (".<locals>." if k.co_flags & _CO_NEWLOCALS else ".")))
     except (OSError, SyntaxError, ValueError):
         pass
     cache[path] = digests
     return digests
+
+
+def _file_has_code(path: Path, lineno: int, dg: str, cache: dict[Path, set[tuple[str, int, str]]]) -> bool:
+    """ライブラリファイルの実体に、その先頭行・ダイジェストのコードがあるか（qualname は問わない）。"""
+    return any(ln == lineno and d == dg for _, ln, d in _file_code_digests(path, cache))
 
 
 def _source_code_digests_by_line(path: str, text: str, *, include_pytest_rewrite: bool = False) -> dict[int, set[str]]:
@@ -1560,75 +1677,13 @@ def _known_wrapper_digests(root: Path, before: dict[str, str], *, callables: boo
     return out
 
 
-@functools.lru_cache(maxsize=1)
-def _stdlib_wrapper_sigs() -> dict[str, Any]:
-    """ホスト側のクリーンな標準ライブラリラッパー・コンテキストマネージャの (実パス, 先頭行, ダイジェスト) 署名。"""
-    def _dummy() -> None:
-        return None
-
-    async def _adummy() -> None:
-        return None
-
-    def sig(obj: Any) -> tuple[str, int, str] | None:
-        c = getattr(obj, "__code__", None)
-        if not isinstance(c, types.CodeType):
-            return None
-        try:
-            return (str(Path(c.co_filename).resolve()), c.co_firstlineno, _code_digest(c))
-        except OSError:
-            return None
-
-    gcm = getattr(contextlib, "_GeneratorContextManager", None)
-    agcm = getattr(contextlib, "_AsyncGeneratorContextManager", None)
-    patch_t = getattr(unittest.mock, "_patch", None)
-    pdict_t = getattr(unittest.mock, "_patch_dict", None)
-    dh = getattr(patch_t, "decoration_helper", None)
-    dh_w = getattr(dh, "__wrapped__", None)
-
-    return {
-        "cd_wrappers": {s for s in (
-            sig(contextlib.ContextDecorator()(_dummy)),
-            sig(contextlib.AsyncContextDecorator()(_adummy)),
-        ) if s is not None},
-        "patch_wrappers": {s for s in (
-            sig(unittest.mock.patch("os.getcwd")(_dummy)),
-            sig(unittest.mock.patch("os.getcwd")(_adummy)),
-        ) if s is not None},
-        "pdict_wrappers": {s for s in (
-            sig(unittest.mock.patch.dict("os.environ", {})(_dummy)),
-            sig(unittest.mock.patch.dict("os.environ", {})(_adummy)),
-        ) if s is not None},
-        "skip_wrapper": sig(unittest.skip("")(_dummy)),
-        "recreate_sigs": {s for s in (
-            sig(getattr(contextlib.ContextDecorator, "_recreate_cm", None)),
-            sig(getattr(contextlib.AsyncContextDecorator, "_recreate_cm", None)),
-            sig(getattr(gcm, "_recreate_cm", None)),
-            sig(getattr(agcm, "_recreate_cm", None)),
-        ) if s is not None},
-        "gcm_sigs": {
-            "sync": (
-                sig(getattr(gcm, "_recreate_cm", None)),
-                sig(getattr(gcm, "__enter__", None)),
-                sig(getattr(gcm, "__exit__", None)),
-            ),
-            "async": (
-                sig(getattr(agcm, "_recreate_cm", None)),
-                sig(getattr(agcm, "__aenter__", None)),
-                sig(getattr(agcm, "__aexit__", None)),
-            ),
-        },
-        "patch_meth_sigs": (
-            sig(getattr(patch_t, "__enter__", None)),
-            sig(getattr(patch_t, "__exit__", None)),
-            sig(dh),
-            sig(dh_w) if dh_w is not None else None,
-        ),
-        "pdict_meth_sigs": (
-            sig(getattr(pdict_t, "_patch_dict", None)),
-            sig(getattr(pdict_t, "_unpatch_dict", None)),
-        ),
-        "suppress_exit": sig(getattr(contextlib.suppress, "__exit__", None)),
-    }
+def _is_stdlib_file(path: str) -> bool:
+    """ホストの標準ライブラリ配下（site-packages 系は除く。site-packages が標準ライブラリの下にある配置も区別する）のファイルか。"""
+    paths = sysconfig.get_paths()
+    std = {Path(os.path.realpath(paths[k])) for k in ("stdlib", "platstdlib") if paths.get(k)}
+    site_roots = set(_host_lib_roots()) - std
+    p = Path(path)
+    return any(p.is_relative_to(r) for r in std) and not any(p.is_relative_to(r) for r in site_roots)
 
 
 def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], lib_roots: tuple[Path, ...] = (), *,
@@ -1637,12 +1692,13 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
                      known_callable_digests: set[tuple[str, int, str]] | None = None,
                      known_classes: set[tuple[str, str]] | None = None,
                      known_fn_digests: set[tuple[str, int, str]] | None = None,
-                     known_cm_classes: dict[tuple[str, str], int | None] | None = None,
+                     known_cm_classes: dict[tuple[str, str], tuple[int | None, list[str] | None]] | None = None,
                      allow_unittest_skip: bool = False,
-                     lib_cache: dict[Path, set[tuple[int, str]]] | None = None,
+                     lib_cache: dict[Path, set[tuple[str, int, str]]] | None = None,
                      require_lib_digest: bool = False) -> bool:
     """__wrapped__ をたどる途中の層が、正当なライブラリ（実体ソースをコンパイルしたダイジェストと一致するファイル・
-    クロージャ整合確認済み）でも正当な標準ライブラリ C ラッパー（functools._lru_cache_wrapper）でも
+    クロージャ整合確認済み）でも、収集前に採取した安全な stdlib ラッパー（同一性で判定。ContextDecorator・mock.patch・
+    patch.dict・unittest.skip）でも、正当な標準ライブラリ C ラッパー（functools._lru_cache_wrapper）でも
     基準のデコレータ（known / known_callables、クラス由来・基準ダイジェスト照合あり）でもないか。"""
     if not pos or len(pos) < 2 or not pos[0]:
         return True
@@ -1650,6 +1706,7 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
         return False
     tag = pos[3] if len(pos) >= 4 else None
     meta = pos[4] if len(pos) >= 5 and isinstance(pos[4], dict) else None
+    sw = meta.get("sw") if meta else None
     is_call = tag == "call"
     cache = lib_cache if lib_cache is not None else {}
     try:
@@ -1660,11 +1717,12 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
     except (OSError, TypeError, ValueError):
         return True
 
-    sigs = _stdlib_wrapper_sigs()
-    pos_sig = (str(f), lineno, pos[2]) if len(pos) >= 3 and isinstance(pos[2], str) else None
-
-    if tag == "fn_unlinked":
-        return not (allow_unittest_skip and pos_sig is not None and pos_sig == sigs["skip_wrapper"])
+    if sw == "forged":  # 安全な stdlib ラッパーと同じ中身の別コードオブジェクト（複製）
+        return True
+    if tag == "fn_unlinked" or sw == "skip":
+        return not (allow_unittest_skip and sw == "skip")
+    if sw is not None and sw not in meta:  # 本物のラッパーなのに、クロージャの CM / patch 実体を確認できない
+        return True
 
     def _info_sig(info: Any) -> tuple[str, int, str] | None:
         if not isinstance(info, list) or len(info) < 3 or not info[0] or not isinstance(info[2], str):
@@ -1682,7 +1740,7 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
         if s is None:
             return False
         cf = Path(s[0])
-        return cf.is_file() and any(cf.is_relative_to(r) for r in lib_roots) and (s[1], s[2]) in _file_code_digests(cf, cache)
+        return cf.is_file() and any(cf.is_relative_to(r) for r in lib_roots) and _file_has_code(cf, s[1], s[2], cache)
 
     def _known_fn_code_allowed(info: Any) -> bool:
         s = _info_sig(info)
@@ -1708,68 +1766,66 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
             return ("known", str(mf), qual)
         return None
 
-    if pos_sig in sigs["cd_wrappers"] and (not meta or "cd" not in meta):
-        return True
-    if pos_sig in sigs["patch_wrappers"] and (not meta or "mp" not in meta):
-        return True
-    if pos_sig in sigs["pdict_wrappers"] and (not meta or "mpd" not in meta):
-        return True
+    def owner_member_allowed(attr: Any, origin: Any, info: Any) -> bool:
+        """CM の必須メソッドを、MRO 上の定義元クラス単位で照合する。基準クラスなら基準のコード、ライブラリのクラスなら
+        そのクラス自身のファイル上の `クラス.メソッド` のコードと一致すること（別クラスのメソッドの付け替えを拒否）。"""
+        oinfo = cls_origin_info(origin)
+        if oinfo is None or not isinstance(attr, str):
+            return False
+        if oinfo[0] == "known":
+            return _known_fn_code_allowed(info)
+        s = _info_sig(info)
+        return (s is not None and s[0] == oinfo[1] and Path(s[0]).is_file()
+                and (f"{oinfo[2]}.{attr}", s[1], s[2]) in _file_code_digests(Path(s[0]), cache))
+
+    def cm_cls_allowed(item: list) -> bool:
+        cinfo = cls_origin_info(item[1])
+        owners, bases = item[2], item[3]
+        if cinfo is None or not isinstance(owners, list) or not owners or not isinstance(bases, list):
+            return False
+        kind, mf_str, qual = cinfo
+        if kind == "lib":
+            if _is_stdlib_file(mf_str):  # stdlib の CM クラスを直接使うのは @contextmanager（cm_fn）だけ
+                return False
+        else:
+            want = (known_cm_classes or {}).get((mf_str, qual))
+            if want is None:
+                return False
+            n_bases, names = want
+            if names is not None and bases != names:
+                return False
+            if names is None and n_bases is not None and len(bases) != n_bases:
+                return False
+        return all(isinstance(o, list) and len(o) == 3 and owner_member_allowed(*o) for o in owners)
 
     if meta and "cd" in meta:
         cds = meta["cd"]
         if not isinstance(cds, list) or not cds:
             return True
-        suppress_exit = sigs["suppress_exit"]
         for item in cds:
             if not isinstance(item, list) or not item:
                 return True
-            if item[0] == "cm_fn" and len(item) >= 5:
-                gcm_kind, fn_info, rec_info, meths = item[1], item[2], item[3], item[4]
-                expected_gcm = sigs["gcm_sigs"].get(gcm_kind)
-                if (expected_gcm is None or not isinstance(meths, list) or len(meths) != 2
-                        or (_info_sig(rec_info), _info_sig(meths[0]), _info_sig(meths[1])) != expected_gcm
-                        or not fn_code_allowed(fn_info)):
+            if item[0] == "cm_fn" and len(item) >= 2:
+                if not fn_code_allowed(item[1]):
                     return True
-            elif item[0] == "cm_cls" and len(item) >= 5:
-                cinfo = cls_origin_info(item[1])
-                rec_info, meths, n_bases = item[2], item[3], item[4]
-                if cinfo is None or rec_info is None or not isinstance(meths, list) or not meths:
+            elif item[0] == "cm_cls" and len(item) >= 4:
+                if not cm_cls_allowed(item):
                     return True
-                kind, mf_str, qual = cinfo
-                if any(m is None or (suppress_exit is not None and _info_sig(m) == suppress_exit) for m in meths):
-                    return True
-                if kind == "lib":
-                    if not _lib_fn_code_allowed(rec_info) or not all(_lib_fn_code_allowed(m) for m in meths):
-                        return True
-                else:
-                    if known_cm_classes is None or (mf_str, qual) not in known_cm_classes:
-                        return True
-                    want_bases = known_cm_classes[(mf_str, qual)]
-                    if want_bases is not None and n_bases != want_bases:
-                        return True
-                    rec_sig = _info_sig(rec_info)
-                    if not (_known_fn_code_allowed(rec_info) or (rec_sig is not None and rec_sig in sigs["recreate_sigs"])):
-                        return True
-                    if not all(fn_code_allowed(m) for m in meths):
-                        return True
             else:
                 return True
 
     if meta and "mp" in meta:
         mp = meta["mp"]
-        if not isinstance(mp, list) or len(mp) != 5 or mp[0] != "mp_ok":
-            return True
-        got_mp = (_info_sig(mp[1]), _info_sig(mp[2]), _info_sig(mp[3]), _info_sig(mp[4]) if mp[4] is not None else None)
-        if got_mp != sigs["patch_meth_sigs"] or any(x is None for x in got_mp[:3]):
+        if not isinstance(mp, list) or not mp or mp[0] != "mp_ok":
             return True
 
     if meta and "mpd" in meta:
         mpd = meta["mpd"]
-        if not isinstance(mpd, list) or len(mpd) != 3 or mpd[0] != "mpd_ok":
+        if not isinstance(mpd, list) or not mpd or mpd[0] != "mpd_ok":
             return True
-        got_mpd = (_info_sig(mpd[1]), _info_sig(mpd[2]))
-        if got_mpd != sigs["pdict_meth_sigs"] or any(x is None for x in got_mpd):
-            return True
+
+    if sw is not None:  # 同一性で確かめた安全な stdlib ラッパーで、中身（CM・patch）も検証済み
+        return False
 
     if is_call:
         if not meta or "cls" not in meta:
@@ -1789,12 +1845,11 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
         return not (known_callable_digests is not None and (str(f), lineno, pos[2]) in known_callable_digests)
 
     if is_file and any(f.is_relative_to(r) for r in lib_roots):
-        digests = _file_code_digests(f, cache)
         if len(pos) >= 3 and isinstance(pos[2], str):
-            return (lineno, pos[2]) not in digests
+            return not _file_has_code(f, lineno, pos[2], cache)
         if require_lib_digest:
             return True
-        return not any(ln == lineno for ln, _ in digests)
+        return not any(ln == lineno for _, ln, _ in _file_code_digests(f, cache))
     if known_digests is not None:
         if len(pos) < 3 or not isinstance(pos[2], str):
             return True
@@ -1842,9 +1897,44 @@ def _known_classes(root: Path, before: dict[str, str]) -> set[tuple[str, str]]:
     return out
 
 
-def _known_cm_classes(root: Path, before: dict[str, str]) -> dict[tuple[str, str], int | None]:
-    """基準のファイルで基底クラスを持ち、その基底リストが変わっていないクラスの (絶対パス, qualname) -> 期待 __bases__ 数（*展開ありなら None）。"""
-    out: dict[tuple[str, str], int | None] = {}
+def _base_name_resolver(tree: ast.Module) -> Callable[[ast.expr], str | None]:
+    """基底クラスの式から、実体の `__name__` になるはずの名前を求める関数。import の別名（`from contextlib import nullcontext as NC`）・
+    import したモジュールの属性（`contextlib.nullcontext`）・同じファイルのクラス・組み込みだけを解決し、それ以外（代入した別名・
+    呼び出し・添字など）は None（基底数の照合に戻す）。"""
+    modules: set[str] = set()
+    from_names: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                modules.add(a.asname or a.name.partition(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                if a.name != "*":
+                    from_names[a.asname or a.name] = a.name
+    classes = {n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
+    assigned = {q[0] for q in _python_bindings(tree.body, assignments=True) if len(q) == 1}
+
+    def resolve(b: ast.expr) -> str | None:
+        if isinstance(b, ast.Name):
+            if b.id in from_names:
+                return from_names[b.id]
+            if b.id in classes or (b.id not in assigned and b.id not in modules and hasattr(builtins, b.id)):
+                return b.id
+            return None
+        if isinstance(b, ast.Attribute):
+            rootn = b.value
+            while isinstance(rootn, ast.Attribute):
+                rootn = rootn.value
+            return b.attr if isinstance(rootn, ast.Name) and rootn.id in modules else None
+        return None
+
+    return resolve
+
+
+def _known_cm_classes(root: Path, before: dict[str, str]) -> dict[tuple[str, str], tuple[int | None, list[str] | None]]:
+    """基準のファイルで基底クラスを持ち、その基底リストが変わっていないクラスの (絶対パス, qualname) ->
+    (期待 __bases__ 数（*展開ありなら None）, 期待 __bases__ の名前の並び（解決できない基底があれば None）)。"""
+    out: dict[tuple[str, str], tuple[int | None, list[str] | None]] = {}
     for path, text in before.items():
         if not path.endswith(".py"):
             continue
@@ -1852,8 +1942,9 @@ def _known_cm_classes(root: Path, before: dict[str, str]) -> dict[tuple[str, str
         if now is None:
             continue
         try:
+            old_tree = ast.parse(text)
             old_map: dict[str, list[ast.expr]] = {}
-            for q, cls_node in _class_defs(ast.parse(text)):
+            for q, cls_node in _class_defs(old_tree):
                 if cls_node.bases:
                     old_map[q] = cls_node.bases
             if not old_map:
@@ -1861,6 +1952,7 @@ def _known_cm_classes(root: Path, before: dict[str, str]) -> dict[tuple[str, str
             new_defs = _class_defs(ast.parse(now))
         except SyntaxError:
             continue
+        resolve = _base_name_resolver(old_tree)  # 名前の解決は基準のファイルの import で行う（import の付け替えも拒否できる）
         resolved = str((root / path).resolve())
         for q, cls_node in new_defs:
             old_bases = old_map.get(q)
@@ -1871,7 +1963,9 @@ def _known_cm_classes(root: Path, before: dict[str, str]) -> dict[tuple[str, str
             ]:
                 continue
             has_star = any(isinstance(b, ast.Starred) for b in old_bases)
-            out[(resolved, q)] = None if has_star else len(old_bases)
+            names = [resolve(b) for b in old_bases]
+            out[(resolved, q)] = (None if has_star else len(old_bases),
+                                  None if has_star or None in names else [n for n in names if n is not None])
     return out
 
 
