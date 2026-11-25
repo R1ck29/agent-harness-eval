@@ -16,6 +16,7 @@ import ast
 import builtins
 import difflib
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -836,7 +837,7 @@ def _run():
     cwd = os.getcwd()
     cwds = {cwd, os.path.realpath(cwd)}
     sys.path[:] = [p for p in sys.path if p not in cwds and os.path.realpath(p) not in cwds]
-    import ast, contextlib, functools, gc, hashlib, json, pkgutil, re, types, unittest.case, unittest.mock as _umock
+    import ast, contextlib, functools, gc, hashlib, importlib, json, pkgutil, re, types, unittest.case, unittest.mock as _umock
     import pytest
     from _pytest.assertion.rewrite import rewrite_asserts
     _loads, _dumps = json.loads, json.dumps
@@ -855,8 +856,7 @@ def _run():
     _PATCH_TYPE = getattr(_umock, "_patch", None)
     _PATCH_DICT_TYPE = getattr(_umock, "_patch_dict", None)
     _CD_BAD_INST_ATTRS = ("_recreate_cm", "__enter__", "__exit__", "__aenter__", "__aexit__")
-    _PATCH_BAD_INST_ATTRS = ("decoration_helper", "__enter__", "__exit__", "start", "stop", "get_original", "copy")
-    _PATCH_DICT_BAD_INST_ATTRS = ("_patch_dict", "_unpatch_dict", "__enter__", "__exit__", "start", "stop")
+    _BuiltinFn, _HEAPTYPE = types.BuiltinFunctionType, 1 << 9
     _get_referents = gc.get_referents
     # 安全な stdlib ラッパー（ContextDecorator・mock.patch・patch.dict・unittest.skip）の内側関数のコードオブジェクト。
     # solver のコード（conftest・作業ツリーのモジュール）を読む前に採取するので、同一性（is）で本物と判定できる
@@ -870,6 +870,28 @@ def _run():
         _sw_samples.append(("mpd", _umock.patch.dict("os.environ", {})(_d)))
     _sw_samples += [("cd", _t()(_dummy)) for _t in _CD_TYPES]
     _SW_CODES = {id(f.__code__): (k, f.__code__) for k, f in _sw_samples}
+    # mock.patch / patch.dict のインスタンスが持ってよい属性と getter の形（Python のバージョン差は収集前の採取で吸収する）
+    _PATCH_KEYS = set(vars(_umock.patch("os.getcwd"))) | {"attribute_name"}
+    _PDICT_KEYS = set(vars(_umock.patch.dict("os.environ", {})))
+    _G_FUNCS, _G_CODES = [], {}
+    for _gk, _p in (("str", _umock.patch("os.getcwd")), ("obj", _umock.patch.object(os, "getcwd")),
+                    ("str", _umock.patch.multiple("os", getcwd=_umock.DEFAULT)),
+                    ("obj", _umock.patch.multiple(os, getcwd=_umock.DEFAULT))):
+        _g = _p.getter
+        if type(_g) is _partial:
+            _G_FUNCS.append(_g.func)
+        elif type(_g) is _FunctionType:
+            _G_CODES[id(_g.__code__)] = (_gk, _g.__code__, len(_g.__closure__ or ()))
+    # C 組み込みモジュールの型（io.StringIO など）。収集前の実体を同一性で覚え、組み込みモジュールへの偽物の差し込みを通さない
+    _BUILTIN_TYPES = {}
+    for _bn in sys.builtin_module_names:
+        try:
+            _bm = importlib.import_module(_bn)
+        except Exception:
+            continue
+        _BUILTIN_TYPES.update((id(v), v) for v in vars(_bm).values() if isinstance(v, type))
+    _BAD_PATCH_ATTRS = frozenset(("__code__", "__closure__", "__defaults__", "__kwdefaults__", "__globals__", "__dict__",
+                                  "__class__", "__bases__"))
     # ラッパー実行基盤 5 モジュールの収集前スナップショット。収集中（conftest・app.py の import 時を含む）の改変を一律に検出する
     def _cells(fn):
         out = []
@@ -1056,6 +1078,64 @@ def _run():
         def _code_info(obj):
             c = getattr(obj, "__code__", None) if obj is not None else None
             return [c.co_filename, c.co_firstlineno, digest(c)] if isinstance(c, _CodeType) else None
+        def _builtin_cls(t):
+            return isinstance(t, type) and (not (t.__flags__ & _HEAPTYPE) or _BUILTIN_TYPES.get(id(t)) is t)
+        def _origin(x, inst_ok):
+            # None は出自の照合が要らない値（None・真偽・数・文字列・モジュール・C の型）。そうでなければ、ホストが
+            # ライブラリ・基準のクラス／関数・組み込みモジュールの関数かを照合する記録
+            if x is None or type(x) in (bool, int, str) or type(x) is _ModuleType or _builtin_cls(x):
+                return None
+            if type(x) is _partial:
+                return _origin(x.func, False)
+            if isinstance(x, type):
+                return ["cls", _cls_origin(x)]
+            if type(x) is _FunctionType:
+                return ["fn", _code_info(x)]
+            if type(x) is _BuiltinFn:
+                s = getattr(x, "__self__", None)
+                if type(s) is _ModuleType:
+                    return ["cfn", getattr(s, "__name__", None), getattr(s, "__file__", None), getattr(x, "__name__", None)]
+                return ["bad"]
+            if inst_ok:
+                return None if _builtin_cls(type(x)) else ["cls", _cls_origin(type(x))]
+            return ["bad"]
+        def _spec_origin(x):
+            if type(x) in (list, tuple) and all(type(n) is str for n in x):
+                return None
+            return _origin(x, False)
+        def _patcher_ok(p, origins):
+            # 収集前に採取した許可キー集合・getter の形に収まり、実行時に呼ばれる値（getter の対象・new_callable・spec 類）の
+            # 出自を origins に足す。危険なダンダー属性へのパッチは拒否
+            pd = getattr(p, "__dict__", None)
+            if type(p) is not _PATCH_TYPE or type(pd) is not dict or not set(pd) <= _PATCH_KEYS or pd.get("is_started"):
+                return False
+            attr = pd.get("attribute")
+            if (type(attr) is not str or attr in _BAD_PATCH_ATTRS or type(pd.get("additional_patchers")) is not list
+                    or type(pd.get("kwargs")) is not dict):
+                return False
+            g = pd.get("getter")
+            if type(g) is _partial:
+                if (not any(g.func is fn for fn in _G_FUNCS) or type(g.args) is not tuple or len(g.args) != 1
+                        or type(g.args[0]) is not str or g.keywords or vars(g)):
+                    return False
+            elif type(g) is _FunctionType:
+                hit = _G_CODES.get(id(g.__code__))
+                cells = _cells(g)
+                if hit is None or hit[1] is not g.__code__ or len(cells) != hit[2] or g.__defaults__ or g.__kwdefaults__:
+                    return False
+                for tgt in cells:
+                    if hit[0] == "str":
+                        if type(tgt) is not str:
+                            return False
+                    elif (o := _origin(tgt, True)) is not None:
+                        origins.append(o)
+            else:
+                return False
+            for o in (_origin(pd.get("new_callable"), False), _spec_origin(pd.get("spec")),
+                      _spec_origin(pd.get("spec_set")), _spec_origin(pd.get("autospec"))):
+                if o is not None:
+                    origins.append(o)
+            return True
         def _extra_for_fn(f):
             cl = getattr(f, "__closure__", None)
             c = getattr(f, "__code__", None)
@@ -1125,6 +1205,7 @@ def _run():
                     and ("func" not in fvars or fvars["func"] is getattr(f, "__wrapped__", None))
                     and ("patched" not in fvars or fvars["patched"] is f)
                 )
+                origins = []
                 if ok:
                     stack = [*patchings, *patch_objs]
                     seen_p = set()
@@ -1133,29 +1214,28 @@ def _run():
                         if id(p) in seen_p:
                             continue
                         seen_p.add(id(p))
-                        pd = getattr(p, "__dict__", None)
-                        add = getattr(p, "additional_patchers", None)
-                        if (type(p) is not _PATCH_TYPE
-                                or not isinstance(pd, dict)
-                                or any(k in pd for k in _PATCH_BAD_INST_ATTRS)
-                                or type(add) is not list):
+                        if not _patcher_ok(p, origins):
                             ok = False
                             break
-                        stack.extend(add)
-                extra["mp"] = ["mp_ok"] if ok else ["mp_bad"]
+                        stack.extend(vars(p)["additional_patchers"])
+                extra["mp"] = ["mp_ok", origins] if ok else ["mp_bad"]
             if pdict_objs:
                 ok = (
                     isinstance(_PATCH_DICT_TYPE, type)
                     and ("f" not in fvars or fvars["f"] is getattr(f, "__wrapped__", None))
                 )
+                origins = []
                 for p in pdict_objs:
                     pd = getattr(p, "__dict__", None)
-                    if (type(p) is not _PATCH_DICT_TYPE
-                            or not isinstance(pd, dict)
-                            or any(k in pd for k in _PATCH_DICT_BAD_INST_ATTRS)):
+                    if (type(p) is not _PATCH_DICT_TYPE or type(pd) is not dict or not set(pd) <= _PDICT_KEYS
+                            or type(pd.get("values")) is not dict or type(pd.get("clear")) not in (bool, int)
+                            or pd.get("_original") is not None):
                         ok = False
                         break
-                extra["mpd"] = ["mpd_ok"] if ok else ["mpd_bad"]
+                    d = pd.get("in_dict")  # 文字列・素の dict 以外は、ライブラリ（os._Environ など）か基準のマッピング型だけ
+                    if type(d) not in (str, dict) and (o := _origin(d, True)) is not None:
+                        origins.append(o)
+                extra["mpd"] = ["mpd_ok", origins] if ok else ["mpd_bad"]
             return extra or None
         def pos(f, allow_call=True):
             c = getattr(f, "__code__", None)
@@ -1218,9 +1298,10 @@ def _run():
                                 if isinstance(raw, _MethodType) and raw.__self__ is not cls and raw.__self__ is not base:
                                     bad_self = True
                                 break
-                    chain, seen = [], set()
+                    chain, seen, layers = [], set(), []
                     try:
                         while not bad_self and fn is not None and id(fn) not in seen:
+                            layers.append(fn)
                             if isinstance(fn, _MethodType):
                                 owner = fn.__self__
                                 if not chain and cls is not None and (
@@ -1239,13 +1320,18 @@ def _run():
                             fn = fn.__wrapped__
                     except Exception:
                         pass
+                    try:  # unittest が実行時に見る __unittest_skip__（クラス・各層）。読めなければ付いているものとみなす
+                        skip_attr = any(bool(getattr(o, "__unittest_skip__", False))
+                                        for o in (cls, getattr(it, "obj", None), *layers, fn) if o is not None)
+                    except Exception:
+                        skip_attr = True
                     code = getattr(fn, "__code__", None) if fn is not None else None
                     nid = it.nodeid.split("[")[0]
                     path, _, rest = nid.partition("::")
                     want = baseline.get(path, {}).get(rest.replace("::", "."))
                     self.items.append({"id": nid, "file": code.co_filename if code else None,
                                        "line": code.co_firstlineno if code else None,
-                                       "chain": chain, "bad_self": bad_self,
+                                       "chain": chain, "bad_self": bad_self, "skip_attr": skip_attr,
                                        "code_changed": bool(want) and bool(code) and digest(code) not in want})
         c = Collect()
         sys.path.append(cwd)
@@ -1336,8 +1422,19 @@ def _unittest_skip_aliases(tree: ast.Module) -> tuple[set[str], set[str], dict[s
     return u_names, case_names, skip_map
 
 
+def _literal_bool(node: ast.AST | None) -> bool | None:
+    """リテラルで真偽が確定する条件（定数、または `not` を重ねた定数）の値。確定しなければ None。"""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        inner = _literal_bool(node.operand)
+        return None if inner is None else not inner
+    if isinstance(node, ast.Constant):
+        return bool(node.value)
+    return None
+
+
 def _is_unittest_skip_decorator(deco: ast.AST, u_names: set[str], case_names: set[str], skip_map: dict[str, str]) -> bool:
-    """`unittest.skip` / `skipIf` / `skipUnless` のデコレータか（リテラルで確実にスキップしない `skipIf(False, ...)` / `skipUnless(True, ...)` は除く）。"""
+    """必ずスキップする `unittest` のデコレータか（fail-closed）。無条件の `skip` と、リテラルで確定する `skipIf(True, ...)` /
+    `skipUnless(False, ...)` だけ。条件が実行環境で決まるもの（`skipIf(sys.platform == ..., ...)`）は含めない。"""
     base = deco.func if isinstance(deco, ast.Call) else deco
     kind: str | None = None
     if isinstance(base, ast.Name) and base.id in skip_map:
@@ -1350,14 +1447,12 @@ def _is_unittest_skip_decorator(deco: ast.AST, u_names: set[str], case_names: se
             kind = base.attr
     if kind is None:
         return False
-    if isinstance(deco, ast.Call):
-        cond_node = deco.args[0] if deco.args else next((kw.value for kw in deco.keywords if kw.arg == "condition"), None)
-        if isinstance(cond_node, ast.Constant):
-            if kind == "skipIf" and not cond_node.value:
-                return False
-            if kind == "skipUnless" and cond_node.value:
-                return False
-    return True
+    if kind == "skip":
+        return True
+    if not isinstance(deco, ast.Call):
+        return False
+    cond = _literal_bool(deco.args[0] if deco.args else next((kw.value for kw in deco.keywords if kw.arg == "condition"), None))
+    return cond is (kind == "skipIf")
 
 
 def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None = None,
@@ -1365,7 +1460,7 @@ def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None 
                              skipped: set[str] | None = None) -> dict[str, int]:
     """テストファイルが定義するテスト（pytest の node id の後半 → 定義の先頭行。デコレータがあればその行）。
     dumps を渡すと定義の AST 表現を、decorated を渡すと関数自身または所属クラスにラップし得るデコレータがあるテストの node id を、
-    skipped を渡すと基準 AST に @unittest.skip / skipIf / skipUnless を持つテストの node id を入れる。"""
+    skipped を渡すと基準 AST で必ずスキップする @unittest.skip 類（関数・所属クラス・同じファイルの基底クラス）を持つテストの node id を入れる。"""
     try:
         tree = ast.parse(text)
     except SyntaxError:
@@ -1392,6 +1487,15 @@ def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None 
         if skipped is not None and has_skip:
             skipped.add(key)
 
+    # クラスの skip は継承される（同じファイルの基底クラスまでたどる）
+    skipped_classes: set[str] = set()
+    class_nodes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
+    for _ in class_nodes:
+        for n in class_nodes:
+            if n.name not in skipped_classes and (has_unittest_skip(n.decorator_list) or any(
+                    isinstance(b, ast.Name) and b.id in skipped_classes for b in n.bases)):
+                skipped_classes.add(n.name)
+
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
             put(f"{path}::{node.name}", node, has_wrapping_deco(node.decorator_list), has_unittest_skip(node.decorator_list))
@@ -1403,7 +1507,7 @@ def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None 
                 if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name.startswith("test"):
                     put(f"{path}::{node.name}::{m.name}", m,
                         has_wrapping_deco((*node.decorator_list, *m.decorator_list)),
-                        has_unittest_skip(m.decorator_list))
+                        node.name in skipped_classes or has_unittest_skip(m.decorator_list))
     return out
 
 
@@ -1517,6 +1621,8 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
                           "line": f"rebound at collection: {name} -> {it['file']}:{it['line']} (baseline {rel}:{line})"})
         elif it.get("code_changed"):  # 位置は同じでも、__code__ の差し替え（CodeType.replace）で中身が基準のソースと違う
             found.append({"kind": "test_body_modified", "path": rel, "line": f"code replaced at collection: {name}"})
+        elif it.get("skip_attr") and node_id not in baseline_skipped:  # 基準で必ずスキップするテスト以外に unittest の skip が付いた
+            found.append({"kind": "test_body_modified", "path": rel, "line": f"unittest skip injected at collection: {name}"})
         elif it.get("chain") and node_id not in decorated:
             w = it["chain"][0]
             where = f"{w[0]}:{w[1]}" if w and len(w) >= 2 and w[0] else "<no __code__>"
@@ -1686,6 +1792,21 @@ def _is_stdlib_file(path: str) -> bool:
     return any(p.is_relative_to(r) for r in std) and not any(p.is_relative_to(r) for r in site_roots)
 
 
+def _host_builtin_attr(modname: Any, qual: Any, kind: type) -> bool:
+    """ホスト側で、C 組み込みモジュール（sys.builtin_module_names）にその名前の kind の実体があるか（ホストのクリーンなモジュールで確かめる）。"""
+    if not isinstance(modname, str) or modname not in sys.builtin_module_names or not isinstance(qual, str) or not qual:
+        return False
+    try:
+        obj: Any = importlib.import_module(modname)
+    except ImportError:
+        return False
+    for part in qual.split("."):
+        obj = getattr(obj, part, None)
+        if obj is None:
+            return False
+    return isinstance(obj, kind)
+
+
 def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], lib_roots: tuple[Path, ...] = (), *,
                      known_callables: set[tuple[str, int]] = frozenset(),
                      known_digests: set[tuple[str, int, str]] | None = None,
@@ -1814,15 +1935,31 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
             else:
                 return True
 
-    if meta and "mp" in meta:
-        mp = meta["mp"]
-        if not isinstance(mp, list) or not mp or mp[0] != "mp_ok":
-            return True
+    def origin_allowed(o: Any) -> bool:
+        """mock.patch / patch.dict が実行時に呼ぶ値（getter の対象・new_callable・spec 類・in_dict）の出自。
+        ライブラリ・基準のクラス／関数・組み込みモジュールのものだけ許す。"""
+        if not isinstance(o, list) or not o:
+            return False
+        if o[0] == "cls" and len(o) == 2:
+            return cls_origin_info(o[1]) is not None
+        if o[0] == "fn" and len(o) == 2:
+            return fn_code_allowed(o[1])
+        if o[0] == "cfn" and len(o) == 4:
+            if o[2] is None:
+                return _host_builtin_attr(o[1], o[3], types.BuiltinFunctionType)
+            try:
+                cf = Path(o[2]).resolve()
+            except (OSError, TypeError, ValueError):
+                return False
+            return cf.is_file() and any(cf.is_relative_to(r) for r in lib_roots)
+        return False
 
-    if meta and "mpd" in meta:
-        mpd = meta["mpd"]
-        if not isinstance(mpd, list) or not mpd or mpd[0] != "mpd_ok":
-            return True
+    for key, ok_tag in (("mp", "mp_ok"), ("mpd", "mpd_ok")):
+        if meta and key in meta:
+            got = meta[key]
+            if (not isinstance(got, list) or len(got) != 2 or got[0] != ok_tag or not isinstance(got[1], list)
+                    or not all(origin_allowed(o) for o in got[1])):
+                return True
 
     if sw is not None:  # 同一性で確かめた安全な stdlib ラッパーで、中身（CM・patch）も検証済み
         return False

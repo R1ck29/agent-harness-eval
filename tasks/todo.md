@@ -200,3 +200,23 @@ held-out の P0 スモーク（Claude sonnet 素のベースライン、6 罠 ×
   - `docs/reference.html`: `command` グレーダーの `ro` キー、`--trust-judge-input`、`grader_isolation`、bwrap 可視範囲の現行仕様（`home/` と `workdir/` のみ）反映。
   - `docs/guide.html`・`docs/design.html`: AWS 認証 Bedrock 限定、除外理由（`usage_limit`/`leak`）・失敗分類（`test_tamper`/`log_overflow`）、新規 6 モジュール構成図、`design.html` §6（sandbox 不採用記述）・§11（Windows 未検証記述）の現行実装・CI との整合。
   - `docs/results/2026-11-19-sound-eval-defaults.md`・`tasks/todo.md`: 項目 `b` の `--no-llm` + `csv-summary-insight` 注記、テスト件数更新、過去チェックリストの整理。
+
+## Issue #6: PR #5 で後回しにした cheat-proof #1–#3
+
+| 指摘 | 対応 | テスト |
+|---|---|---|
+| #1 `cm_cls` / `ContextDecorator` 差し替え（`ExitStack.__exit__` の付け替え・`AsyncExitStack`・基準 CD サブクラス） | 収集の子プロセスが、solver のコードを読む前にラッパー実行基盤 5 モジュール（`contextlib`・`unittest.mock`・`unittest.case`・`functools`・`pkgutil`）をスナップショットし、`pytest_collection_modifyitems`（trylast）と `pytest.main` 後に照合（モジュール dict・クラス dict と `__bases__`・関数の `__code__`/`__defaults__`/`__kwdefaults__`/`__closure__`・`sys.modules`）。不一致は `stdlib mutated at collection`。素の `ContextDecorator` / `AsyncContextDecorator` と stdlib の CM クラスは拒否（`@contextmanager` 由来だけ許可）。CD サブクラスは必須メソッドごとに MRO 上の定義元クラスで照合（基準クラスは基準のコード、ライブラリのクラスはそのクラス自身のファイル上の `クラス.メソッド`）。基準クラスの `__bases__` は import の別名を解決した名前の並びで照合 | `tests/test_review_i6.py` Exploit1〜3 |
+| #2a `mock.patch` / `patch.dict` の基盤改変（`app.py` での `ExitStack.__exit__`・`_GeneratorContextManager.__exit__`・`unittest.mock.contextlib`・`__code__` のインプレース差し替え） | 上のスナップショットで一括検出。安全な stdlib ラッパー（`ContextDecorator`・`mock.patch`・`patch.dict`・`unittest.skip`）は収集前に採取したコードオブジェクトの同一性で判定し、同じ中身の複製は拒否 | Exploit4・5 |
+| #2b `_patch` / `_patch_dict` の引数（`getter`・`new_callable` のコールバック、`patch.object(f, "__code__")`、悪性 `in_dict`） | インスタンス属性は収集前に採取した許可キー集合に限る。`getter` は採取した形（3.11+ の `partial(pkgutil.resolve_name, str)`・3.10 の lambda・`patch.object` / `patch.multiple` の lambda）だけ。`patch.object` の対象・`new_callable`・`spec`/`spec_set`/`autospec`・`in_dict` はライブラリ・基準のクラス／関数・C 組み込みモジュールのものだけ（ホストで照合）。危険なダンダー属性（`__code__` など 8 個）へのパッチは拒否 | Exploit6・7 |
+| #3 非リテラル `skipIf` / `skipUnless` 付きテストへの動的 `unittest.skip`、`__unittest_skip__` の直接付与 | 基準の `baseline_skipped` を、無条件 `@unittest.skip` とリテラルで確定する `skipIf(True)` / `skipUnless(False)` だけに絞った（fail-closed。クラスのデコレータと同じファイルの基底クラスの skip も含む）。収集時にクラス・各層の `__unittest_skip__` を記録し、基準で必ずスキップするテスト以外に付いていれば `unittest skip injected at collection` | Exploit8・9 |
+
+- 削ったもの: `_stdlib_wrapper_sigs`（`suppress.__exit__` 拒否・`gcm_sigs`・`patch_meth_sigs`・`pdict_meth_sigs`・`recreate_sigs`・ホスト側のラッパー署名再計算）、`_PATCH_BAD_INST_ATTRS` / `_PATCH_DICT_BAD_INST_ATTRS`、`cm_cls` の lib 無条件許可。
+- `CACHE_SCHEMA` を 11 に上げた（動的チェックの検出範囲が広がったため）。既存テストの変更は `tests/test_review_fb2.py` の CACHE_SCHEMA の値の確認だけ。
+- 設計書からの上乗せ・変更: `TestCase` は丸ごと除外せず、関数の属性の差し替え・中身の書き換えだけ見る（`maxDiff` などの設定は許す）。初期値 None の遅延キャッシュは、無害な型（`str`・`re.Pattern`・文字列のコンテナ）になるのだけ許す。モジュールに足されるキーは `__warningregistry__` だけ許す。`spec` 類はクラスに加えてライブラリ・基準の関数も許す。C 組み込みモジュールのクラス（`io.StringIO` など）は収集前に実体を同一性で覚えたものだけ許す（組み込みモジュールへの偽物の差し込みは通さない）。子の結果に照合結果がなければ「確認できなかった」扱い。
+- 残る穴・限界（今回スコープ外）:
+  - 採点環境で実際にスキップされる非リテラル `@unittest.skipIf` / `skipUnless`（例: Windows で `skipIf(os.name == "nt", ...)`）は改ざん扱いになる。評価用テストの環境依存スキップは `@pytest.mark.skipif(...)` を使うか、`allow_test_changes: true` で外す。実運用で誤検出が出たら基準ソース単体評価などの自動救済を検討する。
+  - 5 モジュール以外の stdlib（`os`・`sys`・`logging` など）の import 時改変、5 モジュール内の可変コンテナ（`unittest.mock` の内部 dict など）の中身の書き換えは見ない。
+  - `mock.patch` の `new` 値・`kwargs`、`patch.dict` に渡す素の `dict` の中身、文字列ターゲット（`patch("pkg.mod.attr")`）の文字列そのものの差し替えやモジュールの `__getattr__` は深追いしない。
+  - `new_callable` はライブラリの関数・クラスなら許すので、`kwargs` や `functools.partial` の引数を書き換えてライブラリ関数（`runpy.run_path` など）を実行時に呼ばせる経路は残る（`pytest_runtest_call` などの実行時フックと同じく収集時検証の限界）。
+  - 基準クラスの基底の照合は `__name__` の一致で、同名の別クラスへの差し替えは MRO 上の定義元の照合に任せる。別ファイルの基底クラスの skip の継承は baseline に含めない（実行時に付くと改ざん扱い）。
+  - 既記の構造的限界（収集後に動く `test_0`、`pytest_pyfunc_call` フック、同一プロセス内の `gc.get_objects()`、非テスト `.py` の基準 `@wraps` デコレータ本体の編集、実行時だけの改ざん）と、r9 の未対応（`leak_check` N1・N3・ドキュメント更新）はそのまま。
