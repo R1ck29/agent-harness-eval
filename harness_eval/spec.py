@@ -7,8 +7,9 @@ from __future__ import annotations
 import glob
 import hashlib
 import json
-import sys
 import re
+import shlex
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,7 @@ GRADER_FIELDS: dict[str, set[str]] = {
     "hook_used": {"hook", "outcome", "min", "max"},
 }
 HOOK_OUTCOMES = {"success", "error"}  # Claude Code 2.1.306 の hook_response で確認できた値
-GRADER_COMMON = {"type", "weight", "negate", "category", "description"}
+GRADER_COMMON = {"type", "weight", "negate", "category", "description", "report_only"}
 PROCESS_GRADERS = {"tool_used", "skill_used", "subagent_used", "hook_used"}
 REQUIRED: dict[str, set[str]] = {
     "file_exists": {"path"},
@@ -61,20 +62,21 @@ DEFAULT_CATEGORY = {
 
 TASK_KEYS = {"id", "description", "targets", "tags", "fixture", "prompt", "limits",
              "allow_tools", "deny_tools", "graders", "paired_negative", "split", "family", "calibration",
-             "allow_test_changes", "canaries", "leak_patterns"}
+             "allow_test_changes", "canaries", "leak_patterns", "coverage", "preflight"}
 # 判定役の校正: 決定的な採点器（command など）の合否と同じことを LLM 判定にも問い、一致率を測る（criteria は必須）
 CALIBRATION_KEYS = {"criteria", "focus", "max_chars", "graders"}  # graders: 対応する決定的な採点器の番号（既定: llm 以外すべて）
 # 自己改善ループ用のタスクの分割。train: 改善案を作る材料／dev: 候補の足切り／holdout: 昇格判定だけに使う（改善役に見せない）
 SPLITS = ("train", "dev", "holdout")
 NO_SPLIT = "none"  # run --split none: 分割を付けていないタスク
 # 結果に影響しないので、タスクのハッシュ（キャッシュ・前回との比較）に含めないキー
-TASK_HASH_EXCLUDED = ("description", "tags", "paired_negative", "split", "family")
+TASK_HASH_EXCLUDED = ("description", "tags", "paired_negative", "split", "family", "coverage", "preflight")
 MIN_HOLDOUT_TASKS = 20  # これ未満の holdout では promote の区間・検定がほぼ判定不能になる
 LIMIT_KEYS = {"max_turns", "timeout_s", "max_budget_usd"}
 PROFILE_KEYS = {"id", "description", "agent", "model", "executable", "isolate_home",
                 "install", "env", "env_unset", "extra_args", "permission_mode",
                 "codex_sandbox", "pricing", "hash_paths", "copy_credentials", "credentials",
-                "isolation_settings", "billing", "inherit_env", "sandbox", "sandbox_ro"}
+                "isolation_settings", "billing", "inherit_env", "sandbox", "sandbox_ro",
+                "preflight", "components"}
 CREDENTIAL_MODES = ("in_place",)  # 判定役（--judge-profile）専用。解く側のプロファイルに書くと Runner が止める
 SANDBOXES = ("bwrap", "off")  # bwrap: Linux で試行を隔離する（既定）／ off: 隔離しない（結果に記録し、verdict が警告する）
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -115,6 +117,7 @@ class Grader:
     negate: bool = False
     category: str = ""
     description: str = ""
+    report_only: bool = False
 
     @property
     def kind(self) -> str:
@@ -158,6 +161,8 @@ class Task:
     allow_test_changes: bool = False  # true: 見えているテストの削除・skip を改ざんとして数えない（テストを直すこと自体が課題のとき）
     canaries: list[str] = field(default_factory=list)  # 参照解・採点に埋めた文字列。トランスクリプトに出たら INVALID
     leak_patterns: list[str] = field(default_factory=list)  # ツールの入力がこれに当たったら INVALID（正規表現）
+    coverage: list[str] = field(default_factory=list)  # このタスクが見るハーネス部品（プロファイルの components と対応）
+    preflight: list[list[str]] = field(default_factory=list)  # 試行の前にホストで走る確認コマンド
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -166,7 +171,7 @@ class Task:
 
     def content_hash(self) -> str:
         """タスク定義 + フィクスチャ + 採点スクリプトの中身から計算するハッシュ（キャッシュ判定用。1 実行内では 1 回だけ計算）。
-        結果に影響しない説明・タグ・paired_negative・split・family は含めない（書き換えても再実行しない。
+        結果に影響しない説明・タグ・paired_negative・split・family・coverage・preflight は含めない（書き換えても再実行しない。
         分割を付け替えても前回の結果と比べられる）。"""
         if "_hash" in self.__dict__:
             return self.__dict__["_hash"]
@@ -209,6 +214,8 @@ class Profile:
     sandbox: str = "bwrap"  # SANDBOXES
     sandbox_ro: list[str] = field(default_factory=list)  # 隔離の中に読み取り専用で見せる追加のパス（leak 検査でも許可）
     isolation_settings: bool = True
+    preflight: list[list[str]] = field(default_factory=list)  # 試行の前にホストで走る確認コマンド
+    components: list[str] = field(default_factory=list)  # このプロファイルが入れるハーネス部品（タスクの coverage と対応）
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -217,13 +224,13 @@ class Profile:
 
     def content_hash(self) -> str:
         """プロファイル定義 + コピー元ファイル + hash_paths の中身から計算するハッシュ（1 実行内では 1 回だけ計算）。
-        billing（課金の数え方）と説明は結果に影響しないので含めない。id は含める（キャッシュをプロファイルごとに分ける）。"""
-        return self._hash_of("_hash", ("billing", "description"))
+        billing（課金の数え方）と説明・components・preflight は結果に影響しないので含めない。id は含める（キャッシュをプロファイルごとに分ける）。"""
+        return self._hash_of("_hash", ("billing", "description", "components", "preflight"))
 
     def harness_hash(self) -> str:
         """配布物としての同一性（content_hash から id も除く）。同じ配布物を別の id で評価しても同じ値になり、
         holdout 利用台帳で「評価済みの候補」を数えるときと、promote が候補と現行の同一を見分けるときに使う。"""
-        return self._hash_of("_harness_hash", ("billing", "description", "id"))
+        return self._hash_of("_harness_hash", ("billing", "description", "id", "components", "preflight"))
 
     def _hash_of(self, slot: str, excluded: tuple[str, ...]) -> str:
         if slot in self.__dict__:
@@ -277,6 +284,33 @@ def _str_list(path: Path, name: str, v: Any) -> list[str]:
     return v
 
 
+def _preflight(path: Path, v: Any) -> list[list[str]]:
+    """preflight: コマンドのリスト。各要素はコマンド文字列か引数のリスト。パイプは書かない（shell は使わない）。
+    平面の文字列リストで、2 要素目以降がフラグ（- で始まる）なら、1 つのコマンドの引数列として扱う。"""
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        raise SpecError(f"{path}: preflight はコマンドのリストです")
+    if (v and all(isinstance(x, str) for x in v) and len(v) >= 2
+            and all(" " not in x for x in v) and any(x.startswith("-") for x in v[1:])):
+        return [v]
+    out: list[list[str]] = []
+    for i, item in enumerate(v):
+        if isinstance(item, str):
+            try:
+                argv = shlex.split(item)
+            except ValueError as e:
+                raise SpecError(f"{path}: preflight[{i}] の引用符が閉じていません: {e}") from e
+        elif isinstance(item, list) and item and all(isinstance(x, (str, int, float)) for x in item):
+            argv = [str(x) for x in item]
+        else:
+            raise SpecError(f"{path}: preflight[{i}] はコマンド文字列か引数のリストです")
+        if not argv:
+            raise SpecError(f"{path}: preflight[{i}] が空です")
+        out.append(argv)
+    return out
+
+
 def parse_grader(path: Path, i: int, g: Any) -> Grader:
     if not isinstance(g, dict) or "type" not in g:
         raise SpecError(f"{path}: graders[{i}] に type がありません")
@@ -300,13 +334,14 @@ def parse_grader(path: Path, i: int, g: Any) -> Grader:
         raise SpecError(f"{path}: graders[{i}] の min が max より大きい")
     if "outcome" in g and g["outcome"] not in HOOK_OUTCOMES:
         raise SpecError(f"{path}: graders[{i}] の outcome は {sorted(HOOK_OUTCOMES)} のどれか（実測で確認できた値）")
-    w = g.get("weight", 1)
-    if not isinstance(w, (int, float)) or w <= 0:
-        raise SpecError(f"{path}: graders[{i}] の weight は正の数")
+    report_only = bool(g.get("report_only", False))
+    w = g.get("weight", 0 if report_only else 1)
+    if not isinstance(w, (int, float)) or isinstance(w, bool) or w < 0:
+        raise SpecError(f"{path}: graders[{i}] の weight は 0 以上の数")
     params = {k: v for k, v in g.items() if k not in GRADER_COMMON}
     return Grader(type=t, params=params, weight=float(w), negate=bool(g.get("negate", False)),
                   category=str(g.get("category") or DEFAULT_CATEGORY[t]),
-                  description=str(g.get("description", "")))
+                  description=str(g.get("description", "")), report_only=report_only)
 
 
 def load_task(path: Path) -> Task:
@@ -356,7 +391,9 @@ def load_task(path: Path) -> Task:
         graders=[parse_grader(path, i, g) for i, g in enumerate(graders)],
         paired_negative=d.get("paired_negative"), split=split, family=family, calibration=calibration,
         allow_test_changes=bool(d.get("allow_test_changes", False)), canaries=_str_list(path, "canaries", d.get("canaries")),
-        leak_patterns=_patterns(path, d.get("leak_patterns")), raw=d,
+        leak_patterns=_patterns(path, d.get("leak_patterns")),
+        coverage=_str_list(path, "coverage", d.get("coverage")),
+        preflight=_preflight(path, d.get("preflight")), raw=d,
     )
 
 
@@ -433,7 +470,9 @@ def load_profile(path: Path) -> Profile:
         hash_paths=_str_list(path, "hash_paths", d.get("hash_paths")),
         copy_credentials=bool(d.get("copy_credentials", False)), credentials=cred,
         isolation_settings=bool(d.get("isolation_settings", True)), billing=billing, inherit_env=inherit,
-        sandbox=sbx, sandbox_ro=_str_list(path, "sandbox_ro", d.get("sandbox_ro")), raw=d,
+        sandbox=sbx, sandbox_ro=_str_list(path, "sandbox_ro", d.get("sandbox_ro")),
+        preflight=_preflight(path, d.get("preflight")),
+        components=_str_list(path, "components", d.get("components")), raw=d,
     )
 
 
@@ -506,6 +545,13 @@ def lint(tasks: list[Task], profiles: list[Profile]) -> list[str]:
             warns.append(f"{t.id}: Codex は hooks の実行を記録しないため、Codex の試行では hook_used を判定しません（not_run）")
         if "claude_code" in t.targets and "claude_code" in agents and not t.allow_tools:
             warns.append(f"{t.id}: allow_tools が空です。-p モードでは承認が必要なツール（Write/Edit/Bash 等）は拒否されます")
+    warns += _coverage_warnings(tasks, profiles)
+    for p in profiles:
+        if p.preflight:
+            warns.append(f"{p.id}: preflight はホストで隔離なしに実行されます。自分たちで確認したコマンドだけを書いてください")
+    for t in tasks:
+        if t.preflight:
+            warns.append(f"{t.id}: preflight はホストで隔離なしに実行されます。自分たちで確認したコマンドだけを書いてください")
     warns += _split_warnings(tasks)
     if not any(not p.install for p in profiles):
         warns.append("ハーネスなし（install が空）のベースラインプロファイルがありません。Δ の比較対象になります")
@@ -515,6 +561,17 @@ def lint(tasks: list[Task], profiles: list[Profile]) -> list[str]:
             warns.append(f"{p.id}: 実行される部品 {parts} を含みます。利用者の権限で動き、sandbox はないため、"
                          "自分たちでレビュー済みの配布物だけを評価してください")
     return warns
+
+
+def _coverage_warnings(tasks: list[Task], profiles: list[Profile]) -> list[str]:
+    """プロファイルが掲げた部品を、どのタスクの coverage も見ていないときの警告。"""
+    installed = {c for p in profiles for c in p.components}
+    if not installed:
+        return []
+    covered = {c for t in tasks for c in t.coverage}
+    return [f"コンポーネント '{c}' を対象にするタスクがありません（プロファイルの components。"
+            "タスクに coverage を付けるか、使わない部品なら components から外してください）"
+            for c in sorted(installed - covered)]
 
 
 def _split_warnings(tasks: list[Task]) -> list[str]:

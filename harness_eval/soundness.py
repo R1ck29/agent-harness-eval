@@ -35,6 +35,7 @@ from typing import Any
 
 from .judging import TIER_VOTES, model_strength, other_family, strength_ok
 from .metrics import sign_test
+from .graders import blocks_score
 from .record import EXCLUDED_ERRORS, TrialRecord
 from .spec import SpecError
 
@@ -128,14 +129,16 @@ def outcome(r: TrialRecord) -> bool | None:
     判定役の不一致（judge_disagreement）がある試行は、記録の合否にかかわらず合格として数えない。"""
     if r.cmp_passed is None and not r.cmp_legacy:
         return None
-    if any(g.get("type") == "llm" and g.get("status") == "judge_disagreement" for g in r.grader_results or []):
+    if any(g.get("type") == "llm" and g.get("status") == "judge_disagreement" and blocks_score(g)
+           for g in r.grader_results or []):
         return False
     return bool(r.passed if r.cmp_passed is None else r.cmp_passed)
 
 
 def llm_decided(r: TrialRecord) -> bool:
     """LLM 判定が実行され、合否に効いた試行か（コード判定が全合格の試行だけで LLM 判定を走らせるので、走れば決定的）。"""
-    return any(g.get("type") == "llm" and g.get("status") in JUDGED for g in r.grader_results or [])
+    return any(g.get("type") == "llm" and g.get("status") in JUDGED and blocks_score(g)
+               for g in r.grader_results or [])
 
 
 def cluster_bootstrap(pairs: list[tuple[list[bool], list[bool]]], confidence: float, resamples: int,
@@ -345,7 +348,8 @@ def verdict(records: list[TrialRecord], summary: dict[str, Any], rules: Rules,
 
     # 1c. 必須の LLM 判定が未実施（--no-llm）の試行。未実施の条件で勝敗が変わり得るので採用に使わない
     skipped = [r for r in recs if invalid_reason(r) is None
-               and any(g.get("type") == "llm" and g.get("status") == "not_run" for g in r.grader_results or [])]
+               and any(g.get("type") == "llm" and g.get("status") == "not_run" and blocks_score(g)
+                       for g in r.grader_results or [])]
     if skipped:
         inconclusive.append(f"必須の LLM 判定が未実施（--no-llm）の試行が {len(skipped)} 件あります。判定を実行していない条件で"
                             "合否が変わり得るため、結論を出しません（--no-llm はスモーク確認用です）")
@@ -369,7 +373,8 @@ def verdict(records: list[TrialRecord], summary: dict[str, Any], rules: Rules,
         inconclusive.append("比べられるタスクがありません")
         checks.append(_c("baseline_range", "fail", "ベースラインの合格率を計算できません"))
     elif base_rate > rules.ceiling:
-        inconclusive.append(f"ベースラインの合格率 {base_rate:.0%} が天井（{rules.ceiling:.0%} 超）です。タスクが易しすぎて改善を測れません")
+        inconclusive.append(f"ベースラインの合格率 {base_rate:.0%} が天井（{rules.ceiling:.0%} 超）です。タスクが易しすぎて改善を測れません。"
+                            "採点を厳しくする・曖昧さを減らす・普段の仕事に近い依頼を足すか、事前に登録した天井を上げてください")
         checks.append(_c("baseline_range", "fail", inconclusive[-1]))
     elif base_rate < rules.floor:
         inconclusive.append(f"ベースラインの合格率 {base_rate:.0%} が床（{rules.floor:.0%} 未満）です。タスクが難しすぎて差を測れません")

@@ -385,7 +385,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 </table>
 <p>妥当性チェック（既定で有効。掛かれば INCONCLUSIVE で、結論より優先）:</p>
 <ul>
-<li>ベースラインの合格率が 20%〜80% の外（<code>floor</code>・<code>ceiling</code>）</li>
+<li>ベースラインの合格率が 20%〜80% の外（<code>floor</code>・<code>ceiling</code>）。天井を超えたら、採点を厳しくする・普段の仕事に近い依頼を足すか、事前に登録した天井を上げる</li>
 <li>エラーで結果が出なかった試行（<code>usage_limit</code>・<code>rate_limit</code>・<code>auth</code>・<code>agent_error</code> など）が 20% を超える。利用上限のメッセージは、旧版が <code>agent_error</code> と記録した結果からも見つける</li>
 <li>比べたタスクが 5 件未満、または 1 タスク・1 条件あたりの有効な試行が 2 回未満（10 件未満は警告）</li>
 <li>片側にしか値がないタスクがある</li>
@@ -485,7 +485,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 </table>
 
 <h2 id="harvest">9. 実際の依頼からタスクを作る（harvest）</h2>
-<p>評価は、ユーザーが実際に頼む仕事で行うのがいちばん確かです。<code>harvest</code> は自分のセッション履歴から実際の依頼を集め、同じ種類・同じ難しさのまま、名前・数値・データをすべて架空に置き換えたタスクの下書きを作ります。元の依頼をそのまま実行したり、本物のデータや環境に触れたりはしません。</p>
+<p>評価は、ユーザーが実際に頼む仕事で行うのがいちばん確かです。<code>harvest</code> は自分のセッション履歴から実際の依頼を集め、同じ種類・同じ難しさのまま、名前・数値・データをすべて架空に置き換えたタスクの下書きを作ります。収穫したタスクは、普段の仕事でハーネスが壊れないこと（無回帰）を測るためのものです。元の依頼をそのまま実行したり、本物のデータや環境に触れたりはしません。</p>
 <figure>
 <div class="scroll"><svg viewBox="0 0 960 260" role="img" aria-label="セッション履歴から人が打った依頼を取り出し、架空化して書き換え、自動検査を通った下書きだけを書き出す。元の依頼文はメモリ上だけで扱う。履歴がなければ同梱の標準タスクを使う">
 <defs><marker id="mh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" class="head"/></marker></defs>
@@ -505,7 +505,7 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <line x1="560" y1="96" x2="560" y2="138" class="ln" marker-end="url(#mh)"/>
 <rect x="405" y="140" width="310" height="66" rx="6" class="box"/>
 <text x="560" y="160" text-anchor="middle" class="t-sm">元の名前・数値・文が残る → 作り直し 1 回／見送り</text>
-<text x="560" y="178" text-anchor="middle" class="t-sm">採点が成立しない → 見送り（スクリプトは実行しない）</text>
+<text x="560" y="178" text-anchor="middle" class="t-sm">採点が成立しない → 見送り（selftest で実行）</text>
 <text x="560" y="196" text-anchor="middle" class="t-sm">依頼で求めていない判定 → その判定だけ外す</text>
 <line x1="80" y1="96" x2="80" y2="198" class="ln-dash" marker-end="url(#mh)"/><text x="88" y="150" class="t-sm">履歴がない</text>
 <rect x="15" y="200" width="230" height="44" rx="6" class="box"/><text x="130" y="227" text-anchor="middle">同梱の標準タスク 6 件</text>
@@ -522,18 +522,19 @@ svg .x{stroke:var(--ng);stroke-width:2.2}
 <tr><td>Codex <code>history.jsonl</code></td><td><code>{"session_id","ts","text"}</code>（既定で保存）</td><td><code>text</code></td></tr>
 <tr><td>Codex <code>sessions/**/rollout-*.jsonl</code></td><td><code>event_msg</code> の <code>user_message</code></td><td><code>message</code></td></tr>
 </table>
-<p>ツール結果・通知・<code>/</code> で始まるコマンド・20 文字未満の文は除き、各セッションの最初の依頼を新しい順に <code>--limit</code> 件使います。</p>
+<p>ツール結果・通知・<code>/</code> で始まるコマンド・20 文字未満の文は除き、各セッションの最初の依頼を新しい順に <code>--limit</code> 件使います。1 セッションから複数取るときは <code>--per-session N</code>。先頭の依頼が前の文脈を指している（「さっきの続き」など）なら <code>--skip-context-first</code> で次の依頼を使います。</p>
 <h3>守っていること</h3>
 <ul>
 <li>元の依頼文はメモリ上だけで扱い、ファイル・ログに書きません（表示は件数だけ）。</li>
 <li>元の名前・識別子・数値・文が残った案は 1 回作り直させ、それでも残れば見送ります。<b>日本語の固有名詞（会社名・人名）は機械では判定できないため、人の確認が必須</b>です。</li>
-<li>LLM が書いた採点スクリプトは <code>harvest</code> では実行しません。人が読んだあとの <code>validate --selftest</code> と <code>run</code> で初めて実行されます。</li>
+<li>LLM が書いた採点スクリプトは、<code>harvest</code> の最後に隔離つきの <code>selftest</code> で実行し、正解例（と別解があればそれ）で通り、何もしなければ落ちる下書きだけを残します。人が読んだあとも <code>validate --selftest</code> で再確認します。</li>
 <li>合成データだけで完結する形に書き換え、本物の環境（ssh・DB・Web）への接続を禁止し、接続を試みていないかの判定を必ず付けます。</li>
 </ul>
 <p>それぞれの具体的な検査は <a href="design.html#trust">設計記録 6 章</a> にあります。</p>
 <p>書き換えた依頼文は、元の依頼と同じく Claude（Bedrock を使う環境なら Bedrock）に送られます。</p>
 <p><b>確認するときの観点</b>：① 会社名・人名・業務システム名が残っていないか ② 依頼の性質（難しさ・曖昧さ）が元と同じか ③ 採点スクリプトが「正しいが書き方の違う答え」を落とさないか。直したら <code>validate --selftest</code> → <code>run</code> で使います。</p>
-<p><b>限界</b>：1 回の指示で完結する評価なので、確認の質問に人が答えて続く会話全体は再現できません（「確認すべき場面で確認したか」までを見ます）。各セッションの最初の依頼だけを使うため、途中で出た別の依頼は拾いません。</p>
+<p>収穫したタスクは、普段の仕事での無回帰を見るものです。ハーネスのどの部品（スキル・フック・サブエージェントなど）を見ているかをタスクの <code>coverage</code> に、プロファイルが入れる部品を <code>components</code> に書いておくと、<code>validate</code> が「掲げた部品を見るタスクがない」ときに警告します。タスクをハーネスの部品に対応づけておくと、どこが未測定かが分かります。</p>
+<p><b>限界</b>：1 回の指示で完結する評価なので、確認の質問に人が答えて続く会話全体は再現できません（「確認すべき場面で確認したか」までを見ます）。既定では各セッションの最初の依頼だけを使うため、途中で出た別の依頼は <code>--per-session</code> を付けない限り拾いません。</p>
 
 <h2 id="outputs">10. 出力と後始末</h2>
 <table>

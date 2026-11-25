@@ -85,11 +85,125 @@ def _forms(p: str) -> list[str]:
     return list(dict.fromkeys([p, p.replace("\\", "/")]))
 
 
+def host_path_tools(path_env: str | None = None) -> tuple[set[str], set[str]]:
+    """ホスト PATH 上のディレクトリと、その直下の実行ファイルの表記ゆれ。
+    再帰はしない。相対パス・ホームそのもの・根に近すぎるディレクトリは対象外。"""
+    path_env = "" if path_env is None else path_env
+    bins: set[str] = set()
+    dirs: set[str] = set()
+    home_forms: set[str] = set()
+    try:
+        home_forms = {_norm_path(x) for x in _forms(str(Path.home()))}
+    except (OSError, RuntimeError):
+        pass
+    for raw in path_env.split(os.pathsep):
+        if not raw:
+            continue
+        d = Path(raw)
+        if not d.is_absolute():
+            continue
+        forms = list(_forms(raw))
+        if d.exists():
+            try:
+                forms += _forms(str(d.resolve()))
+            except OSError:
+                pass
+        keep = []
+        for f in forms:
+            try:
+                parts = Path(f).parts
+            except (ValueError, OSError):
+                continue
+            if len(parts) >= 3 and _norm_path(f) not in home_forms:
+                keep.append(f)
+        if not keep:
+            continue
+        dirs.update(keep)
+        try:
+            entries = list(d.iterdir())
+        except OSError:
+            continue
+        for ent in entries:
+            try:
+                if ent.is_symlink() and ent.resolve().is_dir():
+                    continue
+                if not ent.is_file():
+                    continue
+            except OSError:
+                continue
+            bins.update(_forms(str(ent)))
+            # リンク先が PATH ディレクトリの外なら許可しない
+            try:
+                resolved = ent.resolve()
+                parent = resolved.parent.resolve() if resolved.exists() else resolved.parent
+                here = d.resolve() if d.exists() else d
+                if parent == here:
+                    bins.update(_forms(str(resolved)))
+            except OSError:
+                pass
+    return bins, dirs
+
+
+def _norm_path(p: str) -> str:
+    return p.replace("\\", "/").rstrip("/")
+
+
+def _guard_spans(s: str, g: str) -> list[str]:
+    """文字列中の保護パス g の各出現を、続くパス文字まで伸ばしたスパン。"""
+    spans: list[str] = []
+    start = 0
+    while True:
+        j = s.find(g, start)
+        if j < 0:
+            break
+        k = j + len(g)
+        while k < len(s) and re.match(r"[\w.@+\-/\\]", s[k]):
+            k += 1
+        spans.append(s[j:k])
+        start = j + 1
+    return spans
+
+
+def _extends_past_tool(s: str, path_ok: set[str]) -> bool:
+    """PATH 上のパスの直後に .. や引用符越しの続きがある（ツール以外を指している）か。"""
+    for tool in sorted(path_ok, key=len, reverse=True):
+        i = 0
+        while True:
+            j = s.find(tool, i)
+            if j < 0:
+                break
+            rest = s[j + len(tool):j + len(tool) + 8]
+            if re.match(r"""(?:["']|[/\\])*\.\.""", rest):
+                return True
+            i = j + 1
+    return False
+
+
 def leak_check(tool_calls: list[dict[str, Any]], transcript: str, trial_dir: Path, protected: Iterable[Path] = (),
-               allow: Iterable[Path] = (), canaries: Iterable[str] = (), patterns: Iterable[str] = ()) -> dict[str, Any]:
+               allow: Iterable[Path] = (), canaries: Iterable[str] = (), patterns: Iterable[str] = (),
+               path_env: str | None = None) -> dict[str, Any]:
     """tool_calls: 正規化したツール呼び出し（{name, input}）。transcript: 生のトランスクリプト（カナリアを探す）。
     protected: この実行で守る場所（本物のホーム・--out・タスクのフォルダなど）。自分の試行ディレクトリの外なら INVALID。
-    allow: 試行の外でも読んでよい絶対パス（プロファイルの sandbox_ro など）。patterns: タスクが足す INVALID の正規表現。"""
+    allow: 試行の外でも読んでよい絶対パス（プロファイルの sandbox_ro など）。patterns: タスクが足す INVALID の正規表現。
+    path_env: 試行に渡した PATH。そのディレクトリと直下の実行ファイルを読む・列挙するのは警告（INVALID にはしない）。"""
+    bins, dirs = host_path_tools(path_env)
+    path_ok = {_norm_path(x) for x in bins | dirs}
+
+    protected_exact = {_norm_path(f) for pth in protected for f in _forms(str(pth))}
+    try:
+        protected_exact.update({_norm_path(x) for x in _forms(str(Path.home()))})
+    except (OSError, RuntimeError):
+        pass
+
+    def path_tool(p: str) -> bool:
+        n = _norm_path(p)
+        if n not in path_ok or n in protected_exact:
+            return False
+        # PATH にホーム等の保護ルートそのものが入っていても、その直下の秘密ファイルは許可しない
+        if _norm_path(str(Path(n).parent)) in protected_exact:
+            return False
+        return True
+
     trial = str(Path(trial_dir).resolve())
     allowed = sorted({f for a in [trial, str(trial_dir), *map(str, allow)] for f in _forms(a)}, key=len, reverse=True)
     # 自分の試行ディレクトリを、途中をグロブ（*）にして書いたもの。実パス（macOS の /private/var）と、渡された表記（/var）の両方
@@ -112,15 +226,22 @@ def leak_check(tool_calls: list[dict[str, Any]], transcript: str, trial_dir: Pat
             s = s.replace(a, "<ALLOWED>")
         s = own_glob.sub("<ALLOWED>", s)  # 自分の試行ディレクトリを、途中をグロブ（*）にして書いたもの
         for g in guard:
-            if g in s:
-                hit("protected_path", s, g)
-                break
+            if g not in s:
+                continue
+            spans = _guard_spans(s, g)
+            if spans and all(path_tool(r) for r in spans) and not _extends_past_tool(s, path_ok):
+                warns.append({"kind": "path_binary", "match": spans[0][:160], "input": s[:240]})
+                continue  # 他の保護パスも見る（警告のあとに break しない）
+            hit("protected_path", s, g)
+            break
         s_nourl = URL.sub(" ", s)
         for m in ABS_PATH.finditer(s_nourl):
             p = m.group(1)
             if SYSTEM_OK.match(p):
                 continue
-            if p.startswith(HARD_ROOTS):
+            if path_tool(p):
+                warns.append({"kind": "path_binary", "match": p, "input": s[:240]})
+            elif p.startswith(HARD_ROOTS):
                 hit("outside_path", s, p)
             elif p.startswith(SOFT_ROOTS):
                 warns.append({"kind": "outside_path_soft", "match": p, "input": s[:240]})

@@ -619,6 +619,8 @@ def cmd_harvest(a) -> int:
     from .adapters import ClaudeAdapter
     from .harvest import default_sources, harvest
     from .runner import append_spend
+    if a.per_session < 1:
+        raise SpecError("--per-session は 1 以上")
     profile = None
     if a.profile:
         profile = load_profiles([a.profile])[0]
@@ -627,7 +629,8 @@ def cmd_harvest(a) -> int:
     sources = [Path(s) for s in a.source] if a.source else default_sources()
     run_id = "harvest-" + datetime.now().strftime("%Y%m%d-%H%M%S")
     s = harvest(sources, Path(a.out), a.limit, ClaudeAdapter(profile, a.executable).exe, a.model or None, profile, a.dry_run,
-                print, lambda usd: append_spend(Path(a.ledger), usd, run_id, "claude_code", profile.billing if profile else "api"))
+                print, lambda usd: append_spend(Path(a.ledger), usd, run_id, "claude_code", profile.billing if profile else "api"),
+                per_session=a.per_session, skip_context_first=a.skip_context_first)
     if a.dry_run:
         print("（--dry-run: 書き換え・書き出しはしていません。依頼の本文は表示しません）")
         return 0
@@ -836,6 +839,10 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--out", required=True, help="書き出し先（tasks/・fixtures/・checks/・references/ を作る）")
     sp.add_argument("--source", nargs="+", help="履歴の場所（既定: ~/.claude と ~/.codex。フォルダか履歴ファイル）")
     sp.add_argument("--limit", type=int, default=10, help="作る下書きの最大数（新しいセッションから。既定 10）")
+    sp.add_argument("--per-session", type=int, default=1, metavar="N",
+                    help="1 セッションから取る依頼の最大数（既定 1。各セッションの最初の依頼だけ）")
+    sp.add_argument("--skip-context-first", action="store_true",
+                    help="セッション先頭の依頼が前の文脈を指している（「さっきの続き」など）なら、その依頼を飛ばす")
     sp.add_argument("--model", default="sonnet", help="書き換えに使うモデル（既定 sonnet。空文字で CLI 既定）")
     sp.add_argument("--profile", help="認証（env・copy_credentials・executable）を借りる claude_code プロファイル YAML")
     sp.add_argument("--executable", nargs="+", help="書き換えに使う claude の実行ファイル")
