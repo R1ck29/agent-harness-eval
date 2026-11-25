@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from harness_eval.cheatproof import host_path_tools, leak_check
+from harness_eval.isolation import grader_isolation
 from harness_eval.graders import grade_all, is_clarification_question, JudgeConfig, tool_input_haystack
 from harness_eval.harvest import (CONVERT_PROMPT, Prompt, check_written, refers_to_earlier_context,
                                   select, selftest, write_draft)
@@ -211,9 +212,14 @@ class HarvestSelectTests(unittest.TestCase):
         self.assertEqual(check_written(path), "")
         self.assertTrue((tmp / "references-alt" / "h-alt" / "total.txt").is_file())
         self.assertEqual(selftest(load_task(path)), "")
-        # 別解が間違っていれば落とす
+        # 別解が間違っていれば落とす（隔離できない環境では command を走らせない）
         bad = {**draft, "id": "h-alt-bad", "reference_outputs_alt": [{"path": "total.txt", "content": "0"}]}
-        self.assertIn("別解で採点が通らない", check_written(write_draft(bad, tmp, origin)))
+        bad_path = write_draft(bad, tmp, origin)
+        if grader_isolation() == "bwrap":
+            self.assertIn("別解で採点が通らない", check_written(bad_path))
+        else:
+            self.assertEqual(check_written(bad_path), "")
+            self.assertIn("別解で採点が通らない", selftest(load_task(bad_path)))
         empty_ref = {**draft, "id": "h-empty-ref", "reference_outputs": [], "reference_outputs_alt": [],
                      "final_answer_example": ""}
         self.assertIn("正解例がない", check_written(write_draft(empty_ref, tmp, origin)))

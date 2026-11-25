@@ -471,10 +471,11 @@ def check_written(task_path: Path) -> str:
         return "結果を見る採点がない"
     # bwrap が使えない環境では、未確認の採点スクリプトをホストで走らせない（構文＋宣言的判定だけ）
     if script.exists() and grader_isolation() != "bwrap":
+        # 隔離なしでは未確認の command を走らせない（selftest も呼ばない）
         reason = sample_test(task, declarative) if declarative else ""
         if reason:
             return reason
-        if selftest(task) is None and (script.exists() or declarative):
+        if not has_reference_outputs(task) and (script.exists() or declarative):
             return "正解例がない"
         return ""
     reason = selftest(task)
@@ -483,11 +484,16 @@ def check_written(task_path: Path) -> str:
     return reason or ""
 
 
+def has_reference_outputs(task: Task) -> bool:
+    """正解例（references/<id>/）または最終応答の例があるか。selftest を走らせずに調べる。"""
+    refs = task.path.parent.parent / "references"
+    return (refs / task.id).is_dir() or (refs / f"{task.id}.final_answer.txt").is_file()
+
+
 def selftest(task: Task, notes: list[str] | None = None) -> str | None:
     """人が確認したあとで、採点スクリプトを含む結果の判定が正解例で通り、何もしなければ落ちるかを確かめる。
     正解例（harvest が書き出す references/<id>/）がないタスクは None（対象外）。"""
-    refs = task.path.parent.parent / "references"
-    if not ((refs / task.id).is_dir() or (refs / f"{task.id}.final_answer.txt").is_file()):  # 確認の質問を見るタスクは最終応答の例だけ
+    if not has_reference_outputs(task):  # 確認の質問を見るタスクは最終応答の例だけ
         return None
     return sample_test(task, [g for g in task.graders if g.kind == "outcome" and g.type != "llm"], notes)
 
