@@ -1,5 +1,6 @@
 """PR #5 r7 #7: ログが上限を超えたあとの使用量の取りこぼし（費用上限が効かなくなる）。超過のあるなしで、費用・トークンの計上が一致する。"""
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -31,7 +32,10 @@ class DrainUsageTests(unittest.TestCase):
         out = tmp / "stdout.jsonl"
         script = tmp / "noisy.py"  # 長い行を含むので、-c（引数の長さに上限がある）ではなくファイルで渡す
         script.write_text(body, encoding="utf-8")
-        res = run_process([sys.executable, str(script)], tmp, {"PATH": ""}, None, out, tmp / "stderr.txt", timeout_s, log_limit=limit)
+        env = {"PATH": ""}
+        if root := os.environ.get("SYSTEMROOT"):
+            env["SYSTEMROOT"] = root  # Python 3.10 on Windows cannot start without it
+        res = run_process([sys.executable, str(script)], tmp, env, None, out, tmp / "stderr.txt", timeout_s, log_limit=limit)
         return res, out
 
     def accounting(self, adapter, out):
@@ -122,10 +126,10 @@ class DrainUsageTests(unittest.TestCase):
     def test_usage_is_kept_when_a_detached_descendant_holds_the_pipe(self):
         """パイプを握ったまま別セッションに残る子孫がいて、タイムアウトで打ち切られても、集めた使用量はログに残る。"""
         body = ("import subprocess, sys\n"
-                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(9)'], start_new_session=True)\n"
+                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'], start_new_session=True)\n"
                 "for _ in range(300): print('g' * 1000)\n"
                 f"print({json.dumps(RESULT)!r}, flush=True)\n")
-        res, out = self.run_script(64 * 1024, body, timeout_s=1)
+        res, out = self.run_script(64 * 1024, body, timeout_s=5)
         self.assertTrue(res.timed_out and res.log_truncated)
         self.assertEqual(self.accounting(ClaudeAdapter(), out)[0], 1.25)
 
