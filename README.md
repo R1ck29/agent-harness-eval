@@ -67,7 +67,7 @@ python -m harness_eval --version
 ```
 
 一度だけ指定するなら `python -m pip install --index-url "<社内 Artifactory の PyPI ミラー URL（管理者に確認）>" -r requirements.txt`。
-最後に `0.10.0` が表示され、終了コード 0 なら導入完了です。
+最後に `0.10.1` が表示され、終了コード 0 なら導入完了です。
 `python -m pip install .` で `harness-eval` コマンドとしても使えます（`python -m harness_eval` と同じ）。
 
 ### ② エージェント CLI
@@ -137,7 +137,7 @@ python -m harness_eval validate --tasks examples/tasks --profiles examples/profi
 python -m harness_eval doctor --profiles "examples/profiles/claude-*.yaml" --out "$OUT"
 ```
 
-`harness-eval 0.10.0 / Python … / PyYAML …`、各プロファイルの CLI 版と `経路:` が出て、終了コード 0 なら静的確認は成功です。
+`harness-eval 0.10.1 / Python … / PyYAML …`、各プロファイルの CLI 版と `経路:` が出て、終了コード 0 なら静的確認は成功です。
 `注意:` は内容を確認し、`NG:` や CLI の `見つかりません` は解消してから進みます。
 静的確認だけでは認証の成功までは分かりません。
 
