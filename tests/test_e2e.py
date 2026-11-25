@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from harness_eval.cli import main  # noqa: E402
 from harness_eval.runner import Runner  # noqa: E402
-from fake_env import SUFFIX  # noqa: E402
+from fake_env import FAKE_VARS, SUFFIX  # noqa: E402
 
 FAKE = ROOT / "tests" / "fake_agents"
 
@@ -353,8 +353,15 @@ class E2E(unittest.TestCase):
         self.assertNotIn("ANTHROPIC_DEFAULT_OPUS_MODEL", out)
         # inherit_env でゲートウェイを渡すのに ANTHROPIC_DEFAULT_*_MODEL が無ければ doctor が注意を出す（終了コードは 0）
         gw = self.tmp / "claude-gateway.yaml"
-        gw.write_text("id: claude-gateway\nagent: claude_code\nmodel: sonnet\ninherit_env: [ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL]\n",
-                      encoding="utf-8")
+        fake = FAKE / "fake_claude.py"
+        inherit = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", *FAKE_VARS]
+        gw.write_text(
+            "id: claude-gateway\nagent: claude_code\nmodel: sonnet\n"
+            f"inherit_env: [{', '.join(inherit)}]\n"
+            f"executable: [{json.dumps(sys.executable)}, {json.dumps(str(fake))}]\n"
+            "sandbox: off\n",
+            encoding="utf-8",
+        )
         with mock.patch.dict(os.environ, env_gw, clear=True):
             code, out = run_cli("doctor", "--profiles", str(gw), "--out", str(self.out))
         self.assertEqual(code, 0, out)
