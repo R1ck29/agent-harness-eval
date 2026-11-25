@@ -40,6 +40,7 @@ from .record import EXCLUDED_ERRORS, TrialRecord
 from .spec import NO_SPLIT, ROUTE_VARS, Profile, SpecError, Task, load_profile, reject_in_place, split_mixing
 
 NOT_RUN_ERRORS = {"budget_stop"}
+DEFAULT_EXCLUDED_TAGS = frozenset({"sample-harness"})
 _SOLVER_LOG_LIMIT = LOG_LIMIT
 
 
@@ -62,6 +63,7 @@ class RunOptions:
     trials: int = 1
     k: int | None = None
     tags: list[str] = field(default_factory=list)
+    include_sample_harness: bool = False  # True: 既定で除外される sample-harness タグのタスクも含める
     task_ids: list[str] = field(default_factory=list)
     splits: list[str] = field(default_factory=list)  # train / dev / holdout / none（分割なし）。空ならすべて
     jobs: int = 1
@@ -97,14 +99,18 @@ class RunOptions:
 
 
 def select_pairs(tasks: list[Task], profiles: list[Profile], opt: RunOptions) -> list[tuple[Task, Profile]]:
+    excluded = set() if opt.include_sample_harness else (set(DEFAULT_EXCLUDED_TAGS) - set(opt.tags))
     out = []
     for p in profiles:
         for t in tasks:
             if p.agent not in t.targets:
                 continue
-            if opt.tags and not set(opt.tags) & set(t.tags):
+            if opt.task_ids:
+                if t.id not in opt.task_ids:
+                    continue
+            elif excluded and excluded & set(t.tags):
                 continue
-            if opt.task_ids and t.id not in opt.task_ids:
+            if opt.tags and not set(opt.tags) & set(t.tags):
                 continue
             if opt.splits and (t.split or NO_SPLIT) not in opt.splits:
                 continue
@@ -190,6 +196,20 @@ def uses_llm(task: Task) -> bool:
     return any(g.type == "llm" for g in task.graders)
 
 
+def _has_pending(rec: TrialRecord) -> bool:
+    return any(g.get("status") == "pending" for g in rec.grader_results)
+
+
+def _progress_mark(rec: TrialRecord, *, show_cache: bool = True) -> str:
+    if show_cache and rec.from_cache:
+        return "CACHE"
+    if not rec.valid:
+        return "SKIP"
+    if _has_pending(rec) or rec.passed is None:
+        return "WAIT"
+    return "PASS" if rec.passed else "FAIL"
+
+
 def cache_key(task: Task, profile: Profile, version: str | None, trial: int, opt: RunOptions, route: str = "", *,
               routes: str | None = None) -> str:
     """route: 試行に渡る経路の変数の要約（route_signature: 名前と、秘密でないものは値のハッシュ）。経路を変えれば再実行する。"""
@@ -231,6 +251,8 @@ class Runner(JudgePhase):
         self.routes = {p.id: route_signature(p, dict(os.environ)) for _, p in self.pairs}
         self._identities: dict[tuple[str, str | None], str] = {}
         self._judge_seq = 0
+        self._judge_call_meta = threading.local()
+        self.judge_actual_models: dict[str, set[str]] = {}
         self._inplace_locks = {f: threading.Lock() for f in FAMILIES}  # credentials: in_place の判定は同じ系統で同時に 1 本だけ
         self.interrupted = threading.Event()
         self.ledger = Path(opt.ledger or Path(out_dir) / "spend.jsonl").resolve()
@@ -241,14 +263,23 @@ class Runner(JudgePhase):
         self._judge_adapters: dict[str, ClaudeAdapter | CodexAdapter] = {}
         if self.needs_judge:
             fams = [opt.judge_agent] if opt.judge_agent else list(opt.judge_families or FAMILIES)
+            explicit_judge_profiles: set[str] = set()
             for f in fams:
-                self.judge_profiles[f] = self._pick_judge_profile(profiles, f)
+                jp, explicit = self._pick_judge_profile_with_source(profiles, f)
+                self.judge_profiles[f] = jp
+                if explicit:
+                    explicit_judge_profiles.add(f)
                 adapter = self._resolve_judge_adapter(f)
                 if adapter is not None:
                     self._judge_adapters[f] = adapter
                 self.judge_versions[f] = cli_version(adapter) if adapter is not None else None
             available = [f for f, v in self.judge_versions.items() if v is not None]
-            self.judge = make_settings(opt.tier, {p.agent for _, p in self.pairs}, available, opt.judge_agent, opt.judge_models,
+            effective_judge_models = {
+                f: p.model for f, p in self.judge_profiles.items()
+                if f in explicit_judge_profiles and p is not None and p.model
+            }
+            effective_judge_models.update(opt.judge_models)
+            self.judge = make_settings(opt.tier, {p.agent for _, p in self.pairs}, available, opt.judge_agent, effective_judge_models,
                                        opt.judge_votes, opt.allow_weak_judge, opt.seed, opt.calibration_items)
         # 月の予算: 口座（エージェント）ごとに、台帳の今月の実績を引いた残りをこの実行の上限にする
         self.month_spent: dict[str, float] | None = None
@@ -294,11 +325,18 @@ class Runner(JudgePhase):
             append_spend(self.ledger, usd, self.run_id, agent, billing)
 
     @staticmethod
-    def _settle_cost(rec: TrialRecord, profile: Profile) -> tuple[float | None, str | None]:
-        """1 回の呼び出しの費用: 公開価格で換算できればそれ（price_table）、できなければ CLI の推定、どちらもなければ不明のまま。"""
+    def _settle_cost(rec: TrialRecord, profile: Profile, max_budget_usd: float | None = None) -> tuple[float | None, str | None]:
+        """1 回の呼び出しの費用: 公開価格で換算できればそれ（price_table）、できなければ CLI の推定。
+        budget_exceeded で費用が欠けるか 0 のときは、公開価格換算できなければタスクの max_budget_usd を見積もりとして使う。"""
         cost, src = solver_cost(rec, profile.model)
         if src == "price_table":
             return cost, "price_table"
+        if (rec.error or {}).get("type") == "budget_exceeded":
+            if rec.cost_usd is not None and rec.cost_usd > 0:
+                return rec.cost_usd, rec.cost_source
+            if max_budget_usd is not None and max_budget_usd > 0:
+                return float(max_budget_usd), "budget_cap_estimate"
+            return None, None
         return rec.cost_usd, rec.cost_source
 
     def month_remaining(self, agent: str) -> float | None:
@@ -350,22 +388,25 @@ class Runner(JudgePhase):
             return load_profile(Path(ref))
         raise SpecError(f"--judge-profile '{ref}' は、実行のプロファイルの id でも YAML のパスでもありません")
 
-    def _pick_judge_profile(self, profiles: list[Profile], family: str) -> Profile | None:
-        """LLM 判定の認証（env・env_unset・copy_credentials / credentials・executable）を借りるプロファイル。
-        指定がなければ、判定の系統と同じ種類の基準プロファイル → 最初の同種プロファイルの順。配布物（install）は使わない。"""
+    def _pick_judge_profile_with_source(self, profiles: list[Profile], family: str) -> tuple[Profile | None, bool]:
+        """LLM 判定の認証（env・env_unset・copy_credentials / credentials・executable）を借りるプロファイルと、
+        --judge-profile で明示指定されたか。指定がなければ、同種の基準プロファイル → 最初の同種プロファイルの順。配布物は使わない。"""
         mismatch = None
         for fam, ref in self._judge_refs():
             p = self._load_judge_ref(profiles, ref)
             if fam is not None and p.agent != fam:
                 raise SpecError(f"--judge-profile '{fam}={ref}' は {p.agent} 用のプロファイルです（系統 {fam} ではありません）")
             if p.agent == family:
-                return p
+                return p, True
             mismatch = mismatch or (ref, p.agent)
         if mismatch and self.opt.judge_agent:
             raise SpecError(f"--judge-profile '{mismatch[0]}' は {mismatch[1]} 用です（--judge-agent {self.opt.judge_agent}）")
         same = [p for p in profiles if p.agent == family]
         base = [p for p in same if p.id == self.opt.baseline]
-        return (base or same or [None])[0]
+        return (base or same or [None])[0], False
+
+    def _pick_judge_profile(self, profiles: list[Profile], family: str) -> Profile | None:
+        return self._pick_judge_profile_with_source(profiles, family)[0]
 
     # ------------------------------------------------------------ plan
     def plan(self) -> dict[str, Any]:
@@ -574,8 +615,8 @@ class Runner(JudgePhase):
     def _finalize(self, rec: TrialRecord, etype: str | None) -> None:
         """grader_results から合否を決める。判定待ち（pending）が残っていれば、まだ決めない。"""
         rescore(rec)
-        if any(g["status"] == "pending" for g in rec.grader_results):
-            rec.passed, rec.cmp_passed = False, None
+        if _has_pending(rec):
+            rec.passed, rec.cmp_passed = None, None
             return
         if rec.valid and rec.score is None and rec.error is None:  # 採点できるグレーダーが 1 つもない（例: llm だけのタスクを --no-llm）
             rec.error, rec.valid = {"type": "not_graded", "message": "実行されたグレーダーがありません"}, False
@@ -591,11 +632,19 @@ class Runner(JudgePhase):
         if not rec.trial_dir:
             return
         root = Path(rec.trial_dir)
-        if self.opt.keep == "none" or (self.opt.keep == "failed" and rec.passed):
+        if self.opt.keep == "none" or (self.opt.keep == "failed" and rec.passed is True):
             shutil.rmtree(root / "workdir", ignore_errors=True)
         if self.opt.keep == "none":  # 生ログ（トランスクリプト）も残さない
             for name in ("stdout.jsonl", "stderr.txt"):
                 (root / name).unlink(missing_ok=True)
+
+    def _log_progress(self, prefix: str, rec: TrialRecord, *, show_cache: bool = True, cost_label: str | None = None) -> None:
+        mark = _progress_mark(rec, show_cache=show_cache)
+        if cost_label is None:
+            cost_label = f"${rec.cost_usd:.4f}" if rec.cost_usd is not None else "$?"
+        err = f" [{rec.error['type']}]" if rec.error else ""
+        score = rec.score if rec.score is None else round(rec.score, 2)
+        self.opt.log(f"[{prefix}] {mark:5} {rec.task_id} / {rec.profile_id} #{rec.trial} score={score} {cost_label}{err}")
 
     def _one(self, task: Task, profile: Profile, trial: int, sink) -> TrialRecord:
         key = cache_key(task, profile, self.versions[profile.id], trial, self.opt, routes=self.routes[profile.id])
@@ -618,7 +667,7 @@ class Runner(JudgePhase):
                 return rec
             rec = self._execute(task, profile, trial, key)
             # 呼び出しごとに費用を 1 度だけ確定し、予算・台帳・集計（usage）に同じ額を渡す（pricing のない Codex 試行も公開価格で換算）
-            rec.cost_usd, rec.cost_source = self._settle_cost(rec, profile)
+            rec.cost_usd, rec.cost_source = self._settle_cost(rec, profile, task.max_budget_usd)
             self._spend(rec.cost_usd, profile.agent, profile.billing)
             if self.interrupted.is_set():  # Ctrl-C で止めた試行は結果ではない（失敗として数えず、キャッシュもしない）
                 rec.valid, rec.passed, rec.score, rec.failure_tags = False, False, None, []
@@ -692,10 +741,7 @@ class Runner(JudgePhase):
                 records.append(rec)
                 jsonl.write(json.dumps(rec.to_dict(), ensure_ascii=False) + "\n")
                 jsonl.flush()
-                mark = "CACHE" if rec.from_cache else ("PASS" if rec.passed else ("SKIP" if not rec.valid else "FAIL"))
-                cost = f"${rec.cost_usd:.4f}" if rec.cost_usd is not None else "$?"
-                err = f" [{rec.error['type']}]" if rec.error else ""
-                self.opt.log(f"[{len(records)}/{len(self.pairs) * self.opt.trials}] {mark:5} {rec.task_id} / {rec.profile_id} #{rec.trial} score={rec.score if rec.score is None else round(rec.score, 2)} {cost}{err}")
+                self._log_progress(f"{len(records)}/{len(self.pairs) * self.opt.trials}", rec)
 
         jobs = schedule(self.pairs, self.opt.trials, self.opt.seed)
         if self.judge_warning:
@@ -735,7 +781,8 @@ class Runner(JudgePhase):
             "run_id": self.run_id, "tool_version": __version__, "started_at": started,
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "platform": f"{platform.system()} {platform.release()}", "python": sys.version.split()[0],
-            "options": {"trials": self.opt.trials, "k": self.opt.kk, "tags": self.opt.tags, "splits": self.opt.splits, "llm": self.opt.llm,
+            "options": {"trials": self.opt.trials, "k": self.opt.kk, "tags": self.opt.tags,
+                        "include_sample_harness": self.opt.include_sample_harness, "splits": self.opt.splits, "llm": self.opt.llm,
                         "tier": self.opt.tier, "judge_agent": self.opt.judge_agent, "judge_models": self.opt.judge_models,
                         "judge_votes": self.opt.judge_votes, "allow_weak_judge": self.opt.allow_weak_judge,
                         "judge_profiles": {f: (p.id if p else None) for f, p in self.judge_profiles.items()},
@@ -754,7 +801,10 @@ class Runner(JudgePhase):
                              "split": t.split, "family": t.family}
                       for t in {t.id: t for t, _ in self.pairs}.values()},
             "spent_usd_this_run": self.spent,
-            "judge": (self.judge.meta(self.calibration, {k: v for k, v in self.judge_usage.items()})
+            "judge": (self.judge.meta(
+                          self.calibration, {k: v for k, v in self.judge_usage.items()},
+                          actual_models={f: (sorted(ms)[0] if len(ms) == 1 else sorted(ms))
+                                         for f, ms in sorted(self.judge_actual_models.items()) if ms})
                       | {"cli_versions": self.judge_versions}) if self.judge else
                      {"llm": False, "tier": self.opt.tier, "note": "LLM 判定なし（--no-llm か、LLM 判定のタスクがない）",
                       "calibration": {"needed": False, "items": 0, "rate": None}},

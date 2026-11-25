@@ -67,7 +67,7 @@ python -m harness_eval --version
 ```
 
 一度だけ指定するなら `python -m pip install --index-url "<社内 Artifactory の PyPI ミラー URL（管理者に確認）>" -r requirements.txt`。
-最後に `0.10.0` が表示され、終了コード 0 なら導入完了です。
+最後に `0.10.1` が表示され、終了コード 0 なら導入完了です。
 `python -m pip install .` で `harness-eval` コマンドとしても使えます（`python -m harness_eval` と同じ）。
 
 ### ② エージェント CLI
@@ -86,9 +86,13 @@ python -m harness_eval --version
 | 方式 | Bash | PowerShell | 両方の `examples/profiles/claude-*.yaml` に追記 |
 |---|---|---|---|
 | API キー | `export ANTHROPIC_API_KEY="<API キー>"` | `$env:ANTHROPIC_API_KEY="<API キー>"` | `inherit_env: [ANTHROPIC_API_KEY]`（`billing` は既定の `api`） |
+| 組織のゲートウェイ | `export ANTHROPIC_AUTH_TOKEN="<トークン>"` / `export ANTHROPIC_BASE_URL="<URL>"` / `export ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL="<モデルID>"` | `$env:ANTHROPIC_AUTH_TOKEN="<トークン>"` 等 | `inherit_env: [ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_OPUS_MODEL, ANTHROPIC_DEFAULT_SONNET_MODEL, ANTHROPIC_DEFAULT_HAIKU_MODEL]` |
 | Bedrock | `export CLAUDE_CODE_USE_BEDROCK=1` / `export AWS_REGION=ap-northeast-1` | `$env:CLAUDE_CODE_USE_BEDROCK="1"` / `$env:AWS_REGION="ap-northeast-1"` | `inherit_env: [CLAUDE_CODE_USE_BEDROCK, AWS_REGION]` |
 | サブスクリプション | `claude setup-token` → `export CLAUDE_CODE_OAUTH_TOKEN="<トークン>"` | `claude setup-token` → `$env:CLAUDE_CODE_OAUTH_TOKEN="<トークン>"` | `inherit_env: [CLAUDE_CODE_OAUTH_TOKEN]` と `billing: subscription` |
 
+ゲートウェイの認証変数は実際に使うものだけ並べればよく、`ANTHROPIC_API_KEY` や `CLAUDE_CODE_OAUTH_TOKEN` と併用する形でも同様です。
+`ANTHROPIC_DEFAULT_OPUS_MODEL`・`ANTHROPIC_DEFAULT_SONNET_MODEL`・`ANTHROPIC_DEFAULT_HAIKU_MODEL` を `inherit_env` に並べないと、
+ハーネス内の opus サブエージェント等がモデル別名を解決できず失敗し、ハーネス側だけが不当に不利になります（`doctor` でも `注意:` が出ます）。
 Bedrock は先に `<社内 AWS 認証・Bedrock モデル利用設定ページ（管理者に確認）>` に従い、AWS 認証とモデル利用権限を準備します。
 表の `/` はコマンドの区切りです。秘密の値は YAML に書かず、変数名だけ `inherit_env` に書きます。
 固定の Bedrock 設定を `env:` に書く例は `claude-baseline.yaml` のコメント、経路を変える他の変数の宣言は
@@ -133,7 +137,7 @@ python -m harness_eval validate --tasks examples/tasks --profiles examples/profi
 python -m harness_eval doctor --profiles "examples/profiles/claude-*.yaml" --out "$OUT"
 ```
 
-`harness-eval 0.10.0 / Python … / PyYAML …`、各プロファイルの CLI 版と `経路:` が出て、終了コード 0 なら静的確認は成功です。
+`harness-eval 0.10.1 / Python … / PyYAML …`、各プロファイルの CLI 版と `経路:` が出て、終了コード 0 なら静的確認は成功です。
 `注意:` は内容を確認し、`NG:` や CLI の `見つかりません` は解消してから進みます。
 静的確認だけでは認証の成功までは分かりません。
 
@@ -151,8 +155,12 @@ python -m harness_eval doctor --profiles "examples/profiles/claude-*.yaml" --out
 python -m harness_eval plan --tasks examples/tasks --profiles "examples/profiles/claude-*.yaml" --tag smoke --no-llm --baseline claude-baseline --out "$OUT"
 ```
 
-`組み合わせ 8 × 試行 1 = 8 試行`（4 タスク × 2 プロファイル）、`判定側（judge）: LLM 判定なし（費用 0）`、終了コード 0 が目印です。
-初回の例は `解く側（solver）の概算: $4.0000（履歴がなく、タスクの max_budget_usd か既定 $0.50 で数えた呼び出し 8 回）`。
+`組み合わせ 6 × 試行 1 = 6 試行`（3 タスク × 2 プロファイル）、`判定側（judge）: LLM 判定なし（費用 0）`、終了コード 0 が目印です。
+初回の例は `解く側（solver）の概算: $3.0000（履歴がなく、タスクの max_budget_usd か既定 $0.50 で数えた呼び出し 6 回）`。
+同梱サンプル専用の 2 タスク（`csv-summary-format`・`csv-summary-skill`、タグ `sample-harness`）は第三者ハーネスでは不当に落ちるため既定で除外します
+（既定スモークは 3 タスク: `request-ambiguous`・`arithmetic-no-skill`・`request-extract`。同梱サンプルのハーネスを評価するときだけ
+`--include-sample-harness` や `--tag sample-harness` / `--task <id>` で含めます。従来の 4 タスクのスモークにする場合は
+`--tag smoke --tag instructions --include-sample-harness` を付けます）。
 解く側の費用はキャッシュ内の過去の費用から概算し、キャッシュで省ける試行は除きます。
 履歴がない呼び出しは $0 と数えず、タスクの `limits.max_budget_usd`（未設定なら既定 $0.50）で多めに見積もります（実際の請求額とは異なり得ます）。
 
@@ -167,12 +175,14 @@ python -m harness_eval run --tasks examples/tasks --profiles "examples/profiles/
 ```
 
 終了コード 0 と `レポート:` の出力を確認します。レポートの「有効/全」・除外された試行・予算停止を確認してからスコアを読みます。
-出力の先頭の `結論` は、このスモーク（4 タスク・1 試行）では `INCONCLUSIVE` になります。
+出力の先頭の `結論` は、このスモーク（3 タスク・1 試行）では `INCONCLUSIVE` になります。
 比べたタスクが 5 件未満で、1 タスクあたりの試行も 2 回未満だからです。スモークは動作と傾向の確認用です。
 
 ### ⑤ フル評価（3 試行・LLM 判定あり）
 
-リリース前・モデル移行時には次を使います。`--max-cost-usd 5` は**この run が追跡できる費用だけ**の上限で、
+リリース前・モデル移行時には次を使います。既定では `sample-harness` タグを除いた 4 タスク（上記 3 タスク + `csv-summary-insight`）を実行し、
+同梱サンプルのハーネスを評価するときだけ `--include-sample-harness` を足すと従来の 6 タスクになります。
+`--max-cost-usd 5` は**この run が追跡できる費用だけ**の上限で、
 先の doctor・スモークの費用は含みません。判定の費用は含みます。実行前の見積もりが上限を超えると、何も実行せずに止まります（終了コード 2）。
 プロバイダー側の厳密な支出制限ではなく、並列実行では超過し得ます。
 試行ごとの費用は呼び出しの終了時に一度だけ確定し、予算・台帳・集計に同じ額を渡します（`pricing` のない Codex も、トークンとモデルが分かれば公開価格で換算します。分からないものだけ上限計算に入りません。[費用の制限](docs/guide.html#cost)）。
@@ -198,7 +208,7 @@ python -m harness_eval run --tasks examples/tasks --profiles "examples/profiles/
 python -m harness_eval gate --current "$OUT/<変更後の実行ID>" --previous "$OUT/<変更前の実行ID>" --margin 0.05
 ```
 
-同梱サンプルは 6 タスクで、判定に必要な 10 タスクに届かないため「判定不能」（終了コード 3）になります。
+同梱サンプルは既定 4 タスク（`--include-sample-harness` で 6 タスク）で、判定に必要な 10 タスクに届かないため「判定不能」（終了コード 3）になります。
 通過は 0、不通過は 1 です（[指標とリリース判定](docs/guide.html#metrics)）。
 
 ### 自分の履歴からタスクを作る
@@ -225,8 +235,8 @@ dry-run は `（--dry-run: 書き換え・書き出しはしていません。�
 |---|---|---|
 | `request-extract` | 依頼文どおりの条件で SQL 抽出し、結果と SQL を納品 | 条件の取り違えで「動くが違うデータ」を返さないか |
 | `request-ambiguous` | 「先月の売上データを抽出して」だけの曖昧な依頼 | 推測で作業せず、確認の質問を返すか |
-| `csv-summary-format` | 月別集計のレポート | 配布物の形式ルール（常時指示）が効くか |
-| `csv-summary-skill` / `arithmetic-no-skill` | 集計レポート／単純な質問 | スキルが必要なときだけ呼ばれるか |
+| `csv-summary-format` | 月別集計のレポート | 配布物の形式ルール（常時指示）が効くか（`sample-harness`・既定除外） |
+| `csv-summary-skill` / `arithmetic-no-skill` | 集計レポート／単純な質問 | スキルが必要なときだけ呼ばれるか（`csv-summary-skill` は `sample-harness`・既定除外） |
 | `csv-summary-insight` | 集計＋考察 | LLM 判定（フル評価用） |
 
 ## 評価の結論と判定役（既定の挙動）
@@ -346,7 +356,8 @@ AWS の認証ファイルは、プロファイルが Bedrock（`CLAUDE_CODE_USE_
 | `--tier decisive` | opus / gpt-6.2-astra | 1 系統 3 回の多数決。両方の CLI があれば両系統の一致を求める（不一致は `judge_disagreement` で、合格にしない） | 採用・マージの判断 |
 
 LLM 判定を使わない実行（決定的な検査だけ）は、どちらの段階でも採用判断に使えます。
-haiku など、段階が求めるより弱いモデルは止めます。`--allow-weak-judge` を付ければ使えますが、
+ゲートウェイ等でモデル別名（`sonnet` / `opus`）が使えない場合は、`--judge-model`（または `--judge-profile` の YAML の `model:`。`--judge-model` が優先）で完全なモデル ID を指定します。判定 CLI が返した実際のモデル ID が取れた場合は、要求した値（`models`）に加えて実 ID（`actual_models`）も結果・`summary.json`・`report.html` に残します。
+haiku など、段階が求めるより弱いモデルや未知のモデル ID は止めます。`--allow-weak-judge` を付ければ使えますが、
 レポートに「弱い判定役」と出て、その判定が合否を決めた結論は採用判断に使えません。
 
 **既定を dev にした理由**: 社内の評価は API の従量課金です。普段の判定は中位モデルで 1 回にし、

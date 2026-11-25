@@ -9,6 +9,7 @@ import os
 import random
 import shutil
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,10 @@ class JudgeBudgetStop(Exception):
 
 class JudgePhase:
     """Runner に混ぜて使う（self.opt・self.judge・self.lock・self._spend などは Runner が持つ）。"""
+
+    # Runner.__init__ が用意する（判定 CLI が返した実際のモデル ID: 系統ごと / 判定 1 回の付帯情報: スレッドごと）
+    judge_actual_models: dict[str, set[str]]
+    _judge_call_meta: threading.local
 
     def judge_estimate(self) -> dict[str, Any]:
         """判定側の見積もり（上限）: 決定的な検査がすべて合格したと仮定した判定回数 × 1 回あたりの費用。段階ごと（dev / decisive）。
@@ -151,10 +156,16 @@ class JudgePhase:
         """判定 1 回の応答を読み、トークン・費用を使量・予算・台帳に計上する。(応答, トークン, 費用, 失敗理由)。"""
         text, cli_cost, jerr = adapter.parse_judge(out)
         tokens = adapter.judge_tokens(out)
+        actual_model = adapter.judge_model(out) if hasattr(adapter, "judge_model") else None
+        self._judge_call_meta.actual_model = actual_model
         cost = token_cost(tokens, model, family)
+        if cost is None and actual_model:
+            cost = token_cost(tokens, actual_model, family)
         if cost is None:
             cost = cli_cost
         with self.lock:
+            if actual_model:
+                self.judge_actual_models.setdefault(family, set()).add(actual_model)
             add_usage(self.judge_usage, tokens, cost)
             bm = self.judge_usage["by_model"].setdefault(f"{family}:{model}", {"calls": 0, "cost_usd": 0.0})
             bm["calls"] += 1
@@ -219,17 +230,23 @@ class JudgePhase:
                 hit = json.loads(f.read_text(encoding="utf-8"))
                 with self.lock:
                     self.judge_usage["cache_hits"] += 1
+                    if hit.get("actual_model"):
+                        self.judge_actual_models.setdefault(family, set()).add(hit["actual_model"])
                 return {**hit, "cached": True}
             except (OSError, json.JSONDecodeError):
                 pass
         if self._judge_over_budget(family):
             raise JudgeBudgetStop("費用の上限に到達したため判定を実行していません")
+        self._judge_call_meta.actual_model = None
         text, tokens, cost = self._judge_call(family, model, prompt)
+        actual_model = self._judge_call_meta.actual_model
         status, reason = parse_verdict(text)
         if self._judge_profile(family).credentials == "in_place":
             reason = "（in_place の判定: 理由は記録しません）"  # 実認証を指す CLI の出力は、記録・キャッシュ・報告に載せない
-        row = {"family": family, "model": model, "tier": self.judge.tier, "vote": vote, "status": status, "reason": reason,
-               "tokens": tokens, "cost_usd": cost, "at": datetime.now(timezone.utc).isoformat()}
+        row: dict[str, Any] = {"family": family, "model": model, "tier": self.judge.tier, "vote": vote, "status": status, "reason": reason,
+                               "tokens": tokens, "cost_usd": cost, "at": datetime.now(timezone.utc).isoformat()}
+        if actual_model:
+            row["actual_model"] = actual_model
         if self.opt.use_cache:  # 判定の応答の本文・判定入力は残さない（キーはハッシュ）
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text(json.dumps(row, ensure_ascii=False), encoding="utf-8")
@@ -275,11 +292,17 @@ class JudgePhase:
                     if not v["cached"]:
                         c = v.get("cost_usd")
                         rec.judge_cost_usd = None if c is None or rec.judge_cost_usd is None else rec.judge_cost_usd + c
-            per[f] = {"model": model, "votes": [v["status"] for v in votes], "majority": majority([v["status"] for v in votes]),
-                      "cached": sum(v["cached"] for v in votes), "reason": votes[0].get("reason", "")}
+            actuals = list(dict.fromkeys(v["actual_model"] for v in votes if v.get("actual_model")))
+            fam_rec: dict[str, Any] = {"model": model, "votes": [v["status"] for v in votes],
+                                       "majority": majority([v["status"] for v in votes]),
+                                       "cached": sum(v["cached"] for v in votes), "reason": votes[0].get("reason", "")}
+            if actuals:
+                fam_rec["actual_model"] = actuals[0] if len(actuals) == 1 else actuals
+            per[f] = fam_rec
         status = combine_rubric({f: v["majority"] for f, v in per.items()}, bool(item.get("negate")))
         rec.judge_votes.append({"kind": item["kind"], "grader": item.get("grader"), "status": status,
-                                "families": {f: {k: v[k] for k in ("model", "votes", "majority", "cached")} for f, v in per.items()}})
+                                "families": {f: {k: v[k] for k in ("model", "actual_model", "votes", "majority", "cached") if k in v}
+                                             for f, v in per.items()}})
         item["_reason"] = "; ".join(f"{f}: {v['majority']}（{'/'.join(v['votes'])}）{v['reason']}" for f, v in per.items())[:300]
         return status
 
@@ -289,9 +312,14 @@ class JudgePhase:
                 and r.grader_results[it["grader"]]["status"] == "pending"]
         if not work:
             return
+        judged = list({id(r): r for r, _ in work}.values())
         if self.judge is None or not self.opt.llm:  # --no-llm（キャッシュの試行に判定待ちが残っていた）
             for r, it in work:
                 r.grader_results[it["grader"]].update(status="not_run", reason="--no-llm")
+            for idx, r in enumerate(judged, 1):
+                self._finalize(r, (r.error or {}).get("type"))
+                if hasattr(self, "_log_progress"):
+                    self._log_progress(f"judge {idx}/{len(judged)}", r, show_cache=False, cost_label="judge=$0.0000")
             return
         random.Random(f"judge-order:{self.judge.seed}").shuffle(work)
         failed: dict[int, tuple[str, str]] = {}
@@ -310,12 +338,15 @@ class JudgePhase:
         with ThreadPoolExecutor(max_workers=max(1, self.opt.jobs)) as ex:
             for fut in [ex.submit(one, r, it) for r, it in work]:
                 fut.result()
-        for r in {id(r): r for r, _ in work}.values():
+        for idx, r in enumerate(judged, 1):
             if id(r) in failed:
                 t, m = failed[id(r)]
                 r.error, r.valid, r.passed, r.cmp_passed, r.score, r.cmp_score = {"type": t, "message": m}, False, False, None, None, None
-                continue
-            self._finalize(r, (r.error or {}).get("type"))
+            else:
+                self._finalize(r, (r.error or {}).get("type"))
+            if hasattr(self, "_log_progress"):
+                jcost = f"judge=${r.judge_cost_usd:.4f}" if r.judge_cost_usd is not None else "judge=$?"
+                self._log_progress(f"judge {idx}/{len(judged)}", r, show_cache=False, cost_label=jcost)
         self._calibrate(records)
 
     def _calibrate(self, records: list[TrialRecord]) -> None:

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
@@ -36,7 +37,8 @@ def resolve(model: str | None, family: str | None = None) -> tuple[str | None, d
     for mid, row in prices()["models"].items():
         if family and row.get("family") != family:
             continue
-        if m == mid or m.startswith(mid) or m in row.get("aliases", []):
+        if (m == mid or m.startswith(mid) or m in row.get("aliases", [])
+                or re.search(rf"(?:^|[/:.]){re.escape(mid)}(?:$|[/:.\-@])", m)):
             return mid, row
     return None, None
 
@@ -67,13 +69,16 @@ def add_usage(acc: dict[str, Any], tokens: dict[str, Any] | None, cost: float | 
 
 
 def solver_cost(rec: Any, profile_model: str | None) -> tuple[float | None, str]:
-    """試行（解く側）の費用と出どころ。公開価格で換算できればそれ（price_table）、できなければ CLI の推定（cli）、どちらもなければ不明。"""
+    """試行（解く側）の費用と出どころ。公開価格で換算できればそれ（price_table）、できなければ CLI の推定（cli）や
+    予算上限の見積もり（budget_cap_estimate）、どれもなければ不明。"""
     model = (rec.meta or {}).get("model") or profile_model
+    budget_exceeded = (getattr(rec, "error", None) or {}).get("type") == "budget_exceeded"
     c = token_cost(rec.tokens, model, rec.agent)
-    if c is not None:
+    if c is not None and (not budget_exceeded or c > 0):
         return c, "price_table"
-    if rec.cost_usd is not None:
-        return rec.cost_usd, "cli"
+    if rec.cost_usd is not None and (not budget_exceeded or rec.cost_usd > 0):
+        src = getattr(rec, "cost_source", None)
+        return rec.cost_usd, (src if src == "budget_cap_estimate" else "cli")
     return None, "unknown"
 
 

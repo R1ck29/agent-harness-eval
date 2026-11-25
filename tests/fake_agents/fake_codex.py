@@ -42,7 +42,10 @@ if "read-only" in args and "-C" not in args:  # LLM 判定（judge_cmd）: 対�
         print(json.dumps({"type": "turn.failed", "error": {"message": "LEAK-ERRMSG-XYZ"}}))
         print("LEAK-STDERR-XYZ", file=sys.stderr)
         sys.exit(1)
-    print(json.dumps({"type": "thread.started", "thread_id": "judge"}))
+    started = {"type": "thread.started", "thread_id": "judge"}
+    if os.environ.get("FAKE_CODEX_JUDGE_ACTUAL_MODEL"):
+        started["model"] = os.environ["FAKE_CODEX_JUDGE_ACTUAL_MODEL"]
+    print(json.dumps(started))
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": f"{verdict}\n偽の判定"}}, ensure_ascii=False))
     print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 2000, "cached_input_tokens": 1500, "output_tokens": 50}}))
     sys.exit(0)

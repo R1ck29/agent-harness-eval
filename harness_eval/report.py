@@ -58,6 +58,12 @@ def _ci(ci: list[float] | None) -> str:
 CONCLUSION_CLASS = {"IMPROVED": "ok", "REGRESSED": "ng", "INCONCLUSIVE": "warn", "NO CHANGE": "mut"}
 
 
+def _judge_models_html(j: dict[str, Any]) -> str:
+    base = _e(j.get("models"))
+    actual = j.get("actual_models")
+    return f"{base}（実ID: {_e(actual)}）" if actual else base
+
+
 def _verdict_section(verdicts: list[dict[str, Any]] | None, usage: dict[str, Any] | None) -> list[str]:
     """冒頭: 結論（理由付き）・ベースライン合格率・差と区間・判定役の設定・妥当性チェック・トークンと費用（solver / judge 別）。"""
     out = ["<h2>結論</h2>"]
@@ -72,7 +78,7 @@ def _verdict_section(verdicts: list[dict[str, Any]] | None, usage: dict[str, Any
         cal = j.get("calibration_rate")
         weak = j.get("weak_allowed") and any(x != "strong" for x in (j.get("strength") or {}).values()) and j.get("tier") != "dev"
         jtxt = ("LLM 判定なし（校正は不要）" if not j.get("llm") else
-                f"段階 {_e(j.get('tier'))}・モデル {_e(j.get('models'))}・系統 {_e({a: p.get('families') for a, p in (j.get('plan') or {}).items()})}・"
+                f"段階 {_e(j.get('tier'))}・モデル {_judge_models_html(j)}・系統 {_e({a: p.get('families') for a, p in (j.get('plan') or {}).items()})}・"
                 f"盲検 {'あり' if j.get('blind') else 'なし'}・{_e(j.get('votes'))} 回・校正一致率 {_pct(cal)}（{_e(j.get('calibration_items') or 0)} 件）"
                 + ("・<span class='ng'>弱い判定役</span>" if weak else ""))
         out.append(f"<div style='font-size:20px;margin:8px 0'><b>{_e(v['candidate'])}</b> vs <b>{_e(v['baseline'])}</b>: "
@@ -113,7 +119,7 @@ def render(summary: dict[str, Any], records: list[TrialRecord], baseline: str | 
     out = [f"<!doctype html><html lang='ja'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
            f"<title>Harness Eval {_e(meta.get('run_id'))}</title><style>{CSS}</style></head><body>"]
     j = meta.get("judge") or {}
-    jdesc = (f"段階 {_e(j.get('tier'))}・{_e(j.get('models'))}" if j.get("llm") else
+    jdesc = (f"段階 {_e(j.get('tier'))}・{_judge_models_html(j)}" if j.get("llm") else
              f"{_e(meta.get('options', {}).get('judge_agent'))}/{_e(meta.get('options', {}).get('judge_model'))}")
     out.append(f"<h1>ハーネス評価レポート</h1><div class='mut'>run {_e(meta.get('run_id'))} ・ {_e(meta.get('started_at'))} ・ "
                f"試行 {_e(meta.get('options', {}).get('trials'))} 回/組 ・ k={k} ・ LLM判定 {'あり' if meta.get('options', {}).get('llm') else 'なし'}"

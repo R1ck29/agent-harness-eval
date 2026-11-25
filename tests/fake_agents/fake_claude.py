@@ -220,6 +220,8 @@ if fmt == "json":  # LLM 判定
     if os.environ.get("FAKE_JUDGE_VERDICT"):
         verdict = os.environ["FAKE_JUDGE_VERDICT"]
     res = {"type": "result", "subtype": "success", "is_error": False, "result": f"{verdict}\n偽の判定", "total_cost_usd": 0.001}
+    if os.environ.get("FAKE_JUDGE_ACTUAL_MODEL"):
+        res["model"] = os.environ["FAKE_JUDGE_ACTUAL_MODEL"]
     if os.environ.get("FAKE_JUDGE_USAGE"):
         res["usage"] = {"input_tokens": 1000, "cache_read_input_tokens": 500, "cache_creation_input_tokens": 100, "output_tokens": 20}
     print(json.dumps(res))

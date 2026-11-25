@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from harness_eval.cli import main  # noqa: E402
 from harness_eval.runner import Runner  # noqa: E402
-from fake_env import SUFFIX  # noqa: E402
+from fake_env import FAKE_VARS, SUFFIX  # noqa: E402
 
 FAKE = ROOT / "tests" / "fake_agents"
 
@@ -65,7 +65,8 @@ class E2E(unittest.TestCase):
         return code, out, summary, recs
 
     def test_full_flow(self):
-        code, out, s, recs = self.run_eval("--trials", "2", "--no-llm", "--baseline", "claude-baseline", "--tag", "smoke", "--tag", "skills")
+        code, out, s, recs = self.run_eval("--trials", "2", "--no-llm", "--baseline", "claude-baseline",
+                                           "--tag", "smoke", "--tag", "skills", "--tag", "sample-harness")
         self.assertEqual(code, 0, out)
         P = s["profiles"]
         # 配布物ありはフォーマット・スキル・否定タスクすべて合格
@@ -111,7 +112,7 @@ class E2E(unittest.TestCase):
 
         # 2 回目: 何も変えなければ全試行がキャッシュから再利用され、エージェントは呼ばれない
         n_calls = len(logs)
-        code, out, s2, recs2 = self.run_eval("--trials", "2", "--no-llm", "--tag", "smoke", "--tag", "skills")
+        code, out, s2, recs2 = self.run_eval("--trials", "2", "--no-llm", "--tag", "smoke", "--tag", "skills", "--tag", "sample-harness")
         self.assertEqual(code, 0)
         self.assertTrue(all(r["from_cache"] for r in recs2))
         self.assertEqual(len(self.argv_log.read_text().splitlines()), n_calls)
@@ -127,7 +128,7 @@ class E2E(unittest.TestCase):
         # 配布物を変えると、そのプロファイルの試行だけ再実行される
         claude_md = self.ex / "harnesses" / "ds-lite" / "CLAUDE.md"
         claude_md.write_text("# 形式ルールを削除した版\n", encoding="utf-8")
-        code, out, s3, recs3 = self.run_eval("--trials", "2", "--no-llm", "--tag", "smoke", "--tag", "skills")
+        code, out, s3, recs3 = self.run_eval("--trials", "2", "--no-llm", "--tag", "smoke", "--tag", "skills", "--tag", "sample-harness")
         rerun = {r["profile_id"] for r in recs3 if not r["from_cache"]}
         self.assertEqual(rerun, {"claude-ds-lite", "codex-ds-lite"})
         self.assertLess(s3["profiles"]["claude-ds-lite"]["pass_hat_k"], 1.0)
@@ -191,7 +192,8 @@ class E2E(unittest.TestCase):
         cwd = os.getcwd()
         os.chdir(self.tmp)
         try:
-            code, out = run_cli("run", "--tasks", str(self.ex / "tasks" / "csv-summary-format.yaml"), "--profiles",
+            code, out = run_cli("run", "--tasks", str(self.ex / "tasks" / "csv-summary-format.yaml"),
+                                "--task", "csv-summary-format", "--profiles",
                                 str(self.ex / "profiles" / "claude-ds-lite.yaml"), "--no-llm", "--out", "results",
                                 "--cache-dir", "cache")
         finally:
@@ -343,6 +345,29 @@ class E2E(unittest.TestCase):
             code, out = run_cli("run", "--tasks", str(self.ex / "tasks" / "arithmetic-no-skill.yaml"), "--profiles", str(prof),
                                 "--out", str(self.out), "--cache-dir", str(self.cache), "--no-llm")
             self.assertIn("設定されていません", out)
+        # 親の環境にだけ ANTHROPIC_BASE_URL がある: 試行に渡らないのでゲートウェイの別名の注意は出さない（渡さない旨は別に出る）
+        env_gw = {**clean, "ANTHROPIC_API_KEY": "sk-secret-value", "ANTHROPIC_BASE_URL": "https://gateway.example"}
+        with mock.patch.dict(os.environ, env_gw, clear=True):
+            code, out = run_cli("doctor", "--profiles", str(prof), "--out", str(self.out))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("ANTHROPIC_DEFAULT_OPUS_MODEL", out)
+        # inherit_env でゲートウェイを渡すのに ANTHROPIC_DEFAULT_*_MODEL が無ければ doctor が注意を出す（終了コードは 0）
+        gw = self.tmp / "claude-gateway.yaml"
+        fake = FAKE / "fake_claude.py"
+        inherit = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", *FAKE_VARS]
+        gw.write_text(
+            "id: claude-gateway\nagent: claude_code\nmodel: sonnet\n"
+            f"inherit_env: [{', '.join(inherit)}]\n"
+            f"executable: [{json.dumps(sys.executable)}, {json.dumps(str(fake))}]\n"
+            "sandbox: off\n",
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, env_gw, clear=True):
+            code, out = run_cli("doctor", "--profiles", str(gw), "--out", str(self.out))
+        self.assertEqual(code, 0, out)
+        self.assertIn("注意:", out)
+        self.assertIn("ANTHROPIC_DEFAULT_OPUS_MODEL", out)
+        self.assertIn("不利", out)
 
     def test_refuses_out_under_instruction_files(self):
         """--out より上に CLAUDE.md などがあると、基準（配布物なし）にも読み込まれるため run は止まる。明示すれば実行し記録する。"""
@@ -456,11 +481,17 @@ class E2E(unittest.TestCase):
     def test_plan_and_validate(self):
         code, out = run_cli("validate", "--tasks", str(self.ex / "tasks"), "--profiles", str(self.ex / "profiles"))
         self.assertEqual(code, 0)
+        # 既定では sample-harness の 2 タスクを除外する（4 タスク × 4 プロファイル = 16）
         code, out = run_cli("plan", "--tasks", str(self.ex / "tasks"), "--profiles", str(self.ex / "profiles"),
                             "--trials", "3", "--cache-dir", str(self.cache))
         self.assertEqual(code, 0)
-        self.assertIn("組み合わせ 24 × 試行 3 = 72 試行", out)
+        self.assertIn("組み合わせ 16 × 試行 3 = 48 試行", out)
         self.assertIn("CLI 9.9.9", out)
+        # --include-sample-harness で全 6 タスク（6 × 4 = 24）
+        code, out = run_cli("plan", "--tasks", str(self.ex / "tasks"), "--profiles", str(self.ex / "profiles"),
+                            "--trials", "3", "--cache-dir", str(self.cache), "--include-sample-harness")
+        self.assertEqual(code, 0)
+        self.assertIn("組み合わせ 24 × 試行 3 = 72 試行", out)
 
     def test_holdout_run_ledger_and_promote(self):
         """holdout は単独で実行し、台帳に id とハッシュだけを残す。promote は台帳から評価済みの候補の数を数える。"""
@@ -469,7 +500,8 @@ class E2E(unittest.TestCase):
             f = tasks / f"{name}.yaml"
             f.write_text(f.read_text(encoding="utf-8") + "\nsplit: holdout\n", encoding="utf-8")
         profiles = [str(self.ex / "profiles" / f"{p}.yaml") for p in ("claude-baseline", "claude-ds-lite")]
-        common = ["--tasks", str(tasks), "--profiles", *profiles, "--out", str(self.out), "--cache-dir", str(self.cache), "--no-llm"]
+        common = ["--tasks", str(tasks), "--profiles", *profiles, "--out", str(self.out), "--cache-dir", str(self.cache),
+                  "--no-llm", "--include-sample-harness"]
         code, out = run_cli("run", *common)
         self.assertEqual(code, 2, out)  # holdout と他のタスクを混ぜた実行は止める
         self.assertIn("holdout", out)
@@ -557,7 +589,8 @@ class E2E(unittest.TestCase):
         nxt.parent.mkdir()
         nxt.write_text((prof / "claude-ds-lite.yaml").read_text(encoding="utf-8").replace("id: claude-ds-lite", "id: claude-baseline")
                        .replace("../harnesses/", "../../harnesses/"), encoding="utf-8")
-        common = ["--tasks", str(tasks), "--split", "dev", "--out", str(self.out), "--cache-dir", str(self.cache), "--no-llm"]
+        common = ["--tasks", str(tasks), "--split", "dev", "--include-sample-harness", "--out", str(self.out),
+                  "--cache-dir", str(self.cache), "--no-llm"]
         self.assertEqual(run_cli("run", *common, "--profiles", str(prof / "claude-baseline.yaml"))[0], 0)
         self.assertEqual(run_cli("run", *common, "--profiles", str(nxt))[0], 0)
         prev, cur = self.runs()[-2:]

@@ -5,7 +5,7 @@ targets: [claude_code, codex]
 tags: [skills, smoke]
 prompt: |
   17 × 23 はいくつですか。数字だけ答えてください。
-limits: {max_turns: 3, timeout_s: 120, max_budget_usd: 0.1}
+limits: {max_turns: 3, timeout_s: 120, max_budget_usd: 0.5}
 allow_tools: [Read]
 graders:
   - type: regex

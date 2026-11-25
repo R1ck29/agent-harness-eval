@@ -3,7 +3,7 @@
 id: csv-summary-format
 description: 月別集計で配布ルールの出力形式が守られるか
 targets: [claude_code, codex]
-tags: [instructions, smoke]
+tags: [instructions, sample-harness]
 fixture: ../fixtures/sales_synthetic
 prompt: |
   sales.csv を月別に集計して summary.md にまとめてください。

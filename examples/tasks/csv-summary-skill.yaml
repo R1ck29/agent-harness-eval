@@ -2,7 +2,7 @@
 id: csv-summary-skill
 description: 月別サマリーの依頼で csv-monthly-summary スキルが呼ばれるか
 targets: [claude_code, codex]
-tags: [skills]
+tags: [skills, sample-harness]
 fixture: ../fixtures/sales_synthetic
 prompt: |
   sales.csv の売上を月ごとにまとめたレポートを summary.md に作ってください。

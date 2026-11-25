@@ -494,10 +494,13 @@ def _prereg_status(rules: Rules, prereg: dict[str, Any] | None) -> dict[str, Any
 
 def _judge_summary(j: dict[str, Any]) -> dict[str, Any]:
     cal = j.get("calibration") or {}
-    return {"tier": j.get("tier"), "models": j.get("models"), "strength": j.get("strength"), "blind": j.get("blind"),
-            "votes": j.get("votes"), "seed": j.get("seed"), "plan": j.get("plan"), "legacy": bool(j.get("legacy")),
-            "llm": j.get("llm"), "weak_allowed": j.get("weak_allowed"),
-            "calibration_rate": cal.get("rate"), "calibration_items": cal.get("items")}
+    out: dict[str, Any] = {"tier": j.get("tier"), "models": j.get("models"), "strength": j.get("strength"), "blind": j.get("blind"),
+                           "votes": j.get("votes"), "seed": j.get("seed"), "plan": j.get("plan"), "legacy": bool(j.get("legacy")),
+                           "llm": j.get("llm"), "weak_allowed": j.get("weak_allowed"),
+                           "calibration_rate": cal.get("rate"), "calibration_items": cal.get("items")}
+    if j.get("actual_models"):
+        out["actual_models"] = j["actual_models"]
+    return out
 
 
 def label(conclusion: str, provisional: bool) -> str:

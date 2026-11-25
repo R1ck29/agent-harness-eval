@@ -52,7 +52,7 @@ class StartBudget(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def args(self, cmd: str, task: str, *extra: str):
-        return [cmd, "--tasks", str(self.ex / "tasks" / f"{task}.yaml"),
+        return [cmd, "--tasks", str(self.ex / "tasks" / f"{task}.yaml"), "--include-sample-harness",
                 "--profiles", str(self.ex / "profiles" / "claude-baseline.yaml"), str(self.ex / "profiles" / "claude-ds-lite.yaml"),
                 "--out", str(self.tmp / "out"), "--cache-dir", str(self.tmp / "cache"), "--baseline", "claude-baseline", "--no-llm", *extra]
 
@@ -92,6 +92,8 @@ class JudgeBudgetStopDirect(unittest.TestCase):
         phase.opt = SimpleNamespace(max_cost_usd=cap, use_cache=False, cache_dir=Path(tempfile.gettempdir()) / "he-no-cache")
         phase.judge = SimpleNamespace(tier="dev")
         phase.lock = threading.Lock()
+        phase._judge_call_meta = threading.local()
+        phase.judge_actual_models = {}
         phase.spent = spent
         phase.spent_api = {"codex": spent_api}
         phase.month_remaining = lambda family: month_left

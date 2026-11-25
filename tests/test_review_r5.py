@@ -149,7 +149,10 @@ class DrainCapTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="r5r-drain-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         out, err = tmp / "stdout.jsonl", tmp / "stderr.txt"
-        res = run_process([sys.executable, "-c", script], tmp, {"PATH": ""}, None, out, err, 60, log_limit=limit)
+        env = {"PATH": ""}
+        if root := os.environ.get("SYSTEMROOT"):
+            env["SYSTEMROOT"] = root  # Python 3.10 on Windows cannot start without it
+        res = run_process([sys.executable, "-c", script], tmp, env, None, out, err, 60, log_limit=limit)
         return res, out, err
 
     def test_garbage_is_capped_but_the_trailing_usage_event_is_kept(self):
@@ -255,6 +258,7 @@ class KillTreeOrderTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0)
 
 
+@unittest.skipIf(sys.platform == "win32", "_grader_material is for the Linux bwrap sandbox")
 class GraderMaterialLinkWarningTests(unittest.TestCase):
     """r4 #9: リンクを通る採点資材は bind しない（安全側）が、捨てたことを警告する。"""
 

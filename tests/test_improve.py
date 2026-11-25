@@ -560,8 +560,8 @@ class ImproveE2E(unittest.TestCase):
 
     def train_run(self, profile: Path, split="train") -> Path:
         before = set(self.res.iterdir()) if self.res.exists() else set()
-        code, out = run_cli("run", "--tasks", str(self.ex / "tasks"), "--split", split, "--profiles", str(profile),
-                            "--out", str(self.res), "--no-cache", "--no-llm")
+        code, out = run_cli("run", "--tasks", str(self.ex / "tasks"), "--split", split, "--include-sample-harness",
+                            "--profiles", str(profile), "--out", str(self.res), "--no-cache", "--no-llm")
         self.assertEqual(code, 0, out)
         return [d for d in self.res.iterdir() if d.is_dir() and d not in before][0]
 

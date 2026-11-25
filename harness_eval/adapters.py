@@ -140,6 +140,34 @@ class ClaudeAdapter(_Adapter):
                         "cache_write": u.get("cache_creation_input_tokens"), "output": u.get("output_tokens")}
         return {}
 
+    @staticmethod
+    def judge_model(stdout: str) -> str | None:
+        """判定 CLI が返した実際のモデル ID（result の model / modelUsage、assistant、init から取得）。なければ None。"""
+        res_model = msg_model = init_model = None
+        for obj in _jsonl(stdout.splitlines(), []):
+            t = obj.get("type")
+            if t == "system" and obj.get("subtype") == "init":
+                m = obj.get("model")
+                if isinstance(m, str) and m.strip():
+                    init_model = m.strip()
+            elif t == "assistant":
+                m = (obj.get("message") or {}).get("model")
+                if isinstance(m, str) and m.strip():
+                    msg_model = m.strip()
+            elif t == "result":
+                m = obj.get("model")
+                if isinstance(m, str) and m.strip():
+                    res_model = m.strip()
+                elif isinstance(obj.get("modelUsage"), dict):
+                    # 副次呼び出し（haiku など）も並ぶので、先頭ではなく出力トークン（なければ費用）が最も多いモデル
+                    def weight(item: tuple[str, Any]) -> tuple[float, float]:
+                        u = item[1] if isinstance(item[1], dict) else {}
+                        return float(u.get("outputTokens") or 0), float(u.get("costUSD") or 0)
+                    named = [(k.strip(), v) for k, v in obj["modelUsage"].items() if isinstance(k, str) and k.strip()]
+                    if named:
+                        res_model = max(named, key=weight)[0]
+        return res_model or msg_model or init_model
+
     def parse(self, lines: Iterable[str], profile: Profile | None = None, *, usage_only: bool = False) -> ParsedRun:
         r = ParsedRun(hook_calls=[])
         pending: dict[str, ToolCall] = {}
@@ -219,6 +247,9 @@ class ClaudeAdapter(_Adapter):
             r.error_type, r.error_message = "max_turns", "max_turns に到達"
         elif st == "error_max_budget_usd":
             r.error_type, r.error_message = "budget_exceeded", "max_budget_usd に到達"
+            # 予算到達時に CLI が total_cost_usd: 0 を返すことがある（過小計上）。後段のトークン換算や上限額見積もりに渡す
+            if r.cost_usd is not None and r.cost_usd <= 0:
+                r.cost_usd, r.cost_source = None, None
         elif st and st != "success":
             msg = "; ".join(map(str, result.get("errors") or [])) or str(st)
             r.error_type, r.error_message = _status_type(status) or _classify_message(msg), msg[:500]
@@ -268,6 +299,19 @@ class CodexAdapter(_Adapter):
     def judge_tokens(self, stdout: str) -> dict[str, int | None]:
         """判定 1 回のトークン（input はキャッシュ読みを含む OpenAI の定義）。"""
         return dict(self.parse(stdout.splitlines()).tokens)
+
+    @staticmethod
+    def judge_model(stdout: str) -> str | None:
+        """判定 CLI が返した実際のモデル ID（イベントに model が含まれる場合）。なければ None。"""
+        found = None
+        for obj in _jsonl(stdout.splitlines(), []):
+            m = obj.get("model")
+            payload = obj.get("payload")
+            if not m and isinstance(payload, dict):
+                m = payload.get("model")
+            if isinstance(m, str) and m.strip():
+                found = m.strip()
+        return found
 
     def parse(self, lines: Iterable[str], profile: Profile | None = None, *, usage_only: bool = False) -> ParsedRun:
         r = ParsedRun(skill_detection="heuristic")

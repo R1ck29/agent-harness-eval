@@ -22,6 +22,7 @@ GRADER_FIELDS: dict[str, set[str]] = {
     "file_exists": {"path"},
     "file_contains": {"path", "pattern"},
     "regex": {"pattern"},
+    "clarification": set(),
     "command": {"run", "timeout_s", "ro"},
     "llm": {"criteria", "focus", "max_chars"},
     # 過程（process）を見るグレーダー
@@ -37,6 +38,7 @@ REQUIRED: dict[str, set[str]] = {
     "file_exists": {"path"},
     "file_contains": {"path", "pattern"},
     "regex": {"pattern"},
+    "clarification": set(),
     "command": {"run"},
     "llm": {"criteria"},
     "tool_used": {"tool"},
@@ -48,6 +50,7 @@ DEFAULT_CATEGORY = {
     "file_exists": "wrong_output",
     "file_contains": "wrong_output",
     "regex": "wrong_output",
+    "clarification": "clarification",
     "command": "wrong_output",
     "llm": "wrong_output",
     "tool_used": "process_violation",

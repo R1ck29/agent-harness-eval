@@ -205,7 +205,7 @@ SCHEMA = {
         "final_answer_example": {"type": "string"},
         "check_script": {"type": "string"},
         "graders": {"type": "array", "items": {"type": "object", "required": ["type"], "properties": {
-            "type": {"type": "string", "enum": ["file_exists", "file_contains", "regex", "tool_used"]},
+            "type": {"type": "string", "enum": ["file_exists", "file_contains", "regex", "clarification", "tool_used"]},
             "path": {"type": "string"}, "pattern": {"type": "string"}, "tool": {"type": "string"},
             "input_match": {"type": "string"}, "min": {"type": "integer"}, "max": {"type": "integer"},
             "description": {"type": "string"}}}},
@@ -229,7 +229,7 @@ CONVERT_PROMPT = """あなたはエージェント評価用のタスクを作る
   最終応答やファイルに要求しない）。正解例で通るものだけにする
 - 金額・件数・しきい値などの数値も元と同じ値を使わない（桁や大きさは同じくらいでよい）
 - 依頼の条件が曖昧で、実務なら作業前に確認すべき依頼なら needs_clarification を true にし、prompt も同じように曖昧にする。
-  その場合は check_script を空にし、graders で「確認の質問を返したか（regex: [?？]）」「成果物を書いていないか
+  その場合は check_script を空にし、graders で「確認の質問を返したか（type: clarification）」「成果物を書いていないか
   （tool_used: Write|Edit|file_change, max 0）」を見る。final_answer_example は確認の質問の例
 - 雑談・個人的な内容・評価にならない依頼なら usable を false にする（他は空でよい）
 - id は英小文字・数字・ハイフンで 40 文字以内。category は「データ抽出」「集計」「分析」「説明」「文書作成」「コード」などの短い分類
@@ -434,8 +434,8 @@ def selftest(task: Task, notes: list[str] | None = None) -> str | None:
 # ---------------------------------------------------------------- 4. 書き出し
 def allowed_grader(g: dict, draft: dict) -> bool:
     """依頼文で求めていないことを採点しない（実測: 依頼にない「最終応答で 1 位の店名に触れる」を要求する案が出た）。
-    最終応答の regex は確認の質問を見るタスクだけ、ファイルの判定は依頼文に出てくるファイルだけ。"""
-    if g.get("type") == "regex":
+    最終応答の regex / clarification は確認の質問を見るタスクだけ、ファイルの判定は依頼文に出てくるファイルだけ。"""
+    if g.get("type") in ("regex", "clarification"):
         return bool(draft.get("needs_clarification"))
     if g.get("type") in ("file_exists", "file_contains"):
         name = Path(str(g.get("path") or "")).name
