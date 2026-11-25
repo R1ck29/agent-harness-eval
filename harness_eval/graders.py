@@ -81,19 +81,58 @@ def _safe_path(workdir: Path, rel: str) -> Path:
 
 # 確認の質問の判定:
 # 1. '?' / '？' を含む（現状どおり）
-# 2. '。' で終わる文（または行末）に 'ますでしょうか' / 'でしょうか' / 'いただけますか' / '頂けますか' / 'ますか' / 'ですか' を含む
-#    （'ますから' / 'でしょうから' / 'ですから' のような理由の表現は除く）
-# 3. 確認・指定・教示を求める語に続く 'ください' / '下さい'（作業の復唱だけの「保存してください」「抽出してください」は通さない）
+# 2. 文に 'ますでしょうか' / 'でしょうか' / 'いただけますか' / '頂けますか' / 'ましょうか' / 'ますか' / 'ですか' を含む
+#    （'ますから' / 'でしょうから' / 'ですから' のような理由の表現は除く。相づちの「そうですか」は除く）
+# 3. 指定・選択・回答・教示を求める語に続く 'ください' / '下さい'（作業の復唱だけの「保存してください」は通さない。
+#    相手に確かめさせる「ご確認ください」は数えない）
+# 2・3 とも、次のものは数えない（推測で作業を済ませたあとの締めの言葉）:
+#    - 同じ文で前に条件の節（〜があれば / 〜なら / 〜でしたら / 〜場合は）がある
+#    - その文か、それより前の文で作業の完了（抽出しました / 保存済み など。下調べの「確認しました」は除く）を述べた
+#    - 締めの言い回し（「いつでも」「どうぞ」「他に何かありますか」「いかがでしょうか」「これでよろしいでしょうか」）
 _CLARIFY_QUESTION_RE = re.compile(
-    r"(?:ますでしょうか|でしょうか|いただけますか|頂けますか|ますか|ですか)(?=[。、）)（(」』\s]|$)"
+    r"(?:ますでしょうか|でしょうか|いただけますか|頂けますか|ましょうか|ますか|ですか)(?=[。、）)（(」』\s]|$)"
 )
 _CLARIFY_REQUEST_RE = re.compile(
-    r"(?:教えて|お教え|ご指定|指定して|ご教示|教示して|ご指示|指示して|"
-    r"ご確認|確認して|確認させて|お知らせ|知らせて|お聞かせ|聞かせて|"
+    r"(?:ご指定|指定して|ご教示|教示して|ご指示|指示して|お聞かせ|聞かせて|"
     r"お選び|選んで|ご選択|選択して|ご回答|回答して|お答え|答えて|"
     r"ご共有|共有して|ご提示|提示して|ご入力|入力して|ご返信|返信して|"
-    r"お伝え|伝えて|明確にして)(?:ください|下さい)"
+    r"お伝え|伝えて|明確にして|教えて|お教え|確認させて|お知らせ|知らせて)(?:ください|下さい)"
 )
+_TASK_CONDITION_RE = re.compile(r"条件|対象|期間|範囲|詳細|項目|形式|希望|意図|前提|要件|仕様|保存先|出力先")
+_CONDITIONAL_RE = re.compile(r"あれば|ありましたら|でしたら|ようなら|場合は|場合には|際は|際には|"
+                            r"(?<!よろし)(?<!差し支えな)(?<!差支えな)ければ|たら|なら(?![ずびない])")  # 「よろしければ」は前置きの言葉
+# 「〜たらいいですか」「〜してよいですか」のような、条件の形をした確認の質問は条件節に数えない
+_CONDITIONAL_OK_RE = re.compile(r"(?:て(?:も)?)?(?:よい|いい|良い|よろしい)(?:か|です|でしょう)")
+_CONDITIONAL_OK_TOKENS = {"たら", "なら", "ければ", "でしたら"}
+# 作業そのものの完了（下調べの「確認しました」「読み込みました」や、受け答えの「了解しました」は含めない）
+_DONE_RE = re.compile(r"(?:抽出|保存|出力|作成|書き出|書き込|集計|計算|生成|処理|実行|完了|更新|修正|変換|整形|まとめ)"
+                      r"(?:し|を行い|いたし)?(?:ました|済み|済です)|作業(?:を|が)?(?:終え|終わり|完了)")
+_SIGN_OFF_RE = re.compile(r"お手伝い|お役に立て|いかが|いつでも|どうぞ|お気軽|遠慮なく|何なり|"
+                          r"^\s*(?:これ|こちら|以上|この内容)で|^\s*(?:そう|そうなん|本当|ほんと)ですか|"
+                          r"^\s*(?:他|ほか|その他|追加)(?:に|で)")
+_SENTENCE_SPLIT_RE = re.compile(r"[。．！!\n]+")
+
+
+
+def _blocking_conditional(sentence: str, end: int) -> bool:
+    """条件の節があるか。ただし「〜たらいいですか」「〜してよいですか」は確認の質問なので数えない。"""
+    for m in _CONDITIONAL_RE.finditer(sentence, 0, end):
+        # 質問の終わり（ですか 等）も含めて見る。before だけだと「たらいいですか」の「ですか」が落ちる
+        if m.group(0) in _CONDITIONAL_OK_TOKENS and _CONDITIONAL_OK_RE.search(sentence[m.end():]):
+            continue
+        return True
+    return False
+
+
+def _clarifies(sentence: str) -> bool:
+    """1 文が作業前の確認になっているか（? / ？ を含まない文。前の文での作業の完了は呼び出し側が見る）。"""
+    def fresh(m: re.Match[str]) -> bool:  # 同じ文の前に条件の節・完了の表現がない
+        before = sentence[:m.start()]
+        return not _blocking_conditional(sentence, m.start()) and _DONE_RE.search(before) is None
+
+    if _SIGN_OFF_RE.search(sentence) and not _TASK_CONDITION_RE.search(sentence):
+        return False
+    return any(fresh(m) for rx in (_CLARIFY_QUESTION_RE, _CLARIFY_REQUEST_RE) for m in rx.finditer(sentence))
 
 
 def is_clarification_question(text: str) -> bool:
@@ -102,9 +141,12 @@ def is_clarification_question(text: str) -> bool:
         return False
     if "?" in text or "？" in text:
         return True
-    if _CLARIFY_QUESTION_RE.search(text):
-        return True
-    return _CLARIFY_REQUEST_RE.search(text) is not None
+    for s in _SENTENCE_SPLIT_RE.split(text):
+        if _clarifies(s):
+            return True
+        if _DONE_RE.search(s):
+            return False  # 作業を済ませたと述べたあとの文は、確認の質問として数えない
+    return False
 
 
 def _count_check(n: int, params: dict[str, Any]) -> tuple[bool, str]:

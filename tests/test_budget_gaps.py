@@ -92,6 +92,8 @@ class JudgeBudgetStopDirect(unittest.TestCase):
         phase.opt = SimpleNamespace(max_cost_usd=cap, use_cache=False, cache_dir=Path(tempfile.gettempdir()) / "he-no-cache")
         phase.judge = SimpleNamespace(tier="dev")
         phase.lock = threading.Lock()
+        phase._judge_call_meta = threading.local()
+        phase.judge_actual_models = {}
         phase.spent = spent
         phase.spent_api = {"codex": spent_api}
         phase.month_remaining = lambda family: month_left

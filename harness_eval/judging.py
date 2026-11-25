@@ -134,9 +134,10 @@ def majority(votes: list[str]) -> str:
 
 
 def infer_family(model: str) -> str:
-    """モデル名から系統を推定する（--judge-model に系統を書かなかったとき）。gpt-* は codex、それ以外は claude_code。"""
-    tail = model.strip().lower().rsplit("/", 1)[-1].rsplit(":", 1)[-1]
-    return "codex" if tail.startswith(("gpt", "o1", "o3", "o4")) else "claude_code"
+    """モデル名から系統を推定する（--judge-model に系統を書かなかったとき）。gpt-* は codex、それ以外は claude_code。
+    プロバイダの前置き（openai/）やタグ（:free）を含んでもよい: / と : で区切ったどこかが gpt・o1・o3・o4 で始まれば codex。"""
+    parts = re.split(r"[/:]", model.strip().lower())
+    return "codex" if any(p.startswith(("gpt", "o1", "o3", "o4")) for p in parts) else "claude_code"
 
 
 @dataclass(frozen=True)

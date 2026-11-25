@@ -233,7 +233,7 @@ def write_efficiency_material(work: Path, profile: Profile, tasks: dict[str, Tas
         tok = [x for r in recs if (x := _trial_tokens(r)) is not None]
         ctx = [r.meta.get("context_tokens") for r in recs if r.meta.get("context_tokens") is not None]
         turns = [r.num_turns for r in recs if r.num_turns is not None]
-        stats[tid] = {"trials": len(recs), "pass_rate": sum(r.passed for r in recs) / len(recs),
+        stats[tid] = {"trials": len(recs), "pass_rate": sum(bool(r.passed) for r in recs) / len(recs),
                       "mean_tokens": sum(tok) / len(tok) if tok else None,
                       "mean_turns": sum(turns) / len(turns) if turns else None,
                       "mean_context_tokens": sum(ctx) / len(ctx) if ctx else None,

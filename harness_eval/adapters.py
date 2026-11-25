@@ -159,9 +159,13 @@ class ClaudeAdapter(_Adapter):
                 if isinstance(m, str) and m.strip():
                     res_model = m.strip()
                 elif isinstance(obj.get("modelUsage"), dict):
-                    first = next((k.strip() for k in obj["modelUsage"] if isinstance(k, str) and k.strip()), None)
-                    if first:
-                        res_model = first
+                    # 副次呼び出し（haiku など）も並ぶので、先頭ではなく出力トークン（なければ費用）が最も多いモデル
+                    def weight(item: tuple[str, Any]) -> tuple[float, float]:
+                        u = item[1] if isinstance(item[1], dict) else {}
+                        return float(u.get("outputTokens") or 0), float(u.get("costUSD") or 0)
+                    named = [(k.strip(), v) for k, v in obj["modelUsage"].items() if isinstance(k, str) and k.strip()]
+                    if named:
+                        res_model = max(named, key=weight)[0]
         return res_model or msg_model or init_model
 
     def parse(self, lines: Iterable[str], profile: Profile | None = None, *, usage_only: bool = False) -> ParsedRun:
@@ -301,7 +305,10 @@ class CodexAdapter(_Adapter):
         """判定 CLI が返した実際のモデル ID（イベントに model が含まれる場合）。なければ None。"""
         found = None
         for obj in _jsonl(stdout.splitlines(), []):
-            m = obj.get("model") or (obj.get("payload") or {}).get("model") if isinstance(obj.get("payload"), dict) else obj.get("model")
+            m = obj.get("model")
+            payload = obj.get("payload")
+            if not m and isinstance(payload, dict):
+                m = payload.get("model")
             if isinstance(m, str) and m.strip():
                 found = m.strip()
         return found

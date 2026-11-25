@@ -481,6 +481,42 @@ class GraderTests(unittest.TestCase):
             "条件を確認させてください。",
             "対象店舗はどちらですか。",
             "詳細を教えてください。",
+            "対象期間を教えてください。",
+            "どの店舗が対象か教えてください。",
+            "2026年3月でよろしいですか。",
+            # 作業の条件についての「はい / いいえ」の確認
+            "店舗は全店ですか。",
+            "先月というのは3月ですか。",
+            "出力はCSVですか。",
+            "対象は売上ですか、それとも利益ですか。",
+            "全店でよいですか。",
+            # 受け答え・下調べのあとの質問、前置きの「よろしければ」
+            "了解しました。対象期間はいつでしょうか。",
+            "ファイルを確認しました。先月とは何月のことでしょうか。",
+            "よろしければ、対象の店舗をご指定ください。",
+            "差し支えなければ、対象期間を教えてください。",
+            "他に条件はありますか。",
+            # データを下調べしてから聞く・箇条書きで聞く・作業の条件の語に限らない名詞
+            "データを確認しました。対象期間を教えてください。",
+            "sales.csv を確認しました。2026年2月と3月のデータがあります。どちらを抽出するか教えてください。",
+            "データを読み込みました。いつの期間が対象か教えてください。",
+            "作業前に以下を教えてください。\n1. 対象期間（例: 2026年3月）\n2. 対象店舗\n3. 出力形式",
+            "以下を確認させてください：\n- 期間\n- 店舗",
+            "次の2点を教えてください。",
+            "抽出する月を教えてください。",
+            "店舗を教えてください。",
+            "売上の定義を教えてください。",
+            "いくつか確認させてください。",
+            "出力はどの形式にしましょうか。",
+            "以下を教えてください。\n- 何月分か\n- どの店舗か",
+            "fixture を確認しました。先月が何月を指すか教えてください。",
+            "年月を教えてください。",
+            "承知しました。抽出する期間を教えてください。",
+            # 「たら / なら」でも、〜たらいいですか / 〜してよいですか は確認の質問
+            "どの月を対象にしたらいいですか。",
+            "保存先はどこにしたら良いでしょうか。",
+            "どの期間を抽出したらよいか教えてください。",
+            "先月が10月なら、10月分を抽出してよいですか。",
         ]
         for msg in positives:
             with self.subTest(positive=msg):
@@ -501,6 +537,48 @@ class GraderTests(unittest.TestCase):
             "必要ですから抽出しました。",
             "ご指定のファイルに保存してください。",
             "この処理は終わるでしょうから、次に進みます。",
+            # 締めの定型句（推測で作業して結果だけ返し、最後に添えるもの）は確認の質問ではない
+            "結果をご確認ください。",
+            "ご不明点があればお知らせください。",
+            "他に必要なことがあれば教えてください。",
+            "そうですか。",
+            "抽出しました。結果をご確認ください。",
+            "保存しましたのでご確認ください。",
+            "修正が必要でしたら教えてください。",
+            "問題がある場合はお知らせください。",
+            "条件の変更があればご指定ください。",
+            "3月分を抽出しました。ご不明点があればお知らせください。",
+            "他に何かお手伝いできることはありますか。",
+            "ほかの期間が必要なら教えてください。",
+            "別の形式がよければお知らせください。",
+            "3月分を抽出済みです。範囲の変更が必要なら教えてください。",
+            "2026年3月分を抽出し sales.csv に保存しました。詳細をご確認ください。",
+            "2026年3月分を抽出しました。詳細を知りたい項目を教えてください。",
+            "いつでもお知らせください。",
+            "どうぞご確認ください。",
+            "対象期間の結果をご確認ください。",
+            "出力先の out.csv をご確認ください。",
+            "保存先を確認してください。",
+            "他に何かありますか。",
+            "他にご要望はありますか。",
+            "追加で必要な作業はありますか。",
+            "いかがでしょうか。",
+            "これでよろしいでしょうか。",
+            # 作業を済ませたと述べたあとの質問・依頼
+            "3月分を抽出しました。内容をご確認いただけますか。",
+            "3月分を抽出しました。他の月も抽出しますか。",
+            "抽出しました。対象を教えていただけますか。",
+            "先月を3月と仮定して抽出しました。違っていたら教えてください。",
+            "完了しました。修正点があればお知らせください。",
+            "3月分を保存済みです。必要であれば期間を指定してください。",
+            "3月分を抽出しました。結果をご確認いただけますでしょうか。",
+            "3月分を抽出しました。次に何をしますか。",
+            "抽出しました。追加の条件はありますか。",
+            "抽出しました。内容に問題はないでしょうか。",
+            "3月分を抽出しました。グラフも作りましょうか。",
+            "他に何か抽出しましょうか。",
+            "お気軽にお知らせください。",
+            "| 店舗 | 売上 |\n|---|---|\n| A | 100 |\n\n以上が3月分の売上です。ご確認ください。",
         ]
         for msg in negatives:
             with self.subTest(negative=msg):
@@ -664,8 +742,24 @@ class DoctorTests(unittest.TestCase):
         plain = load_profile(write(tmp / "a.yaml", "id: a\nagent: claude_code\n"))
         self.assertEqual(missing_gateway_models(plain, {}), [])
         want_all = ["ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"]
-        # 親の環境に ANTHROPIC_BASE_URL がある
-        self.assertEqual(missing_gateway_models(plain, {"ANTHROPIC_BASE_URL": "https://gw.example"}), want_all)
+        # 親の環境にだけ ANTHROPIC_BASE_URL がある: 宣言していないので試行には渡らない（route_variables が別に知らせる）→ 注意しない
+        self.assertEqual(missing_gateway_models(plain, {"ANTHROPIC_BASE_URL": "https://gw.example"}), [])
+        # inherit_env / env で ANTHROPIC_BASE_URL を試行に渡す
+        via_inherit = load_profile(write(tmp / "f.yaml", "id: f\nagent: claude_code\ninherit_env: [ANTHROPIC_BASE_URL]\n"))
+        self.assertEqual(missing_gateway_models(via_inherit, {"ANTHROPIC_BASE_URL": "https://gw.example"}), want_all)
+        via_env = load_profile(write(tmp / "g.yaml", "id: g\nagent: claude_code\nenv: {ANTHROPIC_BASE_URL: 'https://gw.example'}\n"))
+        self.assertEqual(missing_gateway_models(via_env, {}), want_all)
+        both = load_profile(write(tmp / "h.yaml", "id: h\nagent: claude_code\ninherit_env: [ANTHROPIC_BASE_URL]\n"
+                                                  "env_unset: [ANTHROPIC_BASE_URL]\n"))
+        self.assertEqual(missing_gateway_models(both, {"ANTHROPIC_BASE_URL": "https://gw.example"}), [])
+        # env の値は env_unset のあとに入るので試行に渡る（build_env と同じ順序）
+        env_over_unset = load_profile(write(tmp / "i.yaml", "id: i\nagent: claude_code\nenv: {ANTHROPIC_BASE_URL: 'https://gw.example'}\n"
+                                                            "env_unset: [ANTHROPIC_BASE_URL]\n"))
+        self.assertEqual(missing_gateway_models(env_over_unset, {}), want_all)
+        # model が完全な ID でも注意する: ハーネス内のサブエージェント・スキルは opus などの別名で呼ぶ
+        full_id = load_profile(write(tmp / "j.yaml", "id: j\nagent: claude_code\nmodel: claude-sonnet-5-5-20261101\n"
+                                                     "inherit_env: [ANTHROPIC_BASE_URL]\n"))
+        self.assertEqual(missing_gateway_models(full_id, {"ANTHROPIC_BASE_URL": "https://gw.example"}), want_all)
         # プロファイルの inherit_env / env で宣言されている
         decl = load_profile(write(tmp / "b.yaml", "id: b\nagent: claude_code\ninherit_env: [ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_SONNET_MODEL]\n"
                                                   "env: {ANTHROPIC_DEFAULT_HAIKU_MODEL: haiku-id}\n"))

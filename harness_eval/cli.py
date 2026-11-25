@@ -570,7 +570,7 @@ def cmd_doctor(a) -> int:
     ok = static_ok
     for r in recs:
         status = "OK" if r.passed else f"NG ({(r.error or {}).get('type', 'score=' + str(r.score))}: {(r.error or {}).get('message', '')[:200]})"
-        ok &= r.passed
+        ok &= bool(r.passed)
         print(f"\n[{r.profile_id}] 最小試行: {status} ／ モデル {r.meta.get('model')} ／ 費用 {r.cost_usd}")
         for key, label in (("loaded_skills", "スキル"), ("loaded_plugins", "プラグイン"), ("mcp_servers", "MCP")):
             items = r.meta.get(key)

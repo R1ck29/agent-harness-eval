@@ -304,6 +304,8 @@ class _DummyJudgeHost(JudgePhase):
         self._identities: dict = {}
         self._judge_seq = 0
         self.lock = threading.Lock()
+        self._judge_call_meta = threading.local()
+        self.judge_actual_models: dict[str, set[str]] = {}
         self._inplace_locks = {"claude_code": threading.Lock(), "codex": threading.Lock()}
         self.spent = 0.0
         self.spent_api: dict[str, float] = {"claude_code": 0.0, "codex": 0.0}

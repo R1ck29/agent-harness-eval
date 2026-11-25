@@ -345,10 +345,18 @@ class E2E(unittest.TestCase):
             code, out = run_cli("run", "--tasks", str(self.ex / "tasks" / "arithmetic-no-skill.yaml"), "--profiles", str(prof),
                                 "--out", str(self.out), "--cache-dir", str(self.cache), "--no-llm")
             self.assertIn("設定されていません", out)
-        # ゲートウェイ（ANTHROPIC_BASE_URL）設定時に ANTHROPIC_DEFAULT_*_MODEL が無ければ doctor が注意を出す（終了コードは 0）
-        with mock.patch.dict(os.environ, {**clean, "ANTHROPIC_API_KEY": "sk-secret-value",
-                                          "ANTHROPIC_BASE_URL": "https://gateway.example"}, clear=True):
+        # 親の環境にだけ ANTHROPIC_BASE_URL がある: 試行に渡らないのでゲートウェイの別名の注意は出さない（渡さない旨は別に出る）
+        env_gw = {**clean, "ANTHROPIC_API_KEY": "sk-secret-value", "ANTHROPIC_BASE_URL": "https://gateway.example"}
+        with mock.patch.dict(os.environ, env_gw, clear=True):
             code, out = run_cli("doctor", "--profiles", str(prof), "--out", str(self.out))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("ANTHROPIC_DEFAULT_OPUS_MODEL", out)
+        # inherit_env でゲートウェイを渡すのに ANTHROPIC_DEFAULT_*_MODEL が無ければ doctor が注意を出す（終了コードは 0）
+        gw = self.tmp / "claude-gateway.yaml"
+        gw.write_text("id: claude-gateway\nagent: claude_code\nmodel: sonnet\ninherit_env: [ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL]\n",
+                      encoding="utf-8")
+        with mock.patch.dict(os.environ, env_gw, clear=True):
+            code, out = run_cli("doctor", "--profiles", str(gw), "--out", str(self.out))
         self.assertEqual(code, 0, out)
         self.assertIn("注意:", out)
         self.assertIn("ANTHROPIC_DEFAULT_OPUS_MODEL", out)

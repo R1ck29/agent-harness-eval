@@ -115,15 +115,15 @@ GATEWAY_MODEL_VARS = (
 
 
 def missing_gateway_models(profile: Profile, environ: dict[str, str]) -> list[str]:
-    """親の環境またはプロファイルで ANTHROPIC_BASE_URL が使われているのに、env にも inherit_env にも無い
-    ANTHROPIC_DEFAULT_*_MODEL を返す。無ければ空。"""
+    """試行に ANTHROPIC_BASE_URL を渡す（env で決める、または inherit_env で宣言し env_unset で消さない）のに、env にも
+    inherit_env にも無い ANTHROPIC_DEFAULT_*_MODEL を返す。無ければ空。親の環境にあるだけの ANTHROPIC_BASE_URL は試行に
+    渡らない（許可リスト。route_variables が別に知らせる）ので数えない。プロファイルの model が完全な ID でも注意する
+    （ハーネス内のサブエージェント・スキルが opus などの別名を使うため）。"""
     if profile.agent != "claude_code":
         return []
     unset = set(profile.env_unset)
-    has_base_url = (
-        bool(profile.env.get("ANTHROPIC_BASE_URL"))
-        or ("ANTHROPIC_BASE_URL" in profile.inherit_env and "ANTHROPIC_BASE_URL" not in unset)
-        or (bool(environ.get("ANTHROPIC_BASE_URL")) and "ANTHROPIC_BASE_URL" not in unset)
+    has_base_url = bool(profile.env.get("ANTHROPIC_BASE_URL")) or (  # env は env_unset のあとに入る（build_env と同じ）
+        "ANTHROPIC_BASE_URL" in profile.inherit_env and "ANTHROPIC_BASE_URL" not in unset
     )
     if not has_base_url:
         return []

@@ -9,6 +9,7 @@ import os
 import random
 import shutil
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,10 @@ class JudgeBudgetStop(Exception):
 
 class JudgePhase:
     """Runner に混ぜて使う（self.opt・self.judge・self.lock・self._spend などは Runner が持つ）。"""
+
+    # Runner.__init__ が用意する（判定 CLI が返した実際のモデル ID: 系統ごと / 判定 1 回の付帯情報: スレッドごと）
+    judge_actual_models: dict[str, set[str]]
+    _judge_call_meta: threading.local
 
     def judge_estimate(self) -> dict[str, Any]:
         """判定側の見積もり（上限）: 決定的な検査がすべて合格したと仮定した判定回数 × 1 回あたりの費用。段階ごと（dev / decisive）。
@@ -152,16 +157,14 @@ class JudgePhase:
         text, cli_cost, jerr = adapter.parse_judge(out)
         tokens = adapter.judge_tokens(out)
         actual_model = adapter.judge_model(out) if hasattr(adapter, "judge_model") else None
-        meta = getattr(self, "_judge_call_meta", None)
-        if meta is not None:
-            meta.actual_model = actual_model
+        self._judge_call_meta.actual_model = actual_model
         cost = token_cost(tokens, model, family)
         if cost is None and actual_model:
             cost = token_cost(tokens, actual_model, family)
         if cost is None:
             cost = cli_cost
         with self.lock:
-            if actual_model and hasattr(self, "judge_actual_models"):
+            if actual_model:
                 self.judge_actual_models.setdefault(family, set()).add(actual_model)
             add_usage(self.judge_usage, tokens, cost)
             bm = self.judge_usage["by_model"].setdefault(f"{family}:{model}", {"calls": 0, "cost_usd": 0.0})
@@ -227,18 +230,16 @@ class JudgePhase:
                 hit = json.loads(f.read_text(encoding="utf-8"))
                 with self.lock:
                     self.judge_usage["cache_hits"] += 1
-                    if hit.get("actual_model") and hasattr(self, "judge_actual_models"):
+                    if hit.get("actual_model"):
                         self.judge_actual_models.setdefault(family, set()).add(hit["actual_model"])
                 return {**hit, "cached": True}
             except (OSError, json.JSONDecodeError):
                 pass
         if self._judge_over_budget(family):
             raise JudgeBudgetStop("費用の上限に到達したため判定を実行していません")
-        meta = getattr(self, "_judge_call_meta", None)
-        if meta is not None:
-            meta.actual_model = None
+        self._judge_call_meta.actual_model = None
         text, tokens, cost = self._judge_call(family, model, prompt)
-        actual_model = getattr(meta, "actual_model", None) if meta is not None else None
+        actual_model = self._judge_call_meta.actual_model
         status, reason = parse_verdict(text)
         if self._judge_profile(family).credentials == "in_place":
             reason = "（in_place の判定: 理由は記録しません）"  # 実認証を指す CLI の出力は、記録・キャッシュ・報告に載せない

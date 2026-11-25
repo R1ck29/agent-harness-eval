@@ -262,6 +262,8 @@ class TestInPlaceBudgetInsideLock(unittest.TestCase):
         p._judge_seq = 0
         p._identities = {}
         p._inplace_locks = {"codex": threading.Lock(), "claude_code": threading.Lock()}
+        p._judge_call_meta = threading.local()
+        p.judge_actual_models = {}
         p.judge_versions = {"codex": "x"}
         p.judge_usage = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0, "cost_usd": 0.0, "cost_unknown": 0, "calls": 0,
                          "cache_hits": 0, "by_model": {}}

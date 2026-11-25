@@ -189,7 +189,7 @@ def summarize(records: list[TrialRecord], k: int) -> dict[str, Any]:
     tasks: dict[str, dict[str, Any]] = {}
     for (pid, tid), rs in sorted(by_pt.items()):
         valid = [r for r in rs if r.valid]
-        n, c = len(valid), sum(r.passed for r in valid)
+        n, c = len(valid), sum(bool(r.passed) for r in valid)  # 判定待ちの None は合格に数えない
         cmp = [r for r in valid if r.cmp_passed is not None]  # 比較用の判定が 1 つもない試行は Δ に使わない
         nc, cc = len(cmp), sum(bool(r.cmp_passed) for r in cmp)
         tasks.setdefault(pid, {})[tid] = {
