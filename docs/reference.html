@@ -79,6 +79,8 @@ graders:
 <tr><td><code>allow_test_changes</code></td><td><code>true</code> にすると、見えているテストの削除・skip・確認の減少を改ざん（<code>test_tamper</code>）として数えない。テストを直すこと自体が課題のタスク用（<a href="#cheat">ズル対策</a>）</td><td><code>false</code></td></tr>
 <tr><td><code>canaries</code></td><td>参照解・採点に埋めた文字列の一覧。トランスクリプトのどこかに出たらその試行は無効（<code>leak</code>）。<code>AHE-EVAL-CANARY-5d2e9b</code> と <code>VL-EVAL-CANARY-7f3c1a</code> は常に見る</td><td>空</td></tr>
 <tr><td><code>leak_patterns</code></td><td>ツールの入力がこれに当たったらその試行は無効（正規表現の一覧。例: 参照解のファイル名）</td><td>空</td></tr>
+<tr><td><code>coverage</code></td><td>このタスクが見るハーネス部品の名前（プロファイルの <code>components</code> と対応。キャッシュキーには入らない）</td><td>空</td></tr>
+<tr><td><code>preflight</code></td><td>試行を始める前にホストで実行する<b>コマンドのリスト</b>。各要素は 1 つのコマンド文字列（例: <code>soffice --version</code>）か、引数のリスト（例: <code>[soffice, --version]</code>）。失敗したら実行しない。パイプは書かない（shell は使わない）</td><td>空</td></tr>
 <tr><td><code>calibration</code></td><td>判定役の校正。決定的な採点器が見ていることを LLM 判定にも問い、一致率を測る。キーは <code>criteria</code>（必須。PASS / FAIL の条件）・<code>focus</code>（<code>final</code> かファイルパス）・<code>max_chars</code>・<code>graders</code>（照合する決定的な採点器の番号。0 始まり、<code>llm</code> 以外）。例は <code>examples/tasks/csv-summary-format.yaml</code>。LLM 判定が合否を決めた試行がある実行でだけ使い、<code>--calibration-items</code>（既定 6）件まで、決定的な採点器の合格と不合格が偏らないように選ぶ</td><td>なし（<code>graders</code> の既定は <code>llm</code> 以外のすべて）</td></tr>
 </table>
 
@@ -91,13 +93,13 @@ graders:
 <tr><td><code>clarification</code></td><td>最終応答が確認の質問か（<code>?</code>・<code>？</code>・句点止めの確認質問・確認依頼）</td><td>なし</td><td>結果</td></tr>
 <tr><td><code>command</code></td><td>独自スクリプト。終了コード 0 で合格</td><td><code>run</code>, <code>timeout_s</code></td><td>結果</td></tr>
 <tr><td><code>llm</code></td><td>LLM 判定（PASS / FAIL / UNKNOWN）。ルーブリックでしか見られない基準に使う。決定的な検査がすべて合格した出力にだけ、全試行のあとで走る</td><td><code>criteria</code>, <code>focus</code>（<code>final</code> かファイルパス）, <code>max_chars</code></td><td>結果</td></tr>
-<tr><td><code>tool_used</code></td><td>ツール呼び出しの回数</td><td><code>tool</code>（名前の正規表現・完全一致）, <code>input_match</code>, <code>min</code>, <code>max</code>, <code>include_subagents</code></td><td>過程</td></tr>
+<tr><td><code>tool_used</code></td><td>ツール呼び出しの回数</td><td><code>tool</code>（名前の正規表現・完全一致）, <code>input_match</code>（複数行モード。Bash 等はコマンド文字列そのものを先に検索し、続けて他の文字列と JSON も見る）, <code>min</code>, <code>max</code>, <code>include_subagents</code></td><td>過程</td></tr>
 <tr><td><code>skill_used</code></td><td>スキル呼び出しの回数</td><td><code>skill</code>, <code>min</code>, <code>max</code></td><td>過程</td></tr>
 <tr><td><code>subagent_used</code></td><td>サブエージェント呼び出しの回数</td><td><code>name</code>, <code>min</code>, <code>max</code></td><td>過程</td></tr>
 <tr><td><code>hook_used</code></td><td>hook の実行回数（Claude Code のみ）</td><td><code>hook</code>（<code>イベント:マッチャー</code> の正規表現・完全一致）, <code>outcome</code>, <code>min</code>, <code>max</code></td><td>過程</td></tr>
 </table>
 <ul>
-<li>全グレーダー共通: <code>weight</code>（既定 1）・<code>negate</code>（判定を反転）・<code>category</code>（失敗分類のタグ。既定は種類ごとに <code>wrong_output</code>・<code>process_violation</code>・<code>skill_selection</code>・<code>delegation</code>・<code>hook</code>）・<code>description</code>。</li>
+<li>全グレーダー共通: <code>weight</code>（既定 1。0 も可）・<code>report_only</code>（true なら合否・スコア・<code>code_ok</code> に使わない。既定の weight は 0）・<code>negate</code>（判定を反転）・<code>category</code>（失敗分類のタグ。既定は種類ごとに <code>wrong_output</code>・<code>process_violation</code>・<code>skill_selection</code>・<code>delegation</code>・<code>hook</code>）・<code>description</code>。</li>
 <li><code>min</code>・<code>max</code> を省くと「1 回以上」、<code>max</code> だけ書くと「0〜max 回」。</li>
 <li><code>llm</code> の判定役に渡すのは <code>criteria</code> と、最終応答か <code>focus</code> のファイル 1 つ（<code>max_chars</code> まで）だけです。会話の記録・ツールの入出力は渡しません。プロファイル id・モデル名・ハーネスの名前・パスは伏せます。段階・系統・多数決は <a href="#run-judge">7 章「判定役」</a>。</li>
 <li><code>skill_used</code>・<code>subagent_used</code>・<code>hook_used</code> で 1 回以上を求める判定は「配布物がないと通らない判定」として扱います（<a href="guide.html#metrics">図解ガイド 7 章</a>の Δ から両側とも除く。試行の合否とスコアには入る）。</li>
@@ -134,9 +136,10 @@ graders:
 <tr><td>Codex でのスキル検出・hook_used の制約（上記）</td><td>警告</td></tr>
 <tr><td>1 つの <code>family</code> を複数の <code>split</code> にまたがらせない（似たタスクから答えが漏れる）</td><td>警告</td></tr>
 <tr><td>holdout のタスクを 20 件以上にする（少ないと <code>promote</code> の区間と検定がほぼ判定不能）</td><td>警告</td></tr>
+<tr><td>プロファイルの <code>components</code> に書いた部品を、どれかのタスクの <code>coverage</code> が見ている</td><td>警告</td></tr>
 <tr><td>タスクのデータは合成フィクスチャだけを使う（業務データを評価に流さない）</td><td>機械では確かめられない（運用で守る）</td></tr>
 </table>
-<p><code>--selftest</code> を付けると、正解例（<code>references/</code>）があるタスクで、採点スクリプトを含む判定が「正解例で通り、何もしなければ落ちる」かを実際に実行して確かめます。何もしなくても通る判定（入力ファイルの有無など）は注意として表示します（壊してはいけないものを守る判定なら意図どおりです）。</p>
+<p><code>--selftest</code> を付けると、正解例（<code>references/</code>）があるタスクで、採点スクリプトを含む判定が「正解例（と <code>references-alt/</code> の別解）で通り、何もしなければ落ちる」かを実際に実行して確かめます。<code>harvest</code> も同じ検査を書き出しの最後に行い、通らない下書きは残しません。何もしなくても通る判定（入力ファイルの有無など）は注意として表示します（壊してはいけないものを守る判定なら意図どおりです）。</p>
 
 <h2 id="profile">4. プロファイル YAML</h2>
 <pre><code>id: claude-ds-lite
@@ -172,6 +175,8 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <tr><td><code>inherit_env</code></td><td>親の環境から試行に渡す変数の名前（5 章）。環境変数は許可リストで、ここにない変数（API キーなど）は渡らない</td><td>空</td></tr>
 <tr><td><code>sandbox</code></td><td><code>bwrap</code>: Linux で試行を bubblewrap の中で動かし、試行の外（参照解・採点・他の試行・本物のホーム）を見せない。<code>bwrap</code> が使えなければ <code>run</code> は始める前に止まる。macOS・Windows では隔離せず警告し、leak 検査だけ行う。<code>off</code>: 隔離しない（試行に記録され、verdict が警告する）（<a href="#cheat">ズル対策</a>）</td><td><code>bwrap</code></td></tr>
 <tr><td><code>sandbox_ro</code></td><td>隔離の中に読み取り専用で見せる追加のパス（層の hook が呼ぶスクリプトなど）。leak 検査でも許可する</td><td>空</td></tr>
+<tr><td><code>preflight</code></td><td>試行を始める前にホストで実行するコマンドのリスト（例: <code>[soffice --version]</code>。失敗したら実行しない。隔離なし）</td><td>空</td></tr>
+<tr><td><code>components</code></td><td>このプロファイルが入れるハーネス部品の名前。タスクの <code>coverage</code> と対応させ、<code>validate</code> が見る</td><td>空</td></tr>
 <tr><td><code>billing</code></td><td><code>api</code>（呼び出しごとに課金）／<code>subscription</code>（定額）。予算での扱いは <a href="guide.html#cost">図解ガイド 8 章</a></td><td><code>api</code></td></tr>
 <tr><td><code>codex_sandbox</code></td><td>Codex の sandbox モード</td><td><code>workspace-write</code></td></tr>
 <tr><td><code>pricing</code></td><td><code>input_per_mtok</code>・<code>cached_input_per_mtok</code>・<code>output_per_mtok</code>（Codex の概算費用用）</td><td>なし</td></tr>
@@ -245,7 +250,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <tr><td><code>promote</code></td><td><code>--run</code>（候補と現行を同じ holdout で実行した結果フォルダ）・<code>--candidate</code>・<code>--incumbent</code>・<code>--max-regressions</code>（すべて必須）・<code>--metric</code>（<code>pass_at_1</code> 既定）・<code>--alpha</code>（既定 0.05）・<code>--min-improvement</code>（既定 0。0 以上 1 未満）・<code>--min-tasks</code>（既定 20）・<code>--comparisons</code>（評価済みの候補の数 m を上書き）・<code>--holdout-log</code>（既定は結果フォルダの親の <code>holdout_uses.jsonl</code>）・<code>--any-split</code>（holdout 以外のタスクでも判定する。試験用）・<code>--hard-category</code>・<code>--objective</code>（<code>success</code> 既定／<code>efficiency</code>）。efficiency では <code>--margin</code>（成功率の許容幅。必須）・<code>--efficiency-metric</code>（<code>cost_usd</code> 既定＝エージェントの費用で、判定の費用は含めない。サブスクリプションでは API 単価で換算した推定額／<code>tokens</code>）・<code>--anchor</code>（成功率で劣ってはいけないもう 1 つの基準のプロファイル）を使い、<code>--min-improvement</code> は使わず、<code>--alpha</code> は 0.5 未満。判定のたびに台帳に目的を 1 行残し、同じ実行を別の目的でも判定すると m を 1 つ多く数える。判定の決まり方は <a href="guide.html#loop">図解ガイド 11 章</a></td></tr>
 <tr><td><code>improve</code></td><td><code>--run</code>（現行の配布物で train だけを実行した結果フォルダ）・<code>--profile</code>（現行のプロファイル。install は <code>{config_dir}</code> への copy だけ）・<code>--tasks</code>（タスク定義。改善役には見せない）・<code>--holdout-out</code>（holdout 専用の <code>--out</code>。複数可）・<code>--out</code>（空のフォルダ）がすべて必須。<code>--auth-profile</code>（認証を借りる claude_code プロファイル。既定は <code>--profile</code>）・<code>--executable</code>・<code>--model</code>（既定 <code>sonnet</code>。空文字で CLI の既定）・<code>--candidate-id</code>（holdout 用プロファイルの id。既定 <code>candidate</code>）・<code>--max-growth-chars</code>（常時読み込まれる指示を増やしてよい文字数。既定 0）・<code>--previous</code>（前回の improve.json）・<code>--max-turns</code>（既定 40）・<code>--timeout-s</code>（既定 1800）・<code>--retries</code>（事前検査で見送ったとき、理由を返して作り直させる回数。既定 1、0 で作り直さない）・<code>--goal</code>（<code>fix</code> 既定＝train の失敗を直す／<code>efficiency</code>＝成功率を落とさず、毎回読み込まれる量と迷いを減らす。材料は有効な train 試行すべての統計とトークンの多い 5 試行の記録。事前検査は常時読み込み（スキルの説明文を含む）の正味の削減を求め、<code>--max-growth-chars</code> は見ない。予想は出さない）・<code>--ledger</code>（既定は <code>--run</code> の親の <code>spend.jsonl</code>）。終了コード 0 候補あり／1 事前検査で見送り（作り直しても通らない）／2 中止（定義の誤り・実行のあとでタスクの分割か中身が変わった・<code>--previous</code> を読めない・自己確認で漏れ・確かめられない・改善役の失敗）／3 材料なし（fix は train に失敗がない／efficiency は有効な train 試行がない）。費用は台帳に記録する（<code>--monthly-budget-usd</code> は見ない。改善役の呼び出しは作り直しを含めて最大 <code>--retries</code> + 1 回）。仕組みは <a href="guide.html#improve">図解ガイド 11 章</a></td></tr>
 <tr><td><code>skill-variants</code></td><td><code>--profile</code>・<code>--skill</code>（複数可）・<code>--out</code>（空のフォルダ）がすべて必須。<code>--id-prefix</code>（既定は元のプロファイルの id）。<code>&lt;--out&gt;/skills/&lt;名前&gt;/none.yaml</code>・<code>description.yaml</code>・<code>full.yaml</code> を書き出す（id は <code>&lt;頭&gt;-&lt;名前&gt;-none</code> など。英数字・<code>_</code>・<code>.</code>・<code>-</code> だけになる名前のスキルに限る）</td></tr>
-<tr><td><code>harvest</code></td><td><code>--out</code>（必須）・<code>--source</code>（既定は <a href="guide.html#harvest">図解ガイド 9 章</a>「読む履歴」の場所）・<code>--limit</code>（既定 10）・<code>--model</code>（既定 <code>sonnet</code>）・<code>--profile</code>（認証を借りる claude_code プロファイル YAML）・<code>--executable</code>・<code>--ledger</code>（既定 <code>results/spend.jsonl</code>。<code>run</code> と同じ台帳に数えるなら <code>&lt;run の --out&gt;/spend.jsonl</code>）・<code>--dry-run</code>（件数だけ数える。費用 0）</td></tr>
+<tr><td><code>harvest</code></td><td><code>--out</code>（必須）・<code>--source</code>（既定は <a href="guide.html#harvest">図解ガイド 9 章</a>「読む履歴」の場所）・<code>--limit</code>（既定 10）・<code>--per-session</code>（既定 1）・<code>--skip-context-first</code>・<code>--model</code>（既定 <code>sonnet</code>）・<code>--profile</code>（認証を借りる claude_code プロファイル YAML）・<code>--executable</code>・<code>--ledger</code>（既定 <code>results/spend.jsonl</code>。<code>run</code> と同じ台帳に数えるなら <code>&lt;run の --out&gt;/spend.jsonl</code>）・<code>--dry-run</code>（件数だけ数える。費用 0）</td></tr>
 <tr><td><code>verdict</code></td><td><code>&lt;結果フォルダ&gt;</code>（必須）・<code>--baseline</code>（既定: 事前登録 → 配布物なしのプロファイル）・<code>--candidate</code>（既定: 事前登録 → ベースライン以外のプロファイルが 1 つならそれ。2 つ以上なら指定する）・<code>--control-tag</code>・<code>--rules</code>・<code>--json</code>（結論を JSON で標準出力にも出す）。既存の結果（<code>trials.jsonl</code>・<code>summary.json</code>。旧版の結果も可）を、モデルを呼ばずに判定し直して <code>verdict.json</code> に書く。<code>prereg.json</code> と違う規則なら「事後」（採用不可）、ハッシュが合わなければ INCONCLUSIVE。終了コード 0 IMPROVED（採用してよい）／1 REGRESSED／3 INCONCLUSIVE／4 NO CHANGE／5 IMPROVED だが暫定（dev 段階・弱い判定役・事後の規則など。採用不可）／2 定義エラー。結論の決まり方は <a href="guide.html#verdict">図解ガイド 7 章</a></td></tr>
 <tr><td><code>calibrate</code></td><td><code>&lt;結果フォルダ&gt;</code>・<code>--labels</code>（必須。9 章）</td></tr>
 </table>
@@ -286,7 +291,7 @@ executable: null              <span class="c"># CLI の場所（例: ["C:/tools/
 <p>YAML のマッピングで、書いたキーだけ既定を上書きします。未知のキーはエラーです。<code>--baseline</code>・<code>--candidate</code>・<code>--control-tag</code> はファイルより優先します。</p>
 <table>
 <tr><th>キー</th><th>意味</th><th>既定</th></tr>
-<tr><td><code>floor</code>・<code>ceiling</code></td><td>ベースラインの合格率がこの範囲の外なら INCONCLUSIVE（難しすぎる・易しすぎる）</td><td>0.2・0.8</td></tr>
+<tr><td><code>floor</code>・<code>ceiling</code></td><td>ベースラインの合格率がこの範囲の外なら INCONCLUSIVE（難しすぎる・易しすぎる）。天井を超えたら、採点を厳しくする・普段の仕事に近い依頼を足すか、事前に登録した天井を上げる</td><td>0.2・0.8</td></tr>
 <tr><td><code>min_tasks</code>・<code>recommended_tasks</code></td><td>比べたタスクがこれ未満なら INCONCLUSIVE・警告</td><td>5・10</td></tr>
 <tr><td><code>min_trials_per_task</code></td><td>1 タスク・1 条件あたりの有効な試行の下限</td><td>2</td></tr>
 <tr><td><code>min_effect</code></td><td>意味のある最小の差。区間が 0 をまたぎ ±この値の内側なら NO CHANGE、外にはみ出せば INCONCLUSIVE（検出力不足）</td><td>0.10</td></tr>

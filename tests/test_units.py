@@ -1037,8 +1037,9 @@ class HarvestTests(unittest.TestCase):
         self.assertTrue(allowed_grader({"type": "tool_used", "tool": "Write", "max": 0}, d))
 
     def test_check_and_selftest(self):
-        """harvest では LLM が書いた採点スクリプトを実行しない（構文だけ）。実行は人が確認したあとの selftest。"""
+        """harvest の check_written は構文確認のあと selftest を実行し、通らない下書きを落とす。"""
         from harness_eval.harvest import Prompt, check_written, draft_problem, selftest, write_draft
+        from harness_eval.isolation import grader_isolation
         from harness_eval.spec import load_task
         marker = self.tmp / "ran.txt"
         check = (f"import sys\nfrom pathlib import Path\nopen({str(marker)!r}, 'a').close()  # 実行されたら印が残る\n"
@@ -1055,7 +1056,11 @@ class HarvestTests(unittest.TestCase):
         self.assertEqual(selftest(load_task(root / "tasks" / "h-a.yaml")), "")  # 正解例で通り、何もしなければ落ちる
         # selftest（人が確認したあと）では実行される。採点は隔離（bwrap）の中なので、印のファイルは外に残らない（実行されたことは上の結果で分かる）
         always = {**good, "id": "h-b", "check_script": "import sys\nsys.exit(0)\n", "graders": []}
-        self.assertEqual(check_written(write_draft(always, root, origin)), "")  # 実行しないので harvest では分からない
+        written = check_written(write_draft(always, root, origin))
+        if grader_isolation() == "bwrap":
+            self.assertIn("何もしなくても", written)  # 隔離できるときだけ採点スクリプトを実行して落とす
+        else:
+            self.assertEqual(written, "")  # 隔離なしでは未確認スクリプトを走らせない
         self.assertIn("何もしなくても", selftest(load_task(root / "tasks" / "h-b.yaml")))
         wrong_ref = {**good, "id": "h-c", "reference_outputs": [{"path": "total.txt", "content": "1"}]}
         write_draft(wrong_ref, root, origin)

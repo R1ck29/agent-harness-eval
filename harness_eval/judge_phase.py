@@ -18,7 +18,7 @@ from typing import Any
 from . import credentials
 from .adapters import ClaudeAdapter, CodexAdapter, classify_stderr, get_adapter
 from .costs import add_usage, judge_call_estimate, token_cost
-from .graders import JUDGE_PROMPT, JudgeUnavailable, parse_verdict
+from .graders import JUDGE_PROMPT, JudgeUnavailable, blocks_score, parse_verdict
 from .isolation import (build_env, bwrap_problem, copy_credentials, fill, make_trial_paths, release_home, route_signature, run_process,
                         sandbox_cmd, sandbox_mode)
 from .judging import (FAMILIES, TIER_MODELS, blind, combine_rubric, dedupe_calibration, judge_cache_key, judge_identity, majority,
@@ -354,6 +354,7 @@ class JudgePhase:
         決定的な採点器の合否との一致率を測る（UNKNOWN・判定不一致は不一致として数える）。試行の合否には使わない。"""
         assert self.judge is not None
         decided = any(g.get("type") == "llm" and g.get("status") in ("pass", "fail", "unknown", "judge_disagreement")
+                      and blocks_score(g)
                       for r in records if r.valid for g in r.grader_results)
         items = [(r, it) for r in records if r.valid for it in r.judge_inputs if it["kind"] == "calibration"]
         if not decided:

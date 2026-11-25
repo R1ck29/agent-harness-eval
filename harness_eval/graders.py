@@ -135,11 +135,19 @@ def _clarifies(sentence: str) -> bool:
     return any(fresh(m) for rx in (_CLARIFY_QUESTION_RE, _CLARIFY_REQUEST_RE) for m in rx.finditer(sentence))
 
 
+_URL_RE = re.compile(
+    r"https?://[A-Za-z0-9._~:/#\[\]@!$&'()*+,;=%-]*(?:\?[A-Za-z0-9._~:/#\[\]@!$&'()*+,;=%-]+)?",
+    re.I,
+)
+
+
 def is_clarification_question(text: str) -> bool:
-    """最終応答が、作業前に条件を確かめる質問・確認依頼になっているか。"""
+    """最終応答が、作業前に条件を確かめる質問・確認依頼になっているか。
+    URL のクエリ（?q=）は質問記号として数えない。"""
     if not text or not text.strip():
         return False
-    if "?" in text or "？" in text:
+    stripped = _URL_RE.sub(" ", text)
+    if "?" in stripped or "？" in stripped:
         return True
     for s in _SENTENCE_SPLIT_RE.split(text):
         if _clarifies(s):
@@ -155,6 +163,30 @@ def _count_check(n: int, params: dict[str, Any]) -> tuple[bool, str]:
     ok = n >= lo and (hi is None or n <= hi)
     rng = f">= {lo}" + (f" かつ <= {hi}" if hi is not None else "")
     return ok, f"{n} 回（期待: {rng}）"
+
+
+_CMD_KEYS = ("command", "cmd", "script")
+
+
+def tool_input_haystack(name: str, inp: Any) -> str:
+    """input_match の検索対象。Bash 系はコマンド文字列を先に置き、複数行モードで行頭の ^ が効くようにする。
+    続けて他の文字列フィールドと json.dumps も置く（既存の JSON 向けパターンも動く）。"""
+    parts: list[str] = []
+    if isinstance(inp, dict):
+        for k in _CMD_KEYS:
+            v = inp.get(k)
+            if isinstance(v, str) and v:
+                parts.append(v)
+            elif isinstance(v, (list, tuple)):
+                parts.append(" ".join(str(x) for x in v))
+        # コマンド以外の文字列は行頭に置かない（description が ^ に誤一致するのを防ぐ）
+    elif isinstance(inp, str):
+        parts.append(inp)
+    try:
+        parts.append(json.dumps(inp, ensure_ascii=False) if inp is not None else "")
+    except (TypeError, ValueError):
+        parts.append(str(inp))
+    return "\n".join(parts)
 
 
 def grade_one(g: Grader, rec: TrialRecord, workdir: Path, task_dir: Path | None = None,
@@ -179,14 +211,14 @@ def grade_one(g: Grader, rec: TrialRecord, workdir: Path, task_dir: Path | None 
         return hit, f"最終応答が確認の質問{'になっている' if hit else 'になっていない'}"
     if t == "tool_used":
         name_re = re.compile(p["tool"])
-        inp_re = re.compile(p["input_match"]) if p.get("input_match") else None
+        inp_re = re.compile(p["input_match"], re.MULTILINE) if p.get("input_match") else None
         n = 0
         for c in rec.tool_calls:
             if not p.get("include_subagents", True) and c.get("from_subagent"):
                 continue
             if not name_re.fullmatch(c["name"]):
                 continue
-            if inp_re and not inp_re.search(json.dumps(c.get("input"), ensure_ascii=False)):
+            if inp_re and not inp_re.search(tool_input_haystack(c.get("name", ""), c.get("input"))):
                 continue
             n += 1
         return _count_check(n, p)
@@ -246,6 +278,11 @@ class JudgeUnavailable(Exception):
     """判定モデルを呼べなかった（認証・起動・タイムアウトなど）。試行は集計から除外される。"""
 
 
+def blocks_score(g: dict[str, Any] | None) -> bool:
+    """合否・スコア・verdict に使う判定か（weight 0 / report_only は使わない）。"""
+    return bool(g) and not g.get("report_only") and float(g.get("weight", 1) or 0) > 0
+
+
 def grade_all(graders: list[Grader], rec: TrialRecord, workdir: Path, judge: JudgeConfig,
               task_dir: Path | None = None, tmp_dir: Path | None = None, precheck: dict[str, Any] | None = None) -> None:
     """rec.grader_results / score / judge_cost_usd を埋める。
@@ -256,7 +293,7 @@ def grade_all(graders: list[Grader], rec: TrialRecord, workdir: Path, judge: Jud
             results.append(None)  # type: ignore[arg-type]
             continue
         base = {"label": g.label(), "type": g.type, "kind": g.kind, "weight": g.weight, "category": g.category,
-                "harness_only": g.requires_harness}
+                "harness_only": g.requires_harness, "report_only": g.report_only or g.weight == 0}
         if g.type == "hook_used" and rec.hook_calls is None:  # Codex の --json には hooks の実行記録が出ない（0.163.0 で実測）
             results.append({**base, "status": "not_run", "reason": "hooks の実行記録がないため判定できません（Codex）"})
             continue
@@ -272,14 +309,17 @@ def grade_all(graders: list[Grader], rec: TrialRecord, workdir: Path, judge: Jud
     # 省くと、基準との比較用スコアが出せなくなる
     if precheck is not None:  # 判定の番号（graders の位置）をずらさないよう末尾に足す
         results.append(precheck)
-    code_ok = all(r is None or r["harness_only"] or r["status"] in ("pass", "not_run") for r in results) and rec.error is None
+    def _blocks(r: dict[str, Any] | None) -> bool:
+        return blocks_score(r) and not r["harness_only"]
+
+    code_ok = all(r is None or not _blocks(r) or r["status"] in ("pass", "not_run") for r in results) and rec.error is None
     jcost = 0.0
     jcost_known = True
     for i, g in enumerate(graders):
         if g.type != "llm":
             continue
         base = {"label": g.label(), "type": g.type, "kind": g.kind, "weight": g.weight, "category": g.category,
-                "harness_only": False}
+                "harness_only": False, "report_only": g.report_only or g.weight == 0}
         if not judge.enabled or (judge.run is None and not judge.defer):
             results[i] = {**base, "status": "not_run", "reason": "--no-llm"}
         elif not code_ok:
@@ -326,6 +366,10 @@ def rescore(rec: TrialRecord) -> None:
 
 
 def _weighted(results: list[dict[str, Any]]) -> float | None:
-    """合格した判定の重み付き割合（判定が 1 つもなければ None）。"""
-    total = sum(r["weight"] for r in results)
-    return (sum(r["weight"] for r in results if r["status"] == "pass") / total) if total else None
+    """合格した判定の重み付き割合。weight 0 / report_only は分母に入れない（合否に使わない）。
+    判定が 1 つもなければ None。報告専用だけなら 1.0（止める判定がない）。"""
+    blocking = [r for r in results if blocks_score(r)]
+    if not blocking:
+        return None
+    total = sum(r["weight"] for r in blocking)
+    return sum(r["weight"] for r in blocking if r["status"] == "pass") / total

@@ -30,7 +30,7 @@ from . import __version__, credentials
 from .adapters import ClaudeAdapter, CodexAdapter, classify_stderr, get_adapter
 from .cheatproof import capture_tests, leak_check, rebound_report, summarize_hits, tamper_check, tamper_result
 from .costs import add_usage, empty_usage, solver_call_estimate, solver_cost, usage_summary
-from .graders import JudgeConfig, grade_all, judge_content, rescore
+from .graders import JudgeConfig, blocks_score, grade_all, judge_content, rescore
 from .judge_phase import JudgePhase
 from .judging import FAMILIES, JudgeSettings, make_settings
 from .isolation import (LOG_LIMIT, fresh_dir, ancestor_instructions, build_env, bwrap_problem, copy_credentials, fill, kill_running, make_trial_paths,
@@ -55,7 +55,7 @@ def _solver_accounting_lines(path: Path) -> Iterator[str]:
                     while line and not line.endswith(b"\n"):
                         line = fh.readline(64 * 1024)
 
-CACHE_SCHEMA = "9"  # 9: ログ上限超過は除外でなく不合格・テスト名の再束縛/削除の検出を拡張。8: 採点資材のリンク拒否・ログ解析上限
+CACHE_SCHEMA = "10"  # 10: tool_used の input_match（Bash はコマンド文字列・MULTILINE）・weight 0 / report_only・PATH バイナリは警告。9: ログ上限超過は不合格・再束縛検出
 
 
 @dataclass
@@ -547,7 +547,7 @@ class Runner(JudgePhase):
         rec.meta, rec.warnings, rec.skill_detection = parsed.meta, parsed.warnings, parsed.skill_detection
         rec.meta["sandbox"] = sandbox_mode(profile)
         leak = leak_check(rec.tool_calls, "\n".join(out_lines), tdir, self._protected(task), self._sandbox_allow(profile, tp),
-                          task.canaries, task.leak_patterns)
+                          task.canaries, task.leak_patterns, path_env=env.get("PATH") or "")
         if leak["warnings"]:
             rec.meta["leak_warnings"] = leak["warnings"][:5]
         if leak["hits"]:  # 答えを見た・見ようとした → 合格にも不合格にも数えない（他のエラーより優先）
@@ -582,7 +582,8 @@ class Runner(JudgePhase):
                 c = task.calibration
                 content = judge_content(str(c.get("focus", "final")), int(c.get("max_chars", 20000)), rec, tp.workdir)
                 picked = [rec.grader_results[i] for i in c["graders"]] if c.get("graders") else rec.grader_results
-                code = [g for g in picked if g["type"] != "llm" and not g["harness_only"] and g["status"] != "not_run"]
+                code = [g for g in picked if g["type"] != "llm" and not g["harness_only"]
+                        and g["status"] != "not_run" and blocks_score(g)]
                 if content is not None and code:
                     rec.judge_inputs.append({"kind": "calibration", "criteria": str(c["criteria"]), "focus": str(c.get("focus", "final")),
                                              "content": content, "answer": all(g["status"] == "pass" for g in code)})
@@ -625,7 +626,8 @@ class Runner(JudgePhase):
         rec.failure_tags = []
         if rec.valid and not rec.passed:
             tags = [etype] if etype else []
-            tags += [g["category"] for g in rec.grader_results if g["status"] in ("fail", "unknown", "judge_disagreement")]
+            tags += [g["category"] for g in rec.grader_results
+                     if g["status"] in ("fail", "unknown", "judge_disagreement") and blocks_score(g)]
             rec.failure_tags = list(dict.fromkeys(tags))
 
     def _cleanup(self, rec: TrialRecord) -> None:
@@ -719,6 +721,32 @@ class Runner(JudgePhase):
             msg = credentials.preflight(agent, in_place=True)
             if msg:
                 raise SpecError(msg)
+        self._run_declared_preflight()
+
+    def _run_declared_preflight(self) -> None:
+        """プロファイル・タスクの preflight を、試行を始める前にホストで実行する。失敗したら実行しない。"""
+        seen: list[list[str]] = []
+        for p in {p.id: p for _, p in self.pairs}.values():
+            for cmd in p.preflight:
+                if cmd not in seen:
+                    seen.append(cmd)
+        for t in {t.id: t for t, _ in self.pairs}.values():
+            for cmd in t.preflight:
+                if cmd not in seen:
+                    seen.append(cmd)
+        for argv in seen:
+            try:
+                r = subprocess.run(argv, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+            except FileNotFoundError:
+                raise SpecError(f"事前確認に失敗しました（environment）: {argv[0]} が見つかりません") from None
+            except subprocess.TimeoutExpired:
+                raise SpecError(f"事前確認がタイムアウトしました（environment）: {' '.join(argv)}") from None
+            except OSError as e:
+                raise SpecError(f"事前確認に失敗しました（environment）: {' '.join(argv)}: {e}") from e
+            if r.returncode != 0:
+                err = (r.stderr or r.stdout or "").strip().replace("\n", " ")[:300]
+                raise SpecError(f"事前確認に失敗しました（environment）: {' '.join(argv)} exit={r.returncode}"
+                                + (f" {err}" if err else ""))
 
     def run(self) -> tuple[Path, list[TrialRecord], dict[str, Any]]:
         self.preflight()

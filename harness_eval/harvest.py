@@ -1,7 +1,7 @@
 """実際のセッション履歴から依頼を集め、架空の内容に置き換えた評価タスクの下書きを作る（harvest）。
 
 流れ: 履歴を読む → 人が打った依頼だけ取り出す → LLM で「同じ種類の、架空のタスク」に書き換える
-      → 自動検査（元の識別子・数値が残っていないか、採点スクリプトが正解例で通り空の成果物で落ちるか）
+      → 自動検査（元の識別子・数値が残っていないか、採点スクリプトを selftest で実行し正解例・別解で通り空の成果物で落ちるか）
       → 合格した下書きだけ書き出す（人が確認してから使う）。履歴が 1 件もなければ同梱の標準タスクを書き出す。
 
 元の依頼文はメモリ上だけで扱い、ファイルにもログにも書かない（表示するのは件数だけ）。
@@ -28,7 +28,8 @@ import yaml
 
 from .adapters import CLAUDE_ISOLATION_SETTINGS, _classify_message, _status_type
 from .graders import grade_all, JudgeConfig
-from .isolation import build_env, copy_credentials, make_trial_paths, parent_env_names, release_home, run_process
+from .isolation import (build_env, copy_credentials, grader_isolation, make_trial_paths, parent_env_names,
+                        release_home, run_process)
 from .record import TrialRecord
 from .spec import Profile, SpecError, Task, load_task
 
@@ -170,15 +171,44 @@ def collect(sources: list[Path]) -> list[Prompt]:
 _SLASH = re.compile(r"/[A-Za-z][\w:-]*(?:\s|$)")  # /exit・/model x などのコマンド（/home/x.csv のようなパスは除外しない）
 
 
-def select(prompts: list[Prompt], limit: int) -> list[Prompt]:
-    """各セッションで人が最初に打った依頼（＝そのセッションの仕事）だけを、新しい順・重複なしで limit 件。"""
+_CONTEXT_FIRST = re.compile(
+    r"^(?:じゃあ|それでは|それで|じゃ[、,]|あと[、,]?|それと|さっき|前回|前の|上記|前述|続き|続いて)|"
+    r"さっきの|前回の|前の依頼|上記の|前述の|そのファイル|それについて|続きをお願い|"
+    r"^(?:(?:please\s+)?continue\b|as\s+above|same\s+as|the\s+previous|following\s+up\b)",
+    re.I,
+)
+
+
+def refers_to_earlier_context(text: str) -> bool:
+    """その依頼が、同じセッションの前の文脈を前提にしているか（最初の依頼としては使いにくい）。"""
+    return bool(_CONTEXT_FIRST.search(text.strip()))
+
+
+def select(prompts: list[Prompt], limit: int, per_session: int = 1, skip_context_first: bool = False) -> list[Prompt]:
+    """各セッションから依頼を、新しい順・重複なしで limit 件。既定は各セッションの最初の 1 件。
+    per_session で件数を増やせる。skip_context_first は、最初の依頼が前の文脈を指すなら次の依頼を使う。"""
+    if per_session < 1:
+        per_session = 1
     usable = [p for p in prompts if len(p.text.strip()) >= MIN_CHARS and not _SLASH.match(p.text.lstrip())
               and not p.text.lstrip().startswith("<")]
-    first: dict[tuple[str, str], Prompt] = {}
+    grouped: dict[tuple[str, str], list[Prompt]] = {}
     for p in sorted(usable, key=lambda p: p.ts):
-        first.setdefault((p.agent, p.session or p.text[:50]), p)
+        grouped.setdefault((p.agent, p.session or p.text[:50]), []).append(p)
+    chosen: list[Prompt] = []
+    for items in grouped.values():
+        seq, seen_text = [], set()
+        for item in items:
+            key = re.sub(r"\s+", " ", item.text.strip())
+            if key in seen_text:
+                continue
+            seen_text.add(key)
+            seq.append(item)
+        if skip_context_first:
+            while seq and refers_to_earlier_context(seq[0].text):
+                seq.pop(0)
+        chosen.extend(seq[:per_session])
     seen, picked = set(), []
-    for p in sorted(first.values(), key=lambda p: -p.ts):
+    for p in sorted(chosen, key=lambda p: -p.ts):
         key = re.sub(r"\s+", " ", p.text.strip())
         if key not in seen:
             seen.add(key)
@@ -202,6 +232,8 @@ SCHEMA = {
                                              "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}},
         "reference_outputs": {"type": "array", "items": {"type": "object", "required": ["path", "content"],
                                                          "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}},
+        "reference_outputs_alt": {"type": "array", "items": {"type": "object", "required": ["path", "content"],
+                                                             "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}},
         "final_answer_example": {"type": "string"},
         "check_script": {"type": "string"},
         "graders": {"type": "array", "items": {"type": "object", "required": ["type"], "properties": {
@@ -223,8 +255,13 @@ CONVERT_PROMPT = """あなたはエージェント評価用のタスクを作る
 - prompt は実際の依頼と同じ口調・書き方（業務の依頼文らしく）。成果物のファイル名と形式は prompt で指定する
 - check_script: Python 標準ライブラリだけの採点スクリプト。作業ディレクトリ（カレント）の成果物を、sys.argv[1] のフォルダにある
   元データから計算した正解と照合し、正しければ終了コード 0、違えば 1。列の順番・桁区切り・小数の書き方などの形式の違いには寛容に、
-  中身（件数・金額・抽出条件の結果）の正しさを見る。最終応答の本文は環境変数 TRIAL_RECORD の JSON の final_message で読める
+  中身（件数・金額・抽出条件の結果）の正しさを見る。環境変数 TRIAL_RECORD は試行レコード JSON ファイルへのパスである。
+  そのファイルを開くと final_message（最終応答の本文）が読める。例:
+      import json, os
+      rec = json.load(open(os.environ["TRIAL_RECORD"]))
+      text = rec.get("final_message") or ""
 - reference_outputs: 正しい成果物の例（check_script がこれで 0 を返し、成果物がない状態では 1 を返すこと）
+- reference_outputs_alt: 別の正しい成果物を 1 組（形式が違っても中身が正しければ可）。check_script がこれでも 0 を返すこと。なければ空配列
 - graders: 補助の判定（file_exists / file_contains / tool_used）。prompt で明示的に求めたことだけを見る（求めていない内容を
   最終応答やファイルに要求しない）。正解例で通るものだけにする
 - 金額・件数・しきい値などの数値も元と同じ値を使わない（桁や大きさは同じくらいでよい）
@@ -370,7 +407,8 @@ def _safe_rel(p: str) -> bool:
 
 def draft_problem(draft: dict) -> str:
     """書き出す前の検査（パス・大きさ）。問題があれば理由（元の依頼文は含めない）。"""
-    files, refs = draft.get("files") or [], draft.get("reference_outputs") or []
+    files = draft.get("files") or []
+    refs = (draft.get("reference_outputs") or []) + (draft.get("reference_outputs_alt") or [])
     if not all(_safe_rel(str(f.get("path", ""))) for f in files + refs):
         return "ファイルのパスが不正"
     if sum(len(f.get("content", "")) for f in files) > 1_000_000 or len(files) > 20:
@@ -380,25 +418,37 @@ def draft_problem(draft: dict) -> str:
 
 def sample_test(task: Task, graders: list, notes: list[str] | None = None) -> str:
     """正解例（references/<id>/）を置いた作業ディレクトリでは通り、何もしていない作業ディレクトリでは落ちるか。
+    別解（references-alt/<id>/）があれば、それでも通ることを確かめる。
     notes を渡すと、何もしなくても通る判定（negate なし）の名前を入れる（入力ファイルの有無など情報のない判定の発見用。
     壊してはいけないものを守る判定も同じ形になるため、失敗にはしない）。"""
-    ref = task.path.parent.parent / "references" / task.id
-    final_file = ref.parent / f"{task.id}.final_answer.txt"
+    root = task.path.parent.parent
+    ref = root / "references" / task.id
+    alt = root / "references-alt" / task.id
+    final_file = root / "references" / f"{task.id}.final_answer.txt"
     final = final_file.read_text(encoding="utf-8") if final_file.is_file() else ""
+    alt_final_file = root / "references-alt" / f"{task.id}.final_answer.txt"
+    alt_final = alt_final_file.read_text(encoding="utf-8") if alt_final_file.is_file() else final
+    cases: list[tuple[str, Path | None, str]] = [("ref", ref if ref.is_dir() else None, final)]
+    if alt.is_dir():
+        cases.append(("alt", alt, alt_final))
+    cases.append(("empty", None, ""))
     with tempfile.TemporaryDirectory() as tmp:
-        for name, use_ref in (("ref", True), ("empty", False)):
+        for name, src, message in cases:
             wd = Path(tmp) / name / "workdir"
             wd.mkdir(parents=True)
             if task.fixture:
                 shutil.copytree(task.fixture, wd, dirs_exist_ok=True) if task.fixture.is_dir() else shutil.copy2(task.fixture, wd)
-            if use_ref and ref.is_dir():
-                shutil.copytree(ref, wd, dirs_exist_ok=True)
+            if src is not None:
+                shutil.copytree(src, wd, dirs_exist_ok=True)
+            use_ref = name != "empty"
             rec = TrialRecord(run_id="selftest", task_id=task.id, profile_id="-", agent="claude_code", trial=0, cache_key="",
-                              task_hash="", profile_hash="", cli_version=None, final_message=final if use_ref else "")
+                              task_hash="", profile_hash="", cli_version=None, final_message=message)
             grade_all(graders, rec, wd, JudgeConfig(enabled=False), task.path.parent)
-            failed = [g["label"] for g in rec.grader_results if g["status"] != "pass"]
+            failed = [g["label"] for g in rec.grader_results
+                      if g["status"] != "pass" and not g.get("report_only") and g.get("weight", 1) > 0]
             if use_ref and failed:
-                return f"正解例で採点が通らない: {failed}"
+                label = "別解" if name == "alt" else "正解例"
+                return f"{label}で採点が通らない: {failed}"
             if not use_ref and graders and not failed:
                 return "何もしなくても採点が通る"
             if not use_ref and notes is not None:
@@ -407,8 +457,8 @@ def sample_test(task: Task, graders: list, notes: list[str] | None = None) -> st
 
 
 def check_written(task_path: Path) -> str:
-    """書き出した下書きの検査。LLM が書いた採点スクリプトは、人が確認する前には実行しない（構文の確認だけ）。
-    実行して確かめるのは、人が読んだあとの `validate --selftest`（selftest）。"""
+    """書き出した下書きの検査。構文を確認したあと、selftest（採点スクリプトを含む）を実行し、
+    正解例・別解で通り空の成果物で落ちる案だけを残す。command グレーダーは使えるとき隔離（bwrap）する。"""
     task = load_task(task_path)  # 定義の検証（未知のキーなど）
     script = task_path.parent.parent / "checks" / f"{task.id}.py"
     if script.exists():
@@ -419,14 +469,31 @@ def check_written(task_path: Path) -> str:
     declarative = [g for g in task.graders if g.kind == "outcome" and g.type not in ("command", "llm")]
     if not script.exists() and not declarative:
         return "結果を見る採点がない"
-    return sample_test(task, declarative) if declarative else ""
+    # bwrap が使えない環境では、未確認の採点スクリプトをホストで走らせない（構文＋宣言的判定だけ）
+    if script.exists() and grader_isolation() != "bwrap":
+        # 隔離なしでは未確認の command を走らせない（selftest も呼ばない）
+        reason = sample_test(task, declarative) if declarative else ""
+        if reason:
+            return reason
+        if not has_reference_outputs(task) and (script.exists() or declarative):
+            return "正解例がない"
+        return ""
+    reason = selftest(task)
+    if reason is None and (script.exists() or declarative):
+        return "正解例がない"
+    return reason or ""
+
+
+def has_reference_outputs(task: Task) -> bool:
+    """正解例（references/<id>/）または最終応答の例があるか。selftest を走らせずに調べる。"""
+    refs = task.path.parent.parent / "references"
+    return (refs / task.id).is_dir() or (refs / f"{task.id}.final_answer.txt").is_file()
 
 
 def selftest(task: Task, notes: list[str] | None = None) -> str | None:
     """人が確認したあとで、採点スクリプトを含む結果の判定が正解例で通り、何もしなければ落ちるかを確かめる。
     正解例（harvest が書き出す references/<id>/）がないタスクは None（対象外）。"""
-    refs = task.path.parent.parent / "references"
-    if not ((refs / task.id).is_dir() or (refs / f"{task.id}.final_answer.txt").is_file()):  # 確認の質問を見るタスクは最終応答の例だけ
+    if not has_reference_outputs(task):  # 確認の質問を見るタスクは最終応答の例だけ
         return None
     return sample_test(task, [g for g in task.graders if g.kind == "outcome" and g.type != "llm"], notes)
 
@@ -445,9 +512,11 @@ def allowed_grader(g: dict, draft: dict) -> bool:
 
 
 def write_draft(draft: dict, root: Path, origin: Prompt) -> Path:
-    """タスク YAML・合成データ・採点スクリプト・正解例（references/）を書き出す。"""
+    """タスク YAML・合成データ・採点スクリプト・正解例（references/）と別解（references-alt/）を書き出す。"""
     tid = draft["id"]
-    for sub, items in (("fixtures", draft.get("files") or []), ("references", draft.get("reference_outputs") or [])):
+    for sub, items in (("fixtures", draft.get("files") or []),
+                       ("references", draft.get("reference_outputs") or []),
+                       ("references-alt", draft.get("reference_outputs_alt") or [])):
         for f in items:
             dst = root / sub / tid / f["path"]
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -486,7 +555,8 @@ def _remove_draft(root: Path, tid: str) -> None:
     (root / "tasks" / f"{tid}.yaml").unlink(missing_ok=True)
     (root / "checks" / f"{tid}.py").unlink(missing_ok=True)
     (root / "references" / f"{tid}.final_answer.txt").unlink(missing_ok=True)
-    for sub in ("fixtures", "references"):
+    (root / "references-alt" / f"{tid}.final_answer.txt").unlink(missing_ok=True)
+    for sub in ("fixtures", "references", "references-alt"):
         shutil.rmtree(root / sub / tid, ignore_errors=True)
 
 
@@ -494,7 +564,7 @@ def write_fallback(root: Path) -> list[str]:
     """履歴がないときは同梱の標準タスク（examples の tasks・fixtures・checks・references）を書き出す。"""
     if not EXAMPLES.is_dir():
         raise SpecError(f"同梱タスクが見つかりません: {EXAMPLES}")
-    for sub in ("tasks", "fixtures", "checks", "references"):  # references: validate --selftest 用の正解例
+    for sub in ("tasks", "fixtures", "checks", "references", "references-alt"):  # references: validate --selftest 用の正解例
         for f in (EXAMPLES / sub).rglob("*"):
             dst = root / sub / f.relative_to(EXAMPLES / sub)
             if f.is_file() and not dst.exists():  # 既にあるファイル（手で直したタスクなど）は上書きしない
@@ -505,10 +575,10 @@ def write_fallback(root: Path) -> list[str]:
 
 def harvest(sources: list[Path], root: Path, limit: int, exe: list[str], model: str | None,
             profile: Profile | None, dry_run: bool, log: Callable[[str], None],
-            spend: Callable[[float | None], None]) -> dict[str, Any]:
+            spend: Callable[[float | None], None], per_session: int = 1, skip_context_first: bool = False) -> dict[str, Any]:
     root = Path(root).resolve()  # 書き出し先を絶対パスにしておく（selftest・run では採点スクリプトを作業ディレクトリで動かすため）
     prompts = collect(sources)
-    picked = select(prompts, limit)
+    picked = select(prompts, limit, per_session=per_session, skip_context_first=skip_context_first)
     by_agent = {a: sum(1 for p in picked if p.agent == a) for a in ("claude_code", "codex")}
     log(f"履歴: 依頼 {len(prompts)} 件 → 候補 {len(picked)} 件（Claude Code {by_agent['claude_code']}・Codex {by_agent['codex']}）")
     summary: dict[str, Any] = {"found": len(prompts), "picked": len(picked), "written": [], "skipped": {}, "fallback": []}
@@ -569,7 +639,7 @@ def _unique_id(root: Path, base: str) -> str:
     base = base if len(base) > 2 else "h-task"
     tid, n = base, 2
     while any(p.exists() for p in (root / "tasks" / f"{tid}.yaml", root / "fixtures" / tid, root / "references" / tid,
-                                   root / "checks" / f"{tid}.py")):  # 消し残しのファイルと混ざらないように
+                                   root / "references-alt" / tid, root / "checks" / f"{tid}.py")):  # 消し残しのファイルと混ざらないように
         tid, n = f"{base}-{n}", n + 1
     return tid
 
