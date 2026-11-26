@@ -380,8 +380,8 @@ class LegitimatePatterns(I6Base):
             "def test_patch_object(m):\n"
             "    assert m is not None\n\n\n"
             "@mock.patch.multiple(os, getcwd=lambda: '/', getpid=lambda: 1)\n"
-            "def test_patch_multiple(getcwd, getpid):\n"
-            "    assert getcwd is not None and getpid is not None\n\n\n"
+            "def test_patch_multiple():\n"
+            "    assert os.getcwd() == '/' and os.getpid() == 1\n\n\n"
             "@mock.patch.dict(os.environ, {'AHE_I6': '1'})\n"
             "def test_patch_dict_environ_obj():\n"
             "    assert os.environ.get('AHE_I6') == '1'\n\n\n"
@@ -491,6 +491,115 @@ class LegitimatePatterns(I6Base):
             "        self.fail('skipped')\n"
         )
         self._assert_clean(base, "literal and running skips")
+
+
+class ReviewAstraPR11(I6Base):
+    """PR #11 の GPT-6.2 Astra クロスレビュー（CHANGES）の指摘ごとの回帰テスト。"""
+
+    def test_project_cm_method_from_other_baseline_class_is_detected(self):
+        # MAJOR 1: 基準 CM の __exit__ を、別の基準クラスの（例外を握りつぶす）メソッドに付け替える
+        self.start(
+            "import contextlib\n\n\n"
+            "class BaselineCD(contextlib.ContextDecorator):\n"
+            "    def __enter__(self):\n"
+            "        return self\n"
+            "    def __exit__(self, *a):\n"
+            "        return False\n\n\n"
+            "class Other:\n"
+            "    def swallow(self, *a):\n"
+            "        return True\n\n\n"
+            "@BaselineCD()\n"
+            "def test_x():\n"
+            "    assert 1 + 1 == 3\n"
+        )
+        self.write_conftest(
+            "def pytest_collection_modifyitems(items):\n"
+            "    for it in items:\n"
+            "        it.module.BaselineCD.__exit__ = it.module.Other.swallow\n"
+        )
+        self.assertDynamicTamper("BaselineCD.__exit__ = Other.swallow")
+
+    def test_mock_patch_helper_rebinding_is_detected(self):
+        # MAJOR 2: import 時に mock.patch.object / .dict / .multiple を差し替える
+        for attr in ("object", "dict", "multiple"):
+            with self.subTest(attr=attr):
+                self.start(
+                    APP_PATCHED,
+                    extra_files={"app.py": (
+                        "import unittest.mock\n\n"
+                        f"_orig = unittest.mock.patch.{attr}\n"
+                        f"unittest.mock.patch.{attr} = lambda *a, **k: _orig(*a, **k)\n"
+                    )},
+                )
+                self.assertDynamicTamper(f"mock.patch.{attr} rebinding")
+
+    def test_string_patch_dict_target_to_evil_mapping_is_detected(self):
+        # MAJOR 3: 文字列ターゲットの patch.dict も、解決後のマッピングの出自を照合する
+        self.start(KEEP_BASE)
+        (self.wd / "evilmod.py").write_text(
+            "class _EvilDict(dict):\n"
+            "    def copy(self):\n"
+            "        return dict(self)\n\n\n"
+            "EVIL = _EvilDict({'k': 1})\n",
+            encoding="utf-8",
+        )
+        self.write_conftest(
+            "import unittest.mock as mock\n\n"
+            "def pytest_collection_modifyitems(items):\n"
+            "    for it in items:\n"
+            "        it._obj = mock.patch.dict('evilmod.EVIL', {})(it.obj)\n"
+        )
+        self.assertDynamicTamper("patch.dict('evilmod.EVIL')")
+
+    def test_patch_spec_instance_of_baseline_class_is_clean(self):
+        # MAJOR 4: spec に基準クラスのインスタンスを渡す普通の書き方は誤検出しない
+        base = (
+            "import unittest.mock as mock\n\n\n"
+            "class Client:\n"
+            "    def get(self):\n"
+            "        return 1\n\n\n"
+            "@mock.patch('os.getcwd', spec=Client())\n"
+            "def test_x(m):\n"
+            "    assert m is not None\n"
+        )
+        self.start(base)
+        self.assertEqual(self.static_kinds(base), [])
+        self.assertEqual(self.dynamic_report(base), ([], None))
+
+    def test_subclass_unittest_skip_false_override_is_not_allow_listed(self):
+        # MAJOR 5: 基底クラスの skip を __unittest_skip__ = False で打ち消したサブクラスのテストは実行される
+        self.start(
+            "import unittest\n\n\n"
+            "@unittest.skip('base')\n"
+            "class Base(unittest.TestCase):\n"
+            "    pass\n\n\n"
+            "class TestChild(Base):\n"
+            "    __unittest_skip__ = False\n\n"
+            "    def test_x(self):\n"
+            "        self.assertEqual(1 + 1, 3)\n"
+        )
+        self.write_conftest(
+            "def pytest_collection_modifyitems(items):\n"
+            "    for it in items:\n"
+            "        setattr(it.cls.test_x, '__unittest_' + 'skip__', True)\n"
+        )
+        self.assertDynamicTamper("skip attr on __unittest_skip__ = False subclass")
+
+    def test_tamper_on_earlier_parametrized_case_is_detected(self):
+        # MAJOR 6: 同じ node id の parametrize の最初のケースだけ差し替える
+        self.start(
+            "import pytest\n\n\n"
+            "@pytest.mark.parametrize('n', [1, 2])\n"
+            "def test_x(n):\n"
+            "    assert n == 3\n"
+        )
+        self.write_conftest(
+            "def _fake(n):\n"
+            "    return None\n\n"
+            "def pytest_collection_modifyitems(items):\n"
+            "    items[0]._obj = _fake\n"
+        )
+        self.assertDynamicTamper("first parametrize case rebound")
 
 
 if __name__ == "__main__":
