@@ -1617,7 +1617,9 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
     if data.get("rc") not in (0, 5):
         log.warning("テスト収集が失敗したため、再束縛の確認をしません（rc=%s）", data.get("rc"))
         return [], f"pytest の収集が失敗した（rc={data.get('rc')}）"
-    got = {it["id"]: it for it in data["items"]}
+    got: dict[str, list[dict[str, Any]]] = {}  # parametrize のケースは同じ node id になる: ケースごとに全部照合する
+    for it in data["items"]:
+        got.setdefault(it["id"], []).append(it)
     known = _known_wrappers(root, before)
     known_callables = _known_callable_wrappers(root, before)
     known_digests = _known_wrapper_digests(root, before, callables=False)
@@ -1628,37 +1630,46 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
     lib_roots = _host_lib_roots()
     lib_cache: dict[Path, set[tuple[str, int, str]]] = {}
     found: list[dict[str, str]] = []
+
+    def check(node_id: str, line: int, rel: str, name: str, it: dict[str, Any]) -> dict[str, str] | None:
+        """収集した 1 ケースの照合。改ざんがあればその検出、なければ None。"""
+        def hit(msg: str) -> dict[str, str]:
+            return {"kind": "test_body_modified", "path": rel, "line": msg}
+        if it.get("bad_self"):
+            return hit(f"bound self swapped at collection: {name}")
+        if it["line"] != line or not it["file"] or Path(it["file"]).resolve() != (root / rel).resolve():
+            return hit(f"rebound at collection: {name} -> {it['file']}:{it['line']} (baseline {rel}:{line})")
+        if it.get("code_changed"):  # 位置は同じでも、__code__ の差し替え（CodeType.replace）で中身が基準のソースと違う
+            return hit(f"code replaced at collection: {name}")
+        if it.get("skip_attr") and node_id not in baseline_skipped:  # 基準で必ずスキップするテスト以外に unittest の skip が付いた
+            return hit(f"unittest skip injected at collection: {name}")
+        if it.get("chain") and node_id not in decorated:
+            w = it["chain"][0]
+            where = f"{w[0]}:{w[1]}" if w and len(w) >= 2 and w[0] else "<no __code__>"
+            return hit(f"unexpected wrapper at collection: {name} <- {where}")
+        bad = [x for x in it.get("chain", [])
+               if _foreign_wrapper(root, x, known, lib_roots, known_callables=known_callables,
+                                   known_digests=known_digests, known_callable_digests=known_callable_digests,
+                                   known_classes=known_classes, known_fn_digests=known_fn_digests,
+                                   known_cm_classes=known_cm_classes,
+                                   allow_unittest_skip=(node_id in baseline_skipped),
+                                   lib_cache=lib_cache, require_lib_digest=True)]
+        if bad:
+            w = bad[0]
+            where = f"{w[0]}:{w[1]}" if w and len(w) >= 2 and w[0] else "<no __code__>"
+            return hit(f"wrapper swapped at collection: {name} <- {where}")
+        return None
+
     for node_id, line in expected.items():
         rel = node_id.split("::")[0]
         name = node_id.split("::", 1)[1].replace("::", ".")
-        it = got.get(node_id)
-        if it is None:
+        cases = got.get(node_id)
+        if not cases:
             found.append({"kind": "test_body_modified", "path": rel, "line": f"missing at collection: {name}"})
-        elif it.get("bad_self"):
-            found.append({"kind": "test_body_modified", "path": rel, "line": f"bound self swapped at collection: {name}"})
-        elif it["line"] != line or not it["file"] or Path(it["file"]).resolve() != (root / rel).resolve():
-            found.append({"kind": "test_body_modified", "path": rel,
-                          "line": f"rebound at collection: {name} -> {it['file']}:{it['line']} (baseline {rel}:{line})"})
-        elif it.get("code_changed"):  # 位置は同じでも、__code__ の差し替え（CodeType.replace）で中身が基準のソースと違う
-            found.append({"kind": "test_body_modified", "path": rel, "line": f"code replaced at collection: {name}"})
-        elif it.get("skip_attr") and node_id not in baseline_skipped:  # 基準で必ずスキップするテスト以外に unittest の skip が付いた
-            found.append({"kind": "test_body_modified", "path": rel, "line": f"unittest skip injected at collection: {name}"})
-        elif it.get("chain") and node_id not in decorated:
-            w = it["chain"][0]
-            where = f"{w[0]}:{w[1]}" if w and len(w) >= 2 and w[0] else "<no __code__>"
-            found.append({"kind": "test_body_modified", "path": rel,
-                          "line": f"unexpected wrapper at collection: {name} <- {where}"})
-        elif (bad := [x for x in it.get("chain", [])
-                      if _foreign_wrapper(root, x, known, lib_roots, known_callables=known_callables,
-                                          known_digests=known_digests, known_callable_digests=known_callable_digests,
-                                          known_classes=known_classes, known_fn_digests=known_fn_digests,
-                                          known_cm_classes=known_cm_classes,
-                                          allow_unittest_skip=(node_id in baseline_skipped),
-                                          lib_cache=lib_cache, require_lib_digest=True)]):
-            w = bad[0]
-            where = f"{w[0]}:{w[1]}" if w and len(w) >= 2 and w[0] else "<no __code__>"
-            found.append({"kind": "test_body_modified", "path": rel,
-                          "line": f"wrapper swapped at collection: {name} <- {where}"})
+            continue
+        bad_case = next((f for f in (check(node_id, line, rel, name, it) for it in cases) if f is not None), None)
+        if bad_case is not None:
+            found.append(bad_case)
     return found, None
 
 
