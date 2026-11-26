@@ -845,6 +845,7 @@ def _run():
     _CodeType, _MethodType = types.CodeType, types.MethodType
     _FunctionType, _ModuleType, _Pattern = types.FunctionType, types.ModuleType, re.Pattern
     _partial = functools.partial
+    _resolve_name = pkgutil.resolve_name
     _EMPTY = object()
     _LRU_WRAPPER = getattr(functools, "_lru_cache_wrapper", None)
     _SYNC_CD = getattr(contextlib, "ContextDecorator", None)
@@ -1238,8 +1239,14 @@ def _run():
                             or pd.get("_original") is not None):
                         ok = False
                         break
-                    d = pd.get("in_dict")  # 文字列・素の dict 以外は、ライブラリ（os._Environ など）か基準のマッピング型だけ
-                    if type(d) not in (str, dict) and (o := _origin(d, True)) is not None:
+                    d = pd.get("in_dict")  # 素の dict 以外は、ライブラリ（os._Environ など）か基準のマッピング型だけ
+                    if type(d) is str:  # 文字列ターゲットは解決した実体を同じく照合する（解決できなければ拒否）
+                        try:
+                            d = _resolve_name(d)
+                        except Exception:
+                            ok = False
+                            break
+                    if type(d) is not dict and (o := _origin(d, True)) is not None:
                         origins.append(o)
                 extra["mpd"] = ["mpd_ok", origins] if ok else ["mpd_bad"]
             return extra or None
