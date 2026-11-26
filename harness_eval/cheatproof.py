@@ -23,11 +23,13 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import site
 import stat
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import types
 from collections import Counter
 from pathlib import Path
@@ -1337,18 +1339,22 @@ def _run():
                             fn = fn.__wrapped__
                     except Exception:
                         pass
-                    try:  # unittest が実行時に見る __unittest_skip__（クラス・各層）。読めなければ付いているものとみなす
-                        skip_attr = any(bool(getattr(o, "__unittest_skip__", False))
-                                        for o in (cls, getattr(it, "obj", None), *layers, fn) if o is not None)
+                    try:  # unittest が実行時に見る __unittest_skip__（import したクラス）。読めなければ付いているものとみなす
+                        skip_cls = cls is not None and bool(getattr(cls, "__unittest_skip__", False))
                     except Exception:
-                        skip_attr = True
+                        skip_cls = True
+                    try:  # 同じく関数の各層
+                        skip_fn = any(bool(getattr(o, "__unittest_skip__", False))
+                                      for o in (getattr(it, "obj", None), *layers, fn) if o is not None)
+                    except Exception:
+                        skip_fn = True
                     code = getattr(fn, "__code__", None) if fn is not None else None
                     nid = it.nodeid.split("[")[0]
                     path, _, rest = nid.partition("::")
                     want = baseline.get(path, {}).get(rest.replace("::", "."))
                     self.items.append({"id": nid, "file": code.co_filename if code else None,
                                        "line": code.co_firstlineno if code else None,
-                                       "chain": chain, "bad_self": bad_self, "skip_attr": skip_attr,
+                                       "chain": chain, "bad_self": bad_self, "skip_cls": skip_cls, "skip_fn": skip_fn,
                                        "code_changed": bool(want) and bool(code) and digest(code) not in want})
         c = Collect()
         sys.path.append(cwd)
@@ -1472,31 +1478,13 @@ def _is_unittest_skip_decorator(deco: ast.AST, u_names: set[str], case_names: se
     return cond is (kind == "skipIf")
 
 
-_SKIP_ATTR = "__unittest_skip__"
-
-
-def _c3_merge(head: list[Any], seqs: list[list[Any]]) -> list[Any] | None:
-    """C3 線形化（type.mro と同じ規則）。並べられなければ None。"""
-    out, seqs = list(head), [list(x) for x in seqs]
-    while True:
-        seqs = [x for x in seqs if x]
-        if not seqs:
-            return out
-        cand = next((x[0] for x in seqs if not any(x[0] in t[1:] for t in seqs)), None)
-        if cand is None:
-            return None
-        out.append(cand)
-        for t in seqs:
-            if t[0] == cand:
-                del t[0]
-
-
 def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None = None,
                              decorated: set[str] | None = None,
                              skipped: set[str] | None = None) -> dict[str, int]:
     """テストファイルが定義するテスト（pytest の node id の後半 → 定義の先頭行。デコレータがあればその行）。
     dumps を渡すと定義の AST 表現を、decorated を渡すと関数自身または所属クラスにラップし得るデコレータがあるテストの node id を、
-    skipped を渡すと基準 AST で必ずスキップする @unittest.skip 類（関数・所属クラス・同じファイルの基底クラス）を持つテストの node id を入れる。"""
+    skipped を渡すと基準 AST で必ずスキップする @unittest.skip 類を関数自身に持つテストの node id を入れる（クラスの skip は
+    静的には決まらない: __init_subclass__・Generic[...]・条件付きの代入。rebound_report が収集した実際のクラスで比べる）。"""
     try:
         tree = ast.parse(text)
     except SyntaxError:
@@ -1523,46 +1511,6 @@ def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None 
         if skipped is not None and has_skip:
             skipped.add(key)
 
-    def own_skip(n: ast.ClassDef) -> bool | None:
-        """クラス自身が定める `__unittest_skip__`（None: 定めない、True: スキップ、False: スキップしないか値が静的に決まらない）。
-        クラスのデコレータは本体より後に効く。注釈だけの文は束縛しない。"""
-        if has_unittest_skip(n.decorator_list):
-            return True
-        val: bool | None = None
-        for st in n.body:
-            if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and st.target.id == _SKIP_ATTR:
-                if st.value is not None:
-                    val = isinstance(st.value, ast.Constant) and bool(st.value.value)
-            elif (isinstance(st, ast.Assign) and all(isinstance(t, ast.Name) for t in st.targets)
-                    and any(t.id == _SKIP_ATTR for t in st.targets)):
-                val = isinstance(st.value, ast.Constant) and bool(st.value.value)
-            elif getattr(st, "name", None) == _SKIP_ATTR or any(
-                    (isinstance(x, ast.Name) and x.id == _SKIP_ATTR and not isinstance(x.ctx, ast.Load))
-                    or (isinstance(x, ast.alias) and (x.asname or x.name) == _SKIP_ATTR) for x in ast.walk(st)):
-                val = False  # それ以外の束縛・削除は値が決まらない: fail-closed
-        return val
-
-    # unittest は getattr(cls, "__unittest_skip__") で判定する（MRO の先頭から最初に定めたクラスの値）。同じファイルのクラスは
-    # C3 で並べ、別ファイル・ライブラリの基底は定めないものとして扱う。MRO を作れない（* 展開・不整合）ならスキップしない扱い
-    mros: dict[str, list[Any] | None] = {}
-    own: dict[int, bool | None] = {}
-    skipped_classes: set[int] = set()
-    for n in tree.body:
-        if not isinstance(n, ast.ClassDef):
-            continue
-        own[id(n)] = own_skip(n)
-        base_mros: list[list[Any]] | None = []
-        for b in n.bases:
-            if isinstance(b, ast.Starred) or (isinstance(b, ast.Name) and b.id in mros and mros[b.id] is None):
-                base_mros = None
-                break
-            base_mros.append(mros[b.id] if isinstance(b, ast.Name) and b.id in mros else [ast.dump(b)])
-        mro = None if base_mros is None else _c3_merge([id(n)], [*base_mros, [m[0] for m in base_mros]])
-        mros[n.name] = mro
-        first_def = next((own[k] for k in (mro or ()) if isinstance(k, int) and own.get(k) is not None), None)
-        if first_def is True:
-            skipped_classes.add(id(n))
-
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
             put(f"{path}::{node.name}", node, has_wrapping_deco(node.decorator_list), has_unittest_skip(node.decorator_list))
@@ -1574,7 +1522,7 @@ def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None 
                 if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name.startswith("test"):
                     put(f"{path}::{node.name}::{m.name}", m,
                         has_wrapping_deco((*node.decorator_list, *m.decorator_list)),
-                        id(node) in skipped_classes or has_unittest_skip(m.decorator_list))
+                        has_unittest_skip(m.decorator_list))
     return out
 
 
@@ -1613,6 +1561,55 @@ def _host_lib_roots() -> tuple[Path, ...]:
     return tuple(Path(p) for p in sorted({os.path.realpath(p) for p in roots if p and os.path.isdir(p)}))
 
 
+def _collect(root: Path, tmp: Path, files: list[str], baseline: dict[str, str]) -> dict[str, Any]:
+    """root を作業ディレクトリに、採点と同じ隔離の子プロセスで files を pytest 収集した結果（_COLLECT_SCRIPT の出力）。"""
+    marker = f"AHE-COLLECT-{secrets.token_hex(16)}"
+    stdin_data = json.dumps({"marker": marker, "baseline": baseline}).encode("utf-8")
+    argv = [sys.executable, "-c", _COLLECT_SCRIPT, *files]
+    env = grader_env(root, tmp, tmp / "record.json")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONSAFEPATH"] = "1"
+    cmd = grader_sandbox_cmd(shlex.join(argv), root, tmp) if grader_isolation() == "bwrap" else argv
+    proc = subprocess.run(cmd, cwd=root, env=env, input=stdin_data, capture_output=True, timeout=_COLLECT_TIMEOUT_S, check=False)
+    stdout = proc.stdout.decode("utf-8", errors="replace")
+    delim = f"\n{marker}\n"
+    end = stdout.rfind(delim)
+    start = stdout.rfind(delim, 0, end) if end >= 0 else -1
+    if start < 0 or end <= start:
+        raise ValueError("収集結果のマーカーが標準出力にありません")
+    data = json.loads(stdout[start + len(delim):end])
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        raise ValueError("収集結果の形式が違います")
+    return data
+
+
+def _baseline_class_skips(before: dict[str, str], tmp: Path, files: list[str]) -> set[str]:
+    """基準の写し（before）だけで作ったツリーを同じように収集し、この OS で import したクラスの __unittest_skip__ が真になるテストの
+    node id。写しにないファイル（データなど）で収集できないときは空（クラスの skip はどれも基準になかったものとして扱う: fail-closed）。
+    ツリーは候補の収集のあとに新しく作る（候補のコードが一時フォルダに先回りして置いたものは使わない）。"""
+    tree = Path(tempfile.mkdtemp(prefix="baseline-tree-", dir=tmp))
+    btmp = Path(tempfile.mkdtemp(prefix="baseline-tmp-", dir=tmp))
+    try:
+        for rel, text in before.items():
+            p = tree / rel
+            if Path(rel).is_absolute() or ".." in Path(rel).parts:
+                continue
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "x", encoding="utf-8", newline="") as fh:
+                fh.write(text)
+        data = _collect(tree, btmp, files, {f: before[f] for f in files})
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        log.warning("基準の収集ができないため、クラスの unittest skip はすべて基準になかったものとして扱います: %s", e)
+        return set()
+    finally:
+        shutil.rmtree(tree, ignore_errors=True)
+        shutil.rmtree(btmp, ignore_errors=True)
+    if data.get("rc") not in (0, 5):
+        log.warning("基準の収集が失敗したため（rc=%s）、クラスの unittest skip はすべて基準になかったものとして扱います", data.get("rc"))
+        return set()
+    return {it["id"] for it in data["items"] if it.get("skip_cls")}
+
+
 def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tuple[list[dict[str, str]], str | None]:
     """動的な差し替え（setattr(TestA, "test_x", f)・globals()["test_x"] = f・conftest からの代入）の検出。solver が変えたあとの作業ツリーを
     採点と同じ隔離の子プロセスで pytest 収集し、基準にあった各テストが実際に実行する関数の位置（ファイル・行）を、基準の定義と照合する。
@@ -1633,25 +1630,9 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
     if not expected:
         return [], None
     tmp = Path(tmp_dir)
-    marker = f"AHE-COLLECT-{secrets.token_hex(16)}"
-    stdin_data = json.dumps({"marker": marker, "baseline": {f: before[f] for f in files}}).encode("utf-8")
-    argv = [sys.executable, "-c", _COLLECT_SCRIPT, *files]
-    env = grader_env(root, tmp, tmp / "record.json")
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    env["PYTHONSAFEPATH"] = "1"
+    baseline = {f: before[f] for f in files}
     try:
-        if grader_isolation() == "bwrap":
-            cmd = grader_sandbox_cmd(shlex.join(argv), root, tmp)
-        else:
-            cmd = argv
-        proc = subprocess.run(cmd, cwd=root, env=env, input=stdin_data, capture_output=True, timeout=_COLLECT_TIMEOUT_S, check=False)
-        stdout = proc.stdout.decode("utf-8", errors="replace")
-        delim = f"\n{marker}\n"
-        end = stdout.rfind(delim)
-        start = stdout.rfind(delim, 0, end) if end >= 0 else -1
-        if start < 0 or end <= start:
-            raise ValueError("収集結果のマーカーが標準出力にありません")
-        data = json.loads(stdout[start + len(delim):end])
+        data = _collect(root, tmp, files, baseline)
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         log.warning("テスト収集による再束縛の確認ができませんでした: %s", e)
         return [], f"収集の子プロセスを動かせなかった: {type(e).__name__}: {str(e)[:200]}"
@@ -1667,6 +1648,10 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
     got: dict[str, list[dict[str, Any]]] = {}  # parametrize のケースは同じ node id になる: ケースごとに全部照合する
     for it in data["items"]:
         got.setdefault(it["id"], []).append(it)
+    # クラスの __unittest_skip__ は静的には決まらない（MRO・__init_subclass__・Generic[...]・OS ごとの条件）。候補で付いていたら、
+    # 基準のソースを同じ OS で収集して、同じテストがクラスの skip でスキップされるときだけ許す
+    baseline_cls_skipped = (_baseline_class_skips(before, tmp, files)
+                            if any(it.get("skip_cls") for nid in expected for it in got.get(nid, ())) else set())
     known = _known_wrappers(root, before)
     known_callables = _known_callable_wrappers(root, before)
     known_digests = _known_wrapper_digests(root, before, callables=False)
@@ -1689,8 +1674,10 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
             return hit(f"rebound at collection: {name} -> {it['file']}:{it['line']} (baseline {rel}:{line})")
         if it.get("code_changed"):  # 位置は同じでも、__code__ の差し替え（CodeType.replace）で中身が基準のソースと違う
             return hit(f"code replaced at collection: {name}")
-        if it.get("skip_attr") and node_id not in baseline_skipped:  # 基準で必ずスキップするテスト以外に unittest の skip が付いた
+        if it.get("skip_fn") and node_id not in baseline_skipped:  # 基準で必ずスキップするテスト以外に unittest の skip が付いた
             return hit(f"unittest skip injected at collection: {name}")
+        if it.get("skip_cls") and node_id not in baseline_cls_skipped:  # 基準の収集ではクラスの skip でスキップしなかった
+            return hit(f"unittest class skip injected at collection: {name}")
         if it.get("chain") and node_id not in decorated:
             w = it["chain"][0]
             where = f"{w[0]}:{w[1]}" if w and len(w) >= 2 and w[0] else "<no __code__>"

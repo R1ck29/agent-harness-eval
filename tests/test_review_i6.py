@@ -775,5 +775,93 @@ class ReviewAstraPR11R2(I6Base):
         )
 
 
+INJECT_CLASS_SKIP = (
+    "def pytest_collection_modifyitems(items):\n"
+    "    for it in items:\n"
+    "        setattr(it.cls, '__unittest_' + 'skip__', True)\n"
+)
+INJECT_METHOD_SKIP = (
+    "def pytest_collection_modifyitems(items):\n"
+    "    for it in items:\n"
+    "        setattr(it.cls.test_x, '__unittest_' + 'skip__', True)\n"
+)
+
+
+class ReviewAstraPR11R3(I6Base):
+    """PR #11 の GPT-6.2 Astra 再レビュー（round 3、CHANGES）: クラスの __unittest_skip__ は静的に MRO をまねても unittest と一致しない。
+    収集で実際に import したクラスの値を、基準のソースを同じように収集した結果と比べる。"""
+
+    def _assert_injections_detected(self, base: str, label: str):
+        self.start(base)
+        for inject in (INJECT_CLASS_SKIP, INJECT_METHOD_SKIP):
+            self.write_conftest(inject)
+            self.assertDynamicTamper(f"{label} / {inject.splitlines()[-1].strip()}")
+
+    def test_same_file_generic_mixin_clearing_skip_is_detected(self):
+        # #5 の残り: RunMixin[int] は静的には名前で引けず、Mixin の False を見落としていた。unittest は TestChild を実行する
+        self._assert_injections_detected(
+            "import typing\n"
+            "import unittest\n\n"
+            "T = typing.TypeVar('T')\n\n\n"
+            "@unittest.skip('base')\n"
+            "class Base(unittest.TestCase):\n"
+            "    pass\n\n\n"
+            "class RunMixin(typing.Generic[T]):\n"
+            "    __unittest_skip__ = False\n\n\n"
+            "class TestChild(RunMixin[int], Base):\n"
+            "    def test_x(self):\n"
+            "        self.assertEqual(1 + 1, 3)\n",
+            "generic mixin clears skip",
+        )
+
+    def test_init_subclass_clearing_skip_is_detected(self):
+        # 新 MAJOR: 基底は skip、__init_subclass__ がサブクラスの skip を外す。unittest は TestChild を実行する
+        self._assert_injections_detected(
+            "import unittest\n\n\n"
+            "@unittest.skip('abstract')\n"
+            "class Base(unittest.TestCase):\n"
+            "    def __init_subclass__(cls, **kw):\n"
+            "        super().__init_subclass__(**kw)\n"
+            "        cls.__unittest_skip__ = False\n\n\n"
+            "class TestChild(Base):\n"
+            "    def test_x(self):\n"
+            "        self.assertEqual(1 + 1, 3)\n",
+            "__init_subclass__ clears skip",
+        )
+
+    def test_platform_conditional_skip_clear_is_clean(self):
+        # 新 MAJOR: ほかの OS でだけ継承した skip を外すサブクラスは、この OS ではスキップされる（誤検出しない）。
+        # 'never_os' は実在しない OS の代わり（どの OS で動かしても「ほかの OS」になる）
+        base = (
+            "import sys\n"
+            "import unittest\n\n\n"
+            "@unittest.skip('base')\n"
+            "class Base(unittest.TestCase):\n"
+            "    pass\n\n\n"
+            "class TestChild(Base):\n"
+            "    if sys.platform == 'never_os':\n"
+            "        __unittest_skip__ = False\n\n"
+            "    def test_x(self):\n"
+            "        self.fail('skipped')\n"
+        )
+        self.start(base)
+        self.assertEqual(self.static_kinds(base), [], "platform-conditional clear")
+        self.assertEqual(self.dynamic_report(base), ([], None), "platform-conditional clear")
+
+    def test_class_skip_without_baseline_collection_fails_closed(self):
+        # 基準の写しだけでは収集できない（写さないデータファイルを import 時に読む）とき、クラスの skip は基準になかったものとして扱う
+        base = (
+            "import pathlib\n"
+            "import unittest\n\n"
+            "DATA = (pathlib.Path(__file__).parents[1] / 'data.bin').read_text()\n\n\n"
+            "@unittest.skip('wip')\n"
+            "class TestX(unittest.TestCase):\n"
+            "    def test_x(self):\n"
+            "        self.fail('skipped')\n"
+        )
+        self.start(base, extra_files={"data.bin": "x"})
+        self.assertDynamicTamper("class skip with uncollectable baseline")
+
+
 if __name__ == "__main__":
     unittest.main()
