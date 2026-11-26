@@ -871,7 +871,8 @@ OPTIONAL_FIXTURE = (
 
 
 class ReviewAstraPR11R4(I6Base):
-    """PR #11 の GPT-6.2 Astra 再レビュー（round 4、CHANGES）: 基準の写しだけのツリーは写さないファイル（任意のフィクスチャ）を欠く。"""
+    """PR #11 の GPT-6.2 Astra 再レビュー（round 4、CHANGES）: 基準の写しだけのツリーは写さないファイル（任意のフィクスチャ）を欠く。
+    クラスの skip を判定から外していたため、基準の関数の skip デコレータが（クラスが skip でも）注入扱いになっていた。"""
 
     def _assert_clean(self, base: str, label: str):
         self.start(base)
@@ -923,8 +924,34 @@ class ReviewAstraPR11R4(I6Base):
         self.start(PLAIN_CASE)
         shutil.rmtree(self.wd / "tests")
         (self.wd / "tests").symlink_to(outside, target_is_directory=True)
-        self.assertEqual(_baseline_skips(self.before, self.wd, self.tmp, ["tests/test_a.py"]), set())
+        self.assertEqual(_baseline_skips(self.before, self.wd, self.tmp, ["tests/test_a.py"]), (set(), set()))
         self.assertEqual(list(outside.iterdir()), [])
+
+    def test_platform_method_skip_in_skipped_class_is_clean(self):
+        # MAJOR 2: 変更のないクラスの @unittest.skip と、この OS で効く関数の @skipIf（Astra は Linux の sys.platform == 'linux'）。
+        # 'never_os' は実在しない OS の代わり（!= 'never_os' はどの OS でも真）
+        self._assert_clean(
+            "import sys\n"
+            "import unittest\n\n\n"
+            "@unittest.skip('wip')\n"
+            "class TestX(unittest.TestCase):\n"
+            "    @unittest.skipIf(sys.platform != 'never_os', 'this os')\n"
+            "    def test_x(self):\n"
+            "        self.fail('skipped')\n",
+            "platform method skip in skipped class",
+        )
+
+    def test_platform_method_skip_in_running_class_is_clean(self):
+        # MAJOR 2 と同じ原因: この OS でだけ効く関数の skip（ほかの OS 専用のテスト）は基準でもスキップされる
+        self._assert_clean(
+            "import sys\n"
+            "import unittest\n\n\n"
+            "class TestX(unittest.TestCase):\n"
+            "    @unittest.skipUnless(sys.platform == 'never_os', 'other os only')\n"
+            "    def test_x(self):\n"
+            "        self.fail('skipped')\n",
+            "platform method skip in running class",
+        )
 
     def test_method_skip_injected_onto_conditional_running_method_is_detected(self):
         # fail-closed の確認: この OS では効かない条件の skip を持つテストに skip を注入する

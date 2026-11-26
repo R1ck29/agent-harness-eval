@@ -1484,7 +1484,8 @@ def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None 
     """テストファイルが定義するテスト（pytest の node id の後半 → 定義の先頭行。デコレータがあればその行）。
     dumps を渡すと定義の AST 表現を、decorated を渡すと関数自身または所属クラスにラップし得るデコレータがあるテストの node id を、
     skipped を渡すと基準 AST で必ずスキップする @unittest.skip 類を関数自身に持つテストの node id を入れる（クラスの skip は
-    静的には決まらない: __init_subclass__・Generic[...]・条件付きの代入。rebound_report が収集した実際のクラスで比べる）。"""
+    静的には決まらない: __init_subclass__・Generic[...]・条件付きの代入。関数の条件付き skip も OS で決まる。rebound_report が
+    基準のソースを収集した結果で比べる）。"""
     try:
         tree = ast.parse(text)
     except SyntaxError:
@@ -1617,15 +1618,16 @@ def _copy_unwatched(src: Path, dst: Path) -> None:
                 shutil.copyfile(p, out / name, follow_symlinks=False)
 
 
-def _baseline_skips(before: dict[str, str], workdir: Path, tmp: Path, files: list[str]) -> set[str]:
-    """基準のソースを同じように収集し、この OS で import したクラスの __unittest_skip__ が真になるテストの node id。
+def _baseline_skips(before: dict[str, str], workdir: Path, tmp: Path, files: list[str]) -> tuple[set[str], set[str]]:
+    """基準のソースを同じように収集し、この OS で __unittest_skip__ が真になるテストの node id（import したクラス、関数の各層）。
     収集は 2 つのツリーで行い、両方でスキップされるものだけを返す:
     - 基準の写し（before）だけのツリー。候補が変えられない（ただし写さないフィクスチャがないためにスキップすることがある）
     - 作業ツリーの写さないファイルに基準の写しを重ねたツリー。元の作業ツリーに近い（ただし写さないファイルは候補が置いたり
       変えたりできる。.so で基準のモジュールを隠すなど）
-    どちらかで収集できないときは空（クラスの skip はどれも基準になかったものとして扱う: fail-closed）。
+    どちらかで収集できないときは空（skip はどれも基準になかったものとして扱う: fail-closed）。
     ツリーは候補の収集のあとに新しく作る（候補のコードが一時フォルダに先回りして置いたものは使わない）。"""
-    result: set[str] | None = None
+    cls_skips: set[str] | None = None
+    fn_skips: set[str] | None = None
     for overlay in (False, True):
         tree = Path(tempfile.mkdtemp(prefix="baseline-tree-", dir=tmp))
         btmp = Path(tempfile.mkdtemp(prefix="baseline-tmp-", dir=tmp))
@@ -1645,17 +1647,19 @@ def _baseline_skips(before: dict[str, str], workdir: Path, tmp: Path, files: lis
                     fh.write(text)
             data = _collect(tree, btmp, files, {f: before[f] for f in files})
         except (OSError, ValueError, subprocess.SubprocessError) as e:
-            log.warning("基準の収集ができないため、クラスの unittest skip はすべて基準になかったものとして扱います: %s", e)
-            return set()
+            log.warning("基準の収集ができないため、unittest skip はすべて基準になかったものとして扱います: %s", e)
+            return set(), set()
         finally:
             shutil.rmtree(tree, ignore_errors=True)
             shutil.rmtree(btmp, ignore_errors=True)
         if data.get("rc") not in (0, 5):
-            log.warning("基準の収集が失敗したため（rc=%s）、クラスの unittest skip はすべて基準になかったものとして扱います", data.get("rc"))
-            return set()
-        got = {it["id"] for it in data["items"] if it.get("skip_cls")}
-        result = got if result is None else result & got
-    return result or set()
+            log.warning("基準の収集が失敗したため（rc=%s）、unittest skip はすべて基準になかったものとして扱います", data.get("rc"))
+            return set(), set()
+        got_cls = {it["id"] for it in data["items"] if it.get("skip_cls")}
+        got_fn = {it["id"] for it in data["items"] if it.get("skip_fn")}
+        cls_skips = got_cls if cls_skips is None else cls_skips & got_cls
+        fn_skips = got_fn if fn_skips is None else fn_skips & got_fn
+    return cls_skips or set(), fn_skips or set()
 
 
 def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tuple[list[dict[str, str]], str | None]:
@@ -1696,10 +1700,14 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
     got: dict[str, list[dict[str, Any]]] = {}  # parametrize のケースは同じ node id になる: ケースごとに全部照合する
     for it in data["items"]:
         got.setdefault(it["id"], []).append(it)
-    # クラスの __unittest_skip__ は静的には決まらない（MRO・__init_subclass__・Generic[...]・OS ごとの条件）。候補で付いていたら、
-    # 基準のソースを同じ OS で収集して、同じテストがクラスの skip でスキップされるときだけ許す
-    baseline_cls_skipped = (_baseline_skips(before, root, tmp, files)
-                            if any(it.get("skip_cls") for nid in expected for it in got.get(nid, ())) else set())
+    # __unittest_skip__ は静的には決まらない（クラスは MRO・__init_subclass__・Generic[...]、関数もクラスも OS ごとの条件）。
+    # 候補で付いていて静的に基準の skip と言えなければ、基準のソースを同じ OS で収集して、同じテストが同じ層の skip で
+    # スキップされるときだけ許す
+    needs_baseline = any(it.get("skip_cls") or (it.get("skip_fn") and nid not in baseline_skipped)
+                         for nid in expected for it in got.get(nid, ()))
+    baseline_cls_skipped, baseline_fn_skipped = (_baseline_skips(before, root, tmp, files) if needs_baseline
+                                                 else (set(), set()))
+    fn_skip_ok = baseline_skipped | baseline_fn_skipped
     known = _known_wrappers(root, before)
     known_callables = _known_callable_wrappers(root, before)
     known_digests = _known_wrapper_digests(root, before, callables=False)
@@ -1722,7 +1730,7 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
             return hit(f"rebound at collection: {name} -> {it['file']}:{it['line']} (baseline {rel}:{line})")
         if it.get("code_changed"):  # 位置は同じでも、__code__ の差し替え（CodeType.replace）で中身が基準のソースと違う
             return hit(f"code replaced at collection: {name}")
-        if it.get("skip_fn") and node_id not in baseline_skipped:  # 基準で必ずスキップするテスト以外に unittest の skip が付いた
+        if it.get("skip_fn") and node_id not in fn_skip_ok:  # 基準で（この OS で）スキップするテスト以外に unittest の skip が付いた
             return hit(f"unittest skip injected at collection: {name}")
         if it.get("skip_cls") and node_id not in baseline_cls_skipped:  # 基準の収集ではクラスの skip でスキップしなかった
             return hit(f"unittest class skip injected at collection: {name}")
@@ -1735,7 +1743,7 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
                                    known_digests=known_digests, known_callable_digests=known_callable_digests,
                                    known_classes=known_classes, known_fn_digests=known_fn_digests,
                                    known_fn_quals=known_fn_quals, known_cm_classes=known_cm_classes,
-                                   allow_unittest_skip=(node_id in baseline_skipped),
+                                   allow_unittest_skip=(node_id in fn_skip_ok),
                                    lib_cache=lib_cache, require_lib_digest=True)]
         if bad:
             w = bad[0]
