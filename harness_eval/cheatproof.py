@@ -1590,8 +1590,8 @@ _BASELINE_TREE_MAX_BYTES = 256 * 1024 * 1024
 def _copy_uncaptured(src: Path, dst: Path, captured: Collection[str]) -> None:
     """作業ツリーのうち capture_tests の写しに入らないファイル（データ・フィクスチャなど _watched でないもの、
     監視対象でもバイナリ・UTF-8 でない・上限を超えるもの）を dst に写す。captured（基準の写しで置くパス）と、
-    監視対象で写しに入るテキスト（候補が足したもので、基準にない）は写さない。リンクはリンクのまま写し、特殊ファイルと _SKIP_DIRS は写さない。
-    合計が _BASELINE_TREE_MAX_BYTES を超えたら OSError。"""
+    監視対象で写しに入るテキスト（候補が足したもので、基準にない）は写さない。リンクはリンクのまま、ファイルは権限と時刻ごと写し、
+    特殊ファイルと _SKIP_DIRS は写さない。合計が _BASELINE_TREE_MAX_BYTES を超えたら OSError。"""
     total = 0
     for dirpath, dirs, names in os.walk(src, followlinks=False):
         here = Path(dirpath)
@@ -1618,7 +1618,17 @@ def _copy_uncaptured(src: Path, dst: Path, captured: Collection[str]) -> None:
                 total += st.st_size
                 if total > _BASELINE_TREE_MAX_BYTES:
                     raise OSError(f"作業ツリーの写さないファイルが {_BASELINE_TREE_MAX_BYTES} バイトを超える")
-                shutil.copyfile(p, out / name, follow_symlinks=False)
+                shutil.copy2(p, out / name, follow_symlinks=False)  # 権限も写す（実行ビットで分岐するテストがある）
+
+
+def _copy_mode(src: Path, dst: Path) -> None:
+    """src が（リンクでない）通常ファイルなら、その権限の 0o777 の部分を dst（作ったばかりのファイル）に付ける。"""
+    try:
+        st = os.lstat(src)
+    except OSError:
+        return
+    if stat.S_ISREG(st.st_mode):
+        os.chmod(dst, stat.S_IMODE(st.st_mode) & 0o777)
 
 
 def _baseline_skips(before: dict[str, str], workdir: Path, tmp: Path, files: list[str]) -> tuple[set[str], set[str]]:
@@ -1648,6 +1658,8 @@ def _baseline_skips(before: dict[str, str], workdir: Path, tmp: Path, files: lis
                     cur.mkdir(exist_ok=True)
                 with open(tree / rel, "x", encoding="utf-8", newline="") as fh:  # "x": 同名のリンクにも書かない
                     fh.write(text)
+                if overlay:  # 重ねたツリーでは作業ツリーの権限で置く（実行ビットで分岐するテストがある）
+                    _copy_mode(Path(workdir) / rel, tree / rel)
             data = _collect(tree, btmp, files, {f: before[f] for f in files})
         except (OSError, ValueError, subprocess.SubprocessError) as e:
             log.warning("基準の収集ができないため、unittest skip はすべて基準になかったものとして扱います: %s", e)

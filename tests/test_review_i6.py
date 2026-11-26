@@ -1032,6 +1032,41 @@ class ReviewAstraPR11R5(I6Base):
         self.assertEqual(self.static_kinds(base), [], "absent binary fixture")
         self.assertEqual(self.dynamic_report(base), ([], None), "absent binary fixture")
 
+    def _start_exec_helper(self, rel: str, body: str, mode: int) -> None:
+        helper = self.wd / rel
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        helper.chmod(mode)
+        self.start(EXEC_HELPER.format(rel=rel, body=body))
+
+    def test_class_skip_on_unwatched_executable_helper_is_detected(self):
+        # MAJOR 2: 写さない側の実行可能なヘルパー。copyfile は実行ビットを落とすので、どちらのツリーでもスキップされていた
+        self._start_exec_helper("bin/helper", "self.assertEqual(1 + 1, 3)", 0o755)
+        self._assert_injections_detected("unwatched executable helper")
+
+    def test_class_skip_on_watched_executable_helper_is_detected(self):
+        # MAJOR 2 の同類: 写しにある監視対象のヘルパー（tests/ の下のスクリプト）も、重ねたツリーでは作業ツリーの権限で置く
+        self._start_exec_helper("tests/helper.sh", "self.assertEqual(1 + 1, 3)", 0o755)
+        self.assertIn("tests/helper.sh", self.before)
+        self._assert_injections_detected("watched executable helper")
+
+    def test_class_skip_on_binary_executable_helper_is_detected(self):
+        # MAJOR 1 と 2 の組み合わせ: 写しに入らない監視対象の実行ファイル（tests/ の下のバイナリ）
+        helper = self.wd / "tests" / "bin" / "helper"
+        helper.parent.mkdir(parents=True)
+        helper.write_bytes(b"\x7fELF\xff\xfe")
+        helper.chmod(0o755)
+        self.start(EXEC_HELPER.format(rel="tests/bin/helper", body="self.assertEqual(1 + 1, 3)"))
+        self.assertNotIn("tests/bin/helper", self.before)
+        self._assert_injections_detected("binary executable helper")
+
+    def test_class_skip_with_non_executable_helper_is_clean(self):
+        # MAJOR 2 の裏: 元の作業ツリーでもヘルパーが実行可能でなければ、基準でもスキップされる（誤検出しない）
+        for rel in ("bin/helper", "tests/helper.sh"):
+            with self.subTest(rel=rel):
+                self._start_exec_helper(rel, "self.fail('skipped')", 0o644)
+                self.assertEqual(self.dynamic_report(), ([], None), rel)
+
 
 if __name__ == "__main__":
     unittest.main()
