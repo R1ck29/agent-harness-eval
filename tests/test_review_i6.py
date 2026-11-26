@@ -615,5 +615,143 @@ class ReviewAstraPR11(I6Base):
         self.assertDynamicTamper("first parametrize case rebound")
 
 
+class ReviewAstraPR11R2(I6Base):
+    """PR #11 の GPT-6.2 Astra 再レビュー（round 2、CHANGES）の指摘ごとの回帰テスト。"""
+
+    def _assert_clean(self, base: str, label: str, extra_files: dict[str, str] | None = None):
+        self.start(base, extra_files=extra_files)
+        self.assertEqual(self.static_kinds(base), [], label)
+        self.assertEqual(self.dynamic_report(base), ([], None), label)
+
+    def test_default_argument_lambda_on_method_line_is_not_the_method(self):
+        # #1: 定義行にある既定引数の lambda（例外を握りつぶす）を Session.__exit__ に付け替える
+        self.start(
+            "import contextlib\n\n\n"
+            "class Session(contextlib.ContextDecorator):\n"
+            "    def __enter__(self):\n"
+            "        return self\n"
+            "    def __exit__(self, *a, _hook=lambda *a: True):\n"
+            "        return False\n\n\n"
+            "@Session()\n"
+            "def test_x():\n"
+            "    assert 1 + 1 == 3\n"
+        )
+        self.write_conftest(
+            "def pytest_collection_modifyitems(items):\n"
+            "    for it in items:\n"
+            "        cls = it.module.Session\n"
+            "        cls.__exit__ = cls.__exit__.__kwdefaults__['_hook']\n"
+        )
+        self.assertDynamicTamper("Session.__exit__ = <default-arg lambda>")
+
+    def test_unittest_skip_follows_the_mro_with_multiple_inheritance(self):
+        # #5: TestChild(Mixin, Base) は MRO で Mixin の False が先に見つかり実行される。skip の注入は改ざん
+        self.start(
+            "import unittest\n\n\n"
+            "@unittest.skip('base')\n"
+            "class Base(unittest.TestCase):\n"
+            "    pass\n\n\n"
+            "class Mixin:\n"
+            "    __unittest_skip__ = False\n\n\n"
+            "class TestChild(Mixin, Base):\n"
+            "    def test_x(self):\n"
+            "        self.assertEqual(1 + 1, 3)\n"
+        )
+        self.write_conftest(
+            "def pytest_collection_modifyitems(items):\n"
+            "    for it in items:\n"
+            "        setattr(it.cls.test_x, '__unittest_' + 'skip__', True)\n"
+        )
+        self.assertDynamicTamper("skip attr on MRO-running subclass")
+
+    def test_unittest_skip_inherited_through_the_mro_is_clean(self):
+        # #5 の裏: 基底のどれかの skip が MRO で先に見つかる多重継承はスキップされる（誤検出しない）
+        self._assert_clean(
+            "import unittest\n\n\n"
+            "@unittest.skip('base')\n"
+            "class Base(unittest.TestCase):\n"
+            "    pass\n\n\n"
+            "class Mixin:\n"
+            "    pass\n\n\n"
+            "class Runs:\n"
+            "    __unittest_skip__ = False\n\n\n"
+            "class TestChild(Mixin, Base, Runs):\n"
+            "    def test_x(self):\n"
+            "        self.fail('skipped')\n\n\n"
+            "class Middle(Base):\n"
+            "    pass\n\n\n"
+            "class TestGrandChild(Mixin, Middle):\n"
+            "    def test_x(self):\n"
+            "        self.fail('skipped')\n",
+            "MRO-inherited skip",
+        )
+
+    def test_subclass_repeating_or_annotating_unittest_skip_is_clean(self):
+        # 新 MAJOR（~1506）: 基底の skip を `= True` で繰り返す・注釈だけのサブクラスは unittest でもスキップされる
+        self._assert_clean(
+            "import unittest\n\n\n"
+            "@unittest.skip('base')\n"
+            "class Base(unittest.TestCase):\n"
+            "    pass\n\n\n"
+            "class TestRepeat(Base):\n"
+            "    __unittest_skip__ = True\n\n"
+            "    def test_x(self):\n"
+            "        self.fail('skipped')\n\n\n"
+            "class TestAnnotated(Base):\n"
+            "    __unittest_skip__: bool\n\n"
+            "    def test_x(self):\n"
+            "        self.fail('skipped')\n",
+            "repeated / annotated __unittest_skip__",
+        )
+
+    def test_class_body_method_alias_in_baseline_cm_is_clean(self):
+        # 新 MAJOR（~1933）: 変更のない基準クラスの `__exit__ = close` の別名は正当
+        self._assert_clean(
+            "import contextlib\n\n\n"
+            "class Session(contextlib.ContextDecorator):\n"
+            "    def __enter__(self):\n"
+            "        return self\n"
+            "    def close(self, *a):\n"
+            "        return False\n"
+            "    __exit__ = close\n\n\n"
+            "@Session()\n"
+            "def test_x():\n"
+            "    assert 1 + 1 == 2\n",
+            "__exit__ = close",
+        )
+
+    def test_mock_patch_test_prefix_configuration_is_clean(self):
+        # 新 MAJOR（~980）: mock.patch.TEST_PREFIX の設定は文書化された使い方
+        self._assert_clean(
+            "import unittest\n"
+            "from unittest import mock\n\n"
+            "mock.patch.TEST_PREFIX = 'test_'\n\n\n"
+            "@mock.patch('os.getcwd', return_value='/x')\n"
+            "class TestX(unittest.TestCase):\n"
+            "    def test_x(self, m):\n"
+            "        import os\n"
+            "        self.assertEqual(os.getcwd(), '/x')\n",
+            "patch.TEST_PREFIX",
+        )
+
+    def test_patch_dict_target_created_by_fixture_is_clean(self):
+        # 新 MAJOR（~1246）: fixture が用意する文字列ターゲットは収集時には解決できない（照合を飛ばす）
+        self._assert_clean(
+            "import sys\n"
+            "import types\n"
+            "from unittest import mock\n\n"
+            "import pytest\n\n\n"
+            "@pytest.fixture(autouse=True)\n"
+            "def _cfg():\n"
+            "    sys.modules['i6_cfg'] = types.SimpleNamespace(SETTINGS={})\n"
+            "    yield\n"
+            "    sys.modules.pop('i6_cfg', None)\n\n\n"
+            "@mock.patch.dict('i6_cfg.SETTINGS', {'k': 1})\n"
+            "def test_x():\n"
+            "    assert sys.modules['i6_cfg'].SETTINGS == {'k': 1}\n",
+            "fixture-provided patch.dict target",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

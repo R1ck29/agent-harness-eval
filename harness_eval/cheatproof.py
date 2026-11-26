@@ -1728,8 +1728,10 @@ def _file_has_code(path: Path, lineno: int, dg: str, cache: dict[Path, set[tuple
     return any(ln == lineno and d == dg for _, ln, d in _file_code_digests(path, cache))
 
 
-def _source_code_digests_by_line(path: str, text: str, *, include_pytest_rewrite: bool = False) -> dict[int, set[str]]:
-    """ソース文字列をコンパイルし、co_firstlineno -> {code_digest} の写像を作る。"""
+def _source_code_digests_by_line(path: str, text: str, *,
+                                 include_pytest_rewrite: bool = False) -> dict[int, set[tuple[str, str]]]:
+    """ソース文字列をコンパイルし、co_firstlineno -> {(co_name, code_digest)} の写像を作る（同じ行の既定引数の lambda などと
+    定義そのものを co_name で区別できるように）。"""
     modes: tuple[bool, ...] = (False, True) if include_pytest_rewrite else (False,)
     rewrite_fn = None
     if include_pytest_rewrite:
@@ -1738,7 +1740,7 @@ def _source_code_digests_by_line(path: str, text: str, *, include_pytest_rewrite
             rewrite_fn = rewrite_asserts
         except Exception:
             modes = (False,)
-    out: dict[int, set[str]] = {}
+    out: dict[int, set[tuple[str, str]]] = {}
     for rewrite in modes:
         try:
             tree = ast.parse(text)
@@ -1750,7 +1752,7 @@ def _source_code_digests_by_line(path: str, text: str, *, include_pytest_rewrite
         stack = [mod]
         while stack:
             co = stack.pop()
-            out.setdefault(co.co_firstlineno, set()).add(_code_digest(co))
+            out.setdefault(co.co_firstlineno, set()).add((co.co_name, _code_digest(co)))
             for k in co.co_consts:
                 if isinstance(k, types.CodeType):
                     stack.append(k)
@@ -1797,20 +1799,22 @@ def _known_wrapper_digests(root: Path, before: dict[str, str], *, callables: boo
         resolved = str((root / path).resolve())
         is_test = bool(TEST_FILE.search(path))
         base_by_line = _source_code_digests_by_line(resolved, text, include_pytest_rewrite=True)
-        now_by_line: dict[int, set[str]] | None = None
+        now_by_line: dict[int, set[tuple[str, str]]] | None = None
         allow_live_nested = not is_test and not all_fns and not callables
         for q, n in new_defs:
             if q not in old_lines:
                 continue
             new_ln = first(n)
+            co_name = getattr(n, "name", None) or "<lambda>"  # 同じ行のほかのコード（既定引数の lambda など）は含めない
             if allow_live_nested and q in old_wrapped:
                 if now_by_line is None:
                     now_by_line = _source_code_digests_by_line(resolved, now, include_pytest_rewrite=True)
-                for dig in now_by_line.get(new_ln, ()):
-                    out.add((resolved, new_ln, dig, q) if with_qual else (resolved, new_ln, dig))
+                lines = {new_ln: now_by_line}
             else:
-                for ln in old_lines[q]:
-                    for dig in base_by_line.get(ln, ()):
+                lines = {ln: base_by_line for ln in old_lines[q]}
+            for ln, by_line in lines.items():
+                for nm, dig in by_line.get(ln, ()):
+                    if nm == co_name:
                         out.add((resolved, new_ln, dig, q) if with_qual else (resolved, new_ln, dig))
     return out
 
