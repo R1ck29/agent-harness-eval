@@ -1106,10 +1106,11 @@ def _run():
             if inst_ok:
                 return None if _builtin_cls(type(x)) else ["cls", _cls_origin(type(x))]
             return ["bad"]
-        def _spec_origin(x):
+        def _spec_origin(x, inst_ok=False):
+            # spec / spec_set はインスタンスも普通に渡すので、そのクラスの出自を照合する（autospec は属性をたどるので型・関数だけ）
             if type(x) in (list, tuple) and all(type(n) is str for n in x):
                 return None
-            return _origin(x, False)
+            return _origin(x, inst_ok)
         def _patcher_ok(p, origins):
             # 収集前に採取した許可キー集合・getter の形に収まり、実行時に呼ばれる値（getter の対象・new_callable・spec 類）の
             # 出自を origins に足す。危険なダンダー属性へのパッチは拒否
@@ -1138,8 +1139,8 @@ def _run():
                         origins.append(o)
             else:
                 return False
-            for o in (_origin(pd.get("new_callable"), False), _spec_origin(pd.get("spec")),
-                      _spec_origin(pd.get("spec_set")), _spec_origin(pd.get("autospec"))):
+            for o in (_origin(pd.get("new_callable"), False), _spec_origin(pd.get("spec"), True),
+                      _spec_origin(pd.get("spec_set"), True), _spec_origin(pd.get("autospec"))):
                 if o is not None:
                     origins.append(o)
             return True

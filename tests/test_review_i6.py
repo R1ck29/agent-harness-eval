@@ -566,6 +566,19 @@ class ReviewAstraPR11(I6Base):
         self.assertEqual(self.static_kinds(base), [])
         self.assertEqual(self.dynamic_report(base), ([], None))
 
+    def test_patch_spec_instance_of_foreign_class_is_detected(self):
+        # MAJOR 4 の裏: 基準にないクラスのインスタンスを spec に渡すのは従来どおり拒否
+        self.start(KEEP_BASE)
+        self.write_conftest(
+            "import unittest.mock as mock\n\n"
+            "class Evil:\n"
+            "    pass\n\n"
+            "def pytest_collection_modifyitems(items):\n"
+            "    for it in items:\n"
+            "        it._obj = mock.patch('os.getcwd', spec=Evil())(it.obj)\n"
+        )
+        self.assertDynamicTamper("spec=<foreign instance>")
+
     def test_subclass_unittest_skip_false_override_is_not_allow_listed(self):
         # MAJOR 5: 基底クラスの skip を __unittest_skip__ = False で打ち消したサブクラスのテストは実行される
         self.start(
