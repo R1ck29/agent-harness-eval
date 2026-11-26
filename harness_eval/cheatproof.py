@@ -1501,13 +1501,19 @@ def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None 
         if skipped is not None and has_skip:
             skipped.add(key)
 
-    # クラスの skip は継承される（同じファイルの基底クラスまでたどる）
+    def sets_skip_attr(body: list[ast.stmt]) -> bool:
+        """クラス本体で `__unittest_skip__` を代入している（`= False` で基底の skip を打ち消せる。値は問わず継承を止める: fail-closed）。"""
+        return any(isinstance(t, ast.Name) and t.id == "__unittest_skip__"
+                   for n in body if isinstance(n, (ast.Assign, ast.AnnAssign))
+                   for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))
+
+    # クラスの skip は継承される（同じファイルの基底クラスまでたどる）。クラス自身のデコレータは本体の代入より後に効く
     skipped_classes: set[str] = set()
     class_nodes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
     for _ in class_nodes:
         for n in class_nodes:
-            if n.name not in skipped_classes and (has_unittest_skip(n.decorator_list) or any(
-                    isinstance(b, ast.Name) and b.id in skipped_classes for b in n.bases)):
+            if n.name not in skipped_classes and (has_unittest_skip(n.decorator_list) or (not sets_skip_attr(n.body) and any(
+                    isinstance(b, ast.Name) and b.id in skipped_classes for b in n.bases))):
                 skipped_classes.add(n.name)
 
     for node in tree.body:
