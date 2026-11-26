@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from harness_eval.cheatproof import capture_tests, rebound_report, tamper_check  # noqa: E402
+from harness_eval.cheatproof import _baseline_skips, capture_tests, rebound_report, tamper_check  # noqa: E402
 
 PATCHED_BASE = (
     "import unittest.mock\n\n\n"
@@ -861,6 +861,76 @@ class ReviewAstraPR11R3(I6Base):
         )
         self.start(base, extra_files={"data.bin": "x"})
         self.assertDynamicTamper("class skip with uncollectable baseline")
+
+
+OPTIONAL_FIXTURE = (
+    "import pathlib\n"
+    "import unittest\n\n"
+    "FIXTURE = pathlib.Path(__file__).parents[1] / 'fixture.dat'\n\n\n"
+)
+
+
+class ReviewAstraPR11R4(I6Base):
+    """PR #11 の GPT-6.2 Astra 再レビュー（round 4、CHANGES）: 基準の写しだけのツリーは写さないファイル（任意のフィクスチャ）を欠く。"""
+
+    def _assert_clean(self, base: str, label: str):
+        self.start(base)
+        self.assertEqual(self.static_kinds(base), [], label)
+        self.assertEqual(self.dynamic_report(base), ([], None), label)
+
+    def test_class_skip_on_missing_optional_fixture_is_detected(self):
+        # MAJOR 1: フィクスチャがあれば実行するクラス。写しのツリーにはフィクスチャがなくスキップされるが、元の作業ツリーでは実行する
+        self.start(
+            OPTIONAL_FIXTURE
+            + "@unittest.skipUnless(FIXTURE.exists(), 'optional fixture')\n"
+            "class TestX(unittest.TestCase):\n"
+            "    def test_x(self):\n"
+            "        self.assertEqual(1 + 1, 3)\n",
+            extra_files={"fixture.dat": "x"},
+        )
+        for inject in (INJECT_CLASS_SKIP, INJECT_METHOD_SKIP):
+            self.write_conftest(inject)
+            self.assertDynamicTamper(f"optional fixture class / {inject.splitlines()[-1].strip()}")
+
+    def test_method_skip_on_missing_optional_fixture_is_detected(self):
+        # MAJOR 1 の関数版: フィクスチャがあれば実行するテストに skip を注入する
+        self.start(
+            OPTIONAL_FIXTURE
+            + "class TestX(unittest.TestCase):\n"
+            "    @unittest.skipUnless(FIXTURE.exists(), 'optional fixture')\n"
+            "    def test_x(self):\n"
+            "        self.assertEqual(1 + 1, 3)\n",
+            extra_files={"fixture.dat": "x"},
+        )
+        self.write_conftest(INJECT_METHOD_SKIP)
+        self.assertDynamicTamper("optional fixture method")
+
+    def test_class_skip_with_absent_optional_fixture_is_clean(self):
+        # MAJOR 1 の裏: 元の作業ツリーにもフィクスチャがなければ、基準でもスキップされる（誤検出しない）
+        self._assert_clean(
+            OPTIONAL_FIXTURE
+            + "@unittest.skipUnless(FIXTURE.exists(), 'optional fixture')\n"
+            "class TestX(unittest.TestCase):\n"
+            "    def test_x(self):\n"
+            "        self.fail('skipped')\n",
+            "absent optional fixture",
+        )
+
+    def test_baseline_tree_does_not_write_through_workdir_links(self):
+        # 写さない側から写したディレクトリのリンクを通して、基準のファイルをツリーの外に書かない（収集せず fail-closed）
+        outside = Path(tempfile.mkdtemp(prefix="i6-outside-"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        self.start(PLAIN_CASE)
+        shutil.rmtree(self.wd / "tests")
+        (self.wd / "tests").symlink_to(outside, target_is_directory=True)
+        self.assertEqual(_baseline_skips(self.before, self.wd, self.tmp, ["tests/test_a.py"]), set())
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_method_skip_injected_onto_conditional_running_method_is_detected(self):
+        # fail-closed の確認: この OS では効かない条件の skip を持つテストに skip を注入する
+        self.start(SKIPIF_BASE)
+        self.write_conftest(INJECT_METHOD_SKIP)
+        self.assertDynamicTamper("method skip onto running skipIf")
 
 
 if __name__ == "__main__":

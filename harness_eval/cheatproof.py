@@ -1583,31 +1583,79 @@ def _collect(root: Path, tmp: Path, files: list[str], baseline: dict[str, str]) 
     return data
 
 
-def _baseline_class_skips(before: dict[str, str], tmp: Path, files: list[str]) -> set[str]:
-    """基準の写し（before）だけで作ったツリーを同じように収集し、この OS で import したクラスの __unittest_skip__ が真になるテストの
-    node id。写しにないファイル（データなど）で収集できないときは空（クラスの skip はどれも基準になかったものとして扱う: fail-closed）。
-    ツリーは候補の収集のあとに新しく作る（候補のコードが一時フォルダに先回りして置いたものは使わない）。"""
-    tree = Path(tempfile.mkdtemp(prefix="baseline-tree-", dir=tmp))
-    btmp = Path(tempfile.mkdtemp(prefix="baseline-tmp-", dir=tmp))
-    try:
-        for rel, text in before.items():
-            p = tree / rel
-            if Path(rel).is_absolute() or ".." in Path(rel).parts:
+_BASELINE_TREE_MAX_BYTES = 256 * 1024 * 1024
+
+
+def _copy_unwatched(src: Path, dst: Path) -> None:
+    """作業ツリーの写さないファイル（データ・フィクスチャなど _watched でないもの）を dst に写す。リンクはリンクのまま写し、
+    特殊ファイルと _SKIP_DIRS は写さない。合計が _BASELINE_TREE_MAX_BYTES を超えたら OSError。"""
+    total = 0
+    for dirpath, dirs, names in os.walk(src, followlinks=False):
+        here = Path(dirpath)
+        out = dst / here.relative_to(src)
+        out.mkdir(parents=True, exist_ok=True)
+        keep = []
+        for name in dirs:
+            if name in _SKIP_DIRS:
                 continue
-            p.parent.mkdir(parents=True, exist_ok=True)
-            with open(p, "x", encoding="utf-8", newline="") as fh:
-                fh.write(text)
-        data = _collect(tree, btmp, files, {f: before[f] for f in files})
-    except (OSError, ValueError, subprocess.SubprocessError) as e:
-        log.warning("基準の収集ができないため、クラスの unittest skip はすべて基準になかったものとして扱います: %s", e)
-        return set()
-    finally:
-        shutil.rmtree(tree, ignore_errors=True)
-        shutil.rmtree(btmp, ignore_errors=True)
-    if data.get("rc") not in (0, 5):
-        log.warning("基準の収集が失敗したため（rc=%s）、クラスの unittest skip はすべて基準になかったものとして扱います", data.get("rc"))
-        return set()
-    return {it["id"] for it in data["items"] if it.get("skip_cls")}
+            if os.path.islink(here / name):
+                os.symlink(os.readlink(here / name), out / name)
+            else:
+                keep.append(name)
+        dirs[:] = keep
+        for name in names:
+            p = here / name
+            if _watched(p.relative_to(src).as_posix()):
+                continue
+            st = os.lstat(p)
+            if stat.S_ISLNK(st.st_mode):
+                os.symlink(os.readlink(p), out / name)
+            elif stat.S_ISREG(st.st_mode):
+                total += st.st_size
+                if total > _BASELINE_TREE_MAX_BYTES:
+                    raise OSError(f"作業ツリーの写さないファイルが {_BASELINE_TREE_MAX_BYTES} バイトを超える")
+                shutil.copyfile(p, out / name, follow_symlinks=False)
+
+
+def _baseline_skips(before: dict[str, str], workdir: Path, tmp: Path, files: list[str]) -> set[str]:
+    """基準のソースを同じように収集し、この OS で import したクラスの __unittest_skip__ が真になるテストの node id。
+    収集は 2 つのツリーで行い、両方でスキップされるものだけを返す:
+    - 基準の写し（before）だけのツリー。候補が変えられない（ただし写さないフィクスチャがないためにスキップすることがある）
+    - 作業ツリーの写さないファイルに基準の写しを重ねたツリー。元の作業ツリーに近い（ただし写さないファイルは候補が置いたり
+      変えたりできる。.so で基準のモジュールを隠すなど）
+    どちらかで収集できないときは空（クラスの skip はどれも基準になかったものとして扱う: fail-closed）。
+    ツリーは候補の収集のあとに新しく作る（候補のコードが一時フォルダに先回りして置いたものは使わない）。"""
+    result: set[str] | None = None
+    for overlay in (False, True):
+        tree = Path(tempfile.mkdtemp(prefix="baseline-tree-", dir=tmp))
+        btmp = Path(tempfile.mkdtemp(prefix="baseline-tmp-", dir=tmp))
+        try:
+            if overlay:
+                _copy_unwatched(Path(workdir), tree)
+            for rel, text in before.items():
+                if Path(rel).is_absolute() or ".." in Path(rel).parts:
+                    continue
+                cur = tree
+                for part in Path(rel).parent.parts:  # 写さない側から写したリンクの先には書かない（ツリーの外に出る）
+                    cur = cur / part
+                    if cur.is_symlink():
+                        raise OSError(f"基準のファイルの位置がリンクを通る: {rel}")
+                    cur.mkdir(exist_ok=True)
+                with open(tree / rel, "x", encoding="utf-8", newline="") as fh:  # "x": 同名のリンクにも書かない
+                    fh.write(text)
+            data = _collect(tree, btmp, files, {f: before[f] for f in files})
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
+            log.warning("基準の収集ができないため、クラスの unittest skip はすべて基準になかったものとして扱います: %s", e)
+            return set()
+        finally:
+            shutil.rmtree(tree, ignore_errors=True)
+            shutil.rmtree(btmp, ignore_errors=True)
+        if data.get("rc") not in (0, 5):
+            log.warning("基準の収集が失敗したため（rc=%s）、クラスの unittest skip はすべて基準になかったものとして扱います", data.get("rc"))
+            return set()
+        got = {it["id"] for it in data["items"] if it.get("skip_cls")}
+        result = got if result is None else result & got
+    return result or set()
 
 
 def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tuple[list[dict[str, str]], str | None]:
@@ -1650,7 +1698,7 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
         got.setdefault(it["id"], []).append(it)
     # クラスの __unittest_skip__ は静的には決まらない（MRO・__init_subclass__・Generic[...]・OS ごとの条件）。候補で付いていたら、
     # 基準のソースを同じ OS で収集して、同じテストがクラスの skip でスキップされるときだけ許す
-    baseline_cls_skipped = (_baseline_class_skips(before, tmp, files)
+    baseline_cls_skipped = (_baseline_skips(before, root, tmp, files)
                             if any(it.get("skip_cls") for nid in expected for it in got.get(nid, ())) else set())
     known = _known_wrappers(root, before)
     known_callables = _known_callable_wrappers(root, before)
