@@ -1472,6 +1472,25 @@ def _is_unittest_skip_decorator(deco: ast.AST, u_names: set[str], case_names: se
     return cond is (kind == "skipIf")
 
 
+_SKIP_ATTR = "__unittest_skip__"
+
+
+def _c3_merge(head: list[Any], seqs: list[list[Any]]) -> list[Any] | None:
+    """C3 線形化（type.mro と同じ規則）。並べられなければ None。"""
+    out, seqs = list(head), [list(x) for x in seqs]
+    while True:
+        seqs = [x for x in seqs if x]
+        if not seqs:
+            return out
+        cand = next((x[0] for x in seqs if not any(x[0] in t[1:] for t in seqs)), None)
+        if cand is None:
+            return None
+        out.append(cand)
+        for t in seqs:
+            if t[0] == cand:
+                del t[0]
+
+
 def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None = None,
                              decorated: set[str] | None = None,
                              skipped: set[str] | None = None) -> dict[str, int]:
@@ -1504,20 +1523,45 @@ def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None 
         if skipped is not None and has_skip:
             skipped.add(key)
 
-    def sets_skip_attr(body: list[ast.stmt]) -> bool:
-        """クラス本体で `__unittest_skip__` を代入している（`= False` で基底の skip を打ち消せる。値は問わず継承を止める: fail-closed）。"""
-        return any(isinstance(t, ast.Name) and t.id == "__unittest_skip__"
-                   for n in body if isinstance(n, (ast.Assign, ast.AnnAssign))
-                   for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))
+    def own_skip(n: ast.ClassDef) -> bool | None:
+        """クラス自身が定める `__unittest_skip__`（None: 定めない、True: スキップ、False: スキップしないか値が静的に決まらない）。
+        クラスのデコレータは本体より後に効く。注釈だけの文は束縛しない。"""
+        if has_unittest_skip(n.decorator_list):
+            return True
+        val: bool | None = None
+        for st in n.body:
+            if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and st.target.id == _SKIP_ATTR:
+                if st.value is not None:
+                    val = isinstance(st.value, ast.Constant) and bool(st.value.value)
+            elif (isinstance(st, ast.Assign) and all(isinstance(t, ast.Name) for t in st.targets)
+                    and any(t.id == _SKIP_ATTR for t in st.targets)):
+                val = isinstance(st.value, ast.Constant) and bool(st.value.value)
+            elif getattr(st, "name", None) == _SKIP_ATTR or any(
+                    (isinstance(x, ast.Name) and x.id == _SKIP_ATTR and not isinstance(x.ctx, ast.Load))
+                    or (isinstance(x, ast.alias) and (x.asname or x.name) == _SKIP_ATTR) for x in ast.walk(st)):
+                val = False  # それ以外の束縛・削除は値が決まらない: fail-closed
+        return val
 
-    # クラスの skip は継承される（同じファイルの基底クラスまでたどる）。クラス自身のデコレータは本体の代入より後に効く
-    skipped_classes: set[str] = set()
-    class_nodes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
-    for _ in class_nodes:
-        for n in class_nodes:
-            if n.name not in skipped_classes and (has_unittest_skip(n.decorator_list) or (not sets_skip_attr(n.body) and any(
-                    isinstance(b, ast.Name) and b.id in skipped_classes for b in n.bases))):
-                skipped_classes.add(n.name)
+    # unittest は getattr(cls, "__unittest_skip__") で判定する（MRO の先頭から最初に定めたクラスの値）。同じファイルのクラスは
+    # C3 で並べ、別ファイル・ライブラリの基底は定めないものとして扱う。MRO を作れない（* 展開・不整合）ならスキップしない扱い
+    mros: dict[str, list[Any] | None] = {}
+    own: dict[int, bool | None] = {}
+    skipped_classes: set[int] = set()
+    for n in tree.body:
+        if not isinstance(n, ast.ClassDef):
+            continue
+        own[id(n)] = own_skip(n)
+        base_mros: list[list[Any]] | None = []
+        for b in n.bases:
+            if isinstance(b, ast.Starred) or (isinstance(b, ast.Name) and b.id in mros and mros[b.id] is None):
+                base_mros = None
+                break
+            base_mros.append(mros[b.id] if isinstance(b, ast.Name) and b.id in mros else [ast.dump(b)])
+        mro = None if base_mros is None else _c3_merge([id(n)], [*base_mros, [m[0] for m in base_mros]])
+        mros[n.name] = mro
+        first_def = next((own[k] for k in (mro or ()) if isinstance(k, int) and own.get(k) is not None), None)
+        if first_def is True:
+            skipped_classes.add(id(n))
 
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
@@ -1530,7 +1574,7 @@ def _baseline_test_positions(path: str, text: str, dumps: dict[str, str] | None 
                 if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name.startswith("test"):
                     put(f"{path}::{node.name}::{m.name}", m,
                         has_wrapping_deco((*node.decorator_list, *m.decorator_list)),
-                        node.name in skipped_classes or has_unittest_skip(m.decorator_list))
+                        id(node) in skipped_classes or has_unittest_skip(m.decorator_list))
     return out
 
 
