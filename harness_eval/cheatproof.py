@@ -1624,7 +1624,8 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
     known_callables = _known_callable_wrappers(root, before)
     known_digests = _known_wrapper_digests(root, before, callables=False)
     known_callable_digests = _known_wrapper_digests(root, before, callables=True)
-    known_fn_digests = _known_wrapper_digests(root, before, all_fns=True)
+    known_fn_quals = _known_wrapper_digests(root, before, all_fns=True, with_qual=True)
+    known_fn_digests = {t[:3] for t in known_fn_quals}
     known_classes = _known_classes(root, before)
     known_cm_classes = _known_cm_classes(root, before)
     lib_roots = _host_lib_roots()
@@ -1651,7 +1652,7 @@ def rebound_report(before: dict[str, str], workdir: Path, tmp_dir: Path) -> tupl
                if _foreign_wrapper(root, x, known, lib_roots, known_callables=known_callables,
                                    known_digests=known_digests, known_callable_digests=known_callable_digests,
                                    known_classes=known_classes, known_fn_digests=known_fn_digests,
-                                   known_cm_classes=known_cm_classes,
+                                   known_fn_quals=known_fn_quals, known_cm_classes=known_cm_classes,
                                    allow_unittest_skip=(node_id in baseline_skipped),
                                    lib_cache=lib_cache, require_lib_digest=True)]
         if bad:
@@ -1767,13 +1768,13 @@ def _has_wraps_decorator(node: ast.AST) -> bool:
 
 
 def _known_wrapper_digests(root: Path, before: dict[str, str], *, callables: bool = False,
-                           all_fns: bool = False) -> set[tuple[str, int, str]]:
+                           all_fns: bool = False, with_qual: bool = False) -> set[tuple[Any, ...]]:
     """基準のファイルにあった入れ子関数・lambda（または __call__ メソッド、または全関数）の、(絶対パス, いまの先頭行, ダイジェスト) の集合。
     原則として基準ソース（before[path]）のダイジェストと照合する。例外は非テストファイルの既存 `@wraps` 付き入れ子デコレータのみ
-    （プロジェクト内デコレータ本体の正当な修正を許す r7 仕様）。"""
+    （プロジェクト内デコレータ本体の正当な修正を許す r7 仕様）。with_qual なら末尾に qualname を足した 4 つ組にする。"""
     defs_fn = _all_fn_defs if all_fns else (_callable_class_defs if callables else _nested_defs)
     first = lambda n: min([n.lineno, *(d.lineno for d in getattr(n, "decorator_list", []))])  # noqa: E731
-    out: set[tuple[str, int, str]] = set()
+    out: set[tuple[Any, ...]] = set()
     for path, text in before.items():
         if not path.endswith(".py"):
             continue
@@ -1806,11 +1807,11 @@ def _known_wrapper_digests(root: Path, before: dict[str, str], *, callables: boo
                 if now_by_line is None:
                     now_by_line = _source_code_digests_by_line(resolved, now, include_pytest_rewrite=True)
                 for dig in now_by_line.get(new_ln, ()):
-                    out.add((resolved, new_ln, dig))
+                    out.add((resolved, new_ln, dig, q) if with_qual else (resolved, new_ln, dig))
             else:
                 for ln in old_lines[q]:
                     for dig in base_by_line.get(ln, ()):
-                        out.add((resolved, new_ln, dig))
+                        out.add((resolved, new_ln, dig, q) if with_qual else (resolved, new_ln, dig))
     return out
 
 
@@ -1844,6 +1845,7 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
                      known_callable_digests: set[tuple[str, int, str]] | None = None,
                      known_classes: set[tuple[str, str]] | None = None,
                      known_fn_digests: set[tuple[str, int, str]] | None = None,
+                     known_fn_quals: set[tuple[Any, ...]] | None = None,
                      known_cm_classes: dict[tuple[str, str], tuple[int | None, list[str] | None]] | None = None,
                      allow_unittest_skip: bool = False,
                      lib_cache: dict[Path, set[tuple[str, int, str]]] | None = None,
@@ -1919,15 +1921,17 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
         return None
 
     def owner_member_allowed(attr: Any, origin: Any, info: Any) -> bool:
-        """CM の必須メソッドを、MRO 上の定義元クラス単位で照合する。基準クラスなら基準のコード、ライブラリのクラスなら
-        そのクラス自身のファイル上の `クラス.メソッド` のコードと一致すること（別クラスのメソッドの付け替えを拒否）。"""
+        """CM の必須メソッドを、MRO 上の定義元クラス単位で照合する。基準クラスなら基準のソースの、ライブラリのクラスなら
+        そのクラス自身のファイル上の `クラス.メソッド` のコードと一致すること（別クラス・別名のメソッドの付け替えを拒否）。"""
         oinfo = cls_origin_info(origin)
         if oinfo is None or not isinstance(attr, str):
             return False
-        if oinfo[0] == "known":
-            return _known_fn_code_allowed(info)
         s = _info_sig(info)
-        return (s is not None and s[0] == oinfo[1] and Path(s[0]).is_file()
+        if s is None or s[0] != oinfo[1]:
+            return False
+        if oinfo[0] == "known":
+            return known_fn_quals is not None and (*s, f"{oinfo[2]}.{attr}") in known_fn_quals
+        return (Path(s[0]).is_file()
                 and (f"{oinfo[2]}.{attr}", s[1], s[2]) in _file_code_digests(Path(s[0]), cache))
 
     def cm_cls_allowed(item: list) -> bool:
@@ -2005,7 +2009,7 @@ def _foreign_wrapper(root: Path, pos: list | None, known: set[tuple[str, int]], 
             if _foreign_wrapper(root, layer, known, lib_roots, known_callables=known_callables,
                                 known_digests=known_digests, known_callable_digests=known_callable_digests,
                                 known_classes=known_classes, known_fn_digests=known_fn_digests,
-                                known_cm_classes=known_cm_classes,
+                                known_fn_quals=known_fn_quals, known_cm_classes=known_cm_classes,
                                 lib_cache=cache, require_lib_digest=require_lib_digest):
                 return True
         if len(pos) < 3 or not isinstance(pos[2], str):
