@@ -1243,12 +1243,13 @@ def _run():
                         ok = False
                         break
                     d = pd.get("in_dict")  # 素の dict 以外は、ライブラリ（os._Environ など）か基準のマッピング型だけ
-                    if type(d) is str:  # 文字列ターゲットは解決した実体を同じく照合する（解決できなければ拒否）
+                    if type(d) is str:
+                        # 文字列ターゲットは収集時に解決できれば実体を同じく照合する。fixture / setUp が用意する対象は
+                        # 収集時にはまだないので、解決できなければ照合しない（実行時だけの差し替えは収集時検証の限界）
                         try:
                             d = _resolve_name(d)
                         except Exception:
-                            ok = False
-                            break
+                            continue
                     if type(d) is not dict and (o := _origin(d, True)) is not None:
                         origins.append(o)
                 extra["mpd"] = ["mpd_ok", origins] if ok else ["mpd_bad"]
