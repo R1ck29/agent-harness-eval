@@ -33,7 +33,7 @@ import tempfile
 import types
 from collections import Counter
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Collection, Iterable
 
 from .isolation import grader_env, grader_isolation, grader_sandbox_cmd
 
@@ -1587,9 +1587,11 @@ def _collect(root: Path, tmp: Path, files: list[str], baseline: dict[str, str]) 
 _BASELINE_TREE_MAX_BYTES = 256 * 1024 * 1024
 
 
-def _copy_unwatched(src: Path, dst: Path) -> None:
-    """作業ツリーの写さないファイル（データ・フィクスチャなど _watched でないもの）を dst に写す。リンクはリンクのまま写し、
-    特殊ファイルと _SKIP_DIRS は写さない。合計が _BASELINE_TREE_MAX_BYTES を超えたら OSError。"""
+def _copy_uncaptured(src: Path, dst: Path, captured: Collection[str]) -> None:
+    """作業ツリーのうち capture_tests の写しに入らないファイル（データ・フィクスチャなど _watched でないもの、
+    監視対象でもバイナリ・UTF-8 でない・上限を超えるもの）を dst に写す。captured（基準の写しで置くパス）と、
+    監視対象で写しに入るテキスト（候補が足したもので、基準にない）は写さない。リンクはリンクのまま写し、特殊ファイルと _SKIP_DIRS は写さない。
+    合計が _BASELINE_TREE_MAX_BYTES を超えたら OSError。"""
     total = 0
     for dirpath, dirs, names in os.walk(src, followlinks=False):
         here = Path(dirpath)
@@ -1606,7 +1608,8 @@ def _copy_unwatched(src: Path, dst: Path) -> None:
         dirs[:] = keep
         for name in names:
             p = here / name
-            if _watched(p.relative_to(src).as_posix()):
+            rel = p.relative_to(src).as_posix()
+            if rel in captured or (_watched(rel) and _read_regular_text(p, root=src) is not None):
                 continue
             st = os.lstat(p)
             if stat.S_ISLNK(st.st_mode):
@@ -1622,7 +1625,7 @@ def _baseline_skips(before: dict[str, str], workdir: Path, tmp: Path, files: lis
     """基準のソースを同じように収集し、この OS で __unittest_skip__ が真になるテストの node id（import したクラス、関数の各層）。
     収集は 2 つのツリーで行い、両方でスキップされるものだけを返す:
     - 基準の写し（before）だけのツリー。候補が変えられない（ただし写さないフィクスチャがないためにスキップすることがある）
-    - 作業ツリーの写さないファイルに基準の写しを重ねたツリー。元の作業ツリーに近い（ただし写さないファイルは候補が置いたり
+    - 作業ツリーの写しに入らないファイルに基準の写しを重ねたツリー。元の作業ツリーに近い（ただし写さないファイルは候補が置いたり
       変えたりできる。.so で基準のモジュールを隠すなど）
     どちらかで収集できないときは空（skip はどれも基準になかったものとして扱う: fail-closed）。
     ツリーは候補の収集のあとに新しく作る（候補のコードが一時フォルダに先回りして置いたものは使わない）。"""
@@ -1633,7 +1636,7 @@ def _baseline_skips(before: dict[str, str], workdir: Path, tmp: Path, files: lis
         btmp = Path(tempfile.mkdtemp(prefix="baseline-tmp-", dir=tmp))
         try:
             if overlay:
-                _copy_unwatched(Path(workdir), tree)
+                _copy_uncaptured(Path(workdir), tree, before)
             for rel, text in before.items():
                 if Path(rel).is_absolute() or ".." in Path(rel).parts:
                     continue

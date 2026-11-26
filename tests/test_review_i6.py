@@ -960,5 +960,78 @@ class ReviewAstraPR11R4(I6Base):
         self.assertDynamicTamper("method skip onto running skipIf")
 
 
+PNG_FIXTURE = (
+    "import pathlib\n"
+    "import unittest\n\n"
+    "PNG = pathlib.Path(__file__).parent / 'fixtures' / 'sample.png'\n\n\n"
+)
+EXEC_HELPER = (
+    "import os\n"
+    "import pathlib\n"
+    "import unittest\n\n"
+    "HELPER = pathlib.Path(__file__).parents[1] / {rel!r}\n\n\n"
+    "@unittest.skipUnless(os.access(HELPER, os.X_OK), 'needs executable helper')\n"
+    "class TestX(unittest.TestCase):\n"
+    "    def test_x(self):\n"
+    "        {body}\n"
+)
+
+
+class ReviewAstraPR11R5(I6Base):
+    """PR #11 の GPT-6.2 Astra 再レビュー（round 5、CHANGES）: 基準を重ねたツリーが元の作業ツリーと違っていた。
+    写し（capture_tests）に入らない監視対象のファイル（バイナリ・UTF-8 でない・大きい）を欠き、写したファイルの実行ビットを落としていた。"""
+
+    def _assert_injections_detected(self, label: str):
+        for inject in (INJECT_CLASS_SKIP, INJECT_METHOD_SKIP):
+            self.write_conftest(inject)
+            self.assertDynamicTamper(f"{label} / {inject.splitlines()[-1].strip()}")
+
+    def _write_png(self) -> None:
+        png = self.wd / "tests" / "fixtures" / "sample.png"
+        png.parent.mkdir(parents=True)
+        png.write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe")
+
+    def test_class_skip_on_missing_binary_watched_fixture_is_detected(self):
+        # MAJOR 1: tests/ の下のバイナリは監視対象だが写しに入らない。重ねたツリーにも置かないと、どちらのツリーでもスキップされる
+        self._write_png()
+        self.start(
+            PNG_FIXTURE
+            + "@unittest.skipUnless(PNG.exists(), 'needs png')\n"
+            "class TestX(unittest.TestCase):\n"
+            "    def test_x(self):\n"
+            "        self.assertEqual(1 + 1, 3)\n"
+        )
+        self.assertNotIn("tests/fixtures/sample.png", self.before)
+        self._assert_injections_detected("binary watched fixture")
+
+    def test_class_skip_on_large_watched_text_fixture_is_detected(self):
+        # MAJOR 1 の同類: 上限を超える監視対象のテキストも写しに入らない
+        self.start(
+            "import pathlib\n"
+            "import unittest\n\n"
+            "BIG = pathlib.Path(__file__).parent / 'big_test_data.txt'\n\n\n"
+            "@unittest.skipUnless(BIG.exists(), 'needs data')\n"
+            "class TestX(unittest.TestCase):\n"
+            "    def test_x(self):\n"
+            "        self.assertEqual(1 + 1, 3)\n",
+            extra_files={"tests/big_test_data.txt": "x" * (600 * 1024)},
+        )
+        self.assertNotIn("tests/big_test_data.txt", self.before)
+        self._assert_injections_detected("large watched text fixture")
+
+    def test_class_skip_with_absent_binary_watched_fixture_is_clean(self):
+        # MAJOR 1 の裏: 元の作業ツリーにもバイナリがなければ、基準でもスキップされる（誤検出しない）
+        base = (
+            PNG_FIXTURE
+            + "@unittest.skipUnless(PNG.exists(), 'needs png')\n"
+            "class TestX(unittest.TestCase):\n"
+            "    def test_x(self):\n"
+            "        self.fail('skipped')\n"
+        )
+        self.start(base)
+        self.assertEqual(self.static_kinds(base), [], "absent binary fixture")
+        self.assertEqual(self.dynamic_report(base), ([], None), "absent binary fixture")
+
+
 if __name__ == "__main__":
     unittest.main()
