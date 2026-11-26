@@ -244,3 +244,11 @@ held-out の P0 スモーク（Claude sonnet 素のベースライン、6 罠 ×
 - [x] #5・新 MAJOR（~1506）: 基準の `__unittest_skip__` を unittest の getattr と同じく MRO で決める。同じファイルのクラスを C3 で並べ、最初に定めたクラスの値を使う（自身の値: skip デコレータ > 本体のリテラル束縛。注釈だけは束縛しない。非リテラル・その他の束縛・`*` 展開・MRO 不整合はスキップしない扱い）。繰り返しの `= True`・注釈だけのサブクラスはスキップのまま、`(Mixin(False), Base(skip))` は実行扱い — 737acef
 
 - 残る穴・限界: ① 別ファイル・ライブラリの基底は `__unittest_skip__` を定めないものとして MRO をたどる（基準の別ファイルの mixin が `= False` を持つ構成では過剰に許可し得る）。② 収集時に解決できない `patch.dict` の文字列ターゲットは、実行時に何に解決されても照合しない（実行時だけの差し替えは収集時検証の既知の限界）。③ 同じ行の lambda 同士（`<lambda>` 名が同じ）は区別しない。④ 別名の元メソッドをクラス本体の後で定義し直すと、別名は許さない（安全側）。
+
+## PR 11 r4: GPT-6.2 Astra 再レビュー round 3（CHANGES、対象 f317e85）
+
+残りはクラスの `__unittest_skip__` の静的な解決だけ（Generic の mixin `RunMixin[int]` の見落とし・`__init_subclass__` で外す skip の見落とし・Windows だけで外す skip の Linux での誤検出）。静的に MRO をまねても unittest と一致しないので、実行時の規則に置き換えた。`ReviewAstraPR11R3` に 3 件（+ fail-closed 1 件）を先に失敗するテストとして足してから直した。全体 571 passed / 1 skipped、ruff 0 件。
+
+- [x] 収集の子プロセスはクラスの skip（import した `cls` の getattr）と関数の skip（各層）を分けて返す。候補でクラスの skip が付いたテストは、基準の写し（`capture_tests` の before）だけで新しく作ったツリーを同じ隔離で収集し、同じテストがこの OS でクラスの skip によりスキップされるときだけ許す。基準を収集できなければ（写さないデータファイル・収集エラー）どれも注入扱い（fail-closed）。`_c3_merge`・`own_skip` などの静的 MRO は削除し、静的な skipped は関数自身の skip デコレータだけにした — e4484cd
+
+- 残る穴・限界: ① 基準の写しは `capture_tests` が読むファイル（.py・テスト・設定、512KB 以下、リンクなし）だけ。import 時にほかのファイルを読む基準ではクラスの skip がすべて誤検出になる（安全側）。② プロジェクトを site-packages に editable で入れている構成では、基準の収集も作業ツリーの（solver が変えた）モジュールを import し得る。③ クラスの skip を持つテストがあるときだけ収集が 2 回になる。④ 基準でクラスの skip があるテストに関数の skip を足すのは、理由の種類が違うので注入扱い（従来は許していた）。
