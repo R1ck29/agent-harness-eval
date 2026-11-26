@@ -1784,10 +1784,12 @@ def _known_wrapper_digests(root: Path, before: dict[str, str], *, callables: boo
         if now is None:
             continue
         try:
-            old_defs = defs_fn(ast.parse(text))
+            old_tree = ast.parse(text)
+            old_defs = defs_fn(old_tree)
             if not old_defs:
                 continue
-            new_defs = defs_fn(ast.parse(now))
+            new_tree = ast.parse(now)
+            new_defs = defs_fn(new_tree)
         except SyntaxError:
             continue
         old_lines: dict[str, set[int]] = {}
@@ -1816,6 +1818,50 @@ def _known_wrapper_digests(root: Path, before: dict[str, str], *, callables: boo
                 for nm, dig in by_line.get(ln, ()):
                     if nm == co_name:
                         out.add((resolved, new_ln, dig, q) if with_qual else (resolved, new_ln, dig))
+        if with_qual:  # クラス本体の `__exit__ = close` は、基準と同じ別名のまま残っていれば元のメソッドと同じコードを許す
+            new_aliases = _class_method_aliases(new_tree)
+            for alias, target in _class_method_aliases(old_tree).items():
+                if new_aliases.get(alias) == target:
+                    out |= {(*e[:3], alias) for e in out if e[0] == resolved and e[3] == target}
+    return out
+
+
+def _class_method_aliases(tree: ast.AST) -> dict[str, str]:
+    """クラス本体の単純な別名 `alias = method`（同じ本体で先に定義したメソッドを指し、以後どちらも束縛し直さない）の
+    qualname -> 元のメソッドの qualname（qualname の形は _all_fn_defs と同じ）。"""
+    out: dict[str, str] = {}
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                cp = prefix + child.name + "."
+                methods: set[str] = set()
+                for st in child.body:
+                    if (isinstance(st, ast.Assign) and isinstance(st.value, ast.Name) and st.value.id in methods
+                            and all(isinstance(t, ast.Name) for t in st.targets)):
+                        target = out.get(cp + st.value.id, cp + st.value.id)
+                        for t in st.targets:
+                            out[cp + t.id] = target
+                            methods.add(t.id)
+                        continue
+                    if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        rebound = {st.name}
+                    else:
+                        rebound = {x.id for x in ast.walk(st) if isinstance(x, ast.Name) and not isinstance(x.ctx, ast.Load)}
+                    for nm in rebound:  # 束縛し直した名前の別名・別名先は外す
+                        out.pop(cp + nm, None)
+                        methods.discard(nm)
+                        for a in [a for a, t in out.items() if t == cp + nm]:
+                            del out[a]
+                    if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        methods.add(st.name)
+                visit(child, cp)
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                visit(child, prefix + (getattr(child, "name", None) or "<lambda>") + ".<locals>.")
+            else:
+                visit(child, prefix)
+
+    visit(tree, "")
     return out
 
 

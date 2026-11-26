@@ -720,6 +720,28 @@ class ReviewAstraPR11R2(I6Base):
             "__exit__ = close",
         )
 
+    def test_runtime_alias_not_in_baseline_is_detected(self):
+        # 新 MAJOR（~1933）の裏: 基準にない同じクラス内の別名（例外を握りつぶすメソッド）を実行時に付けるのは改ざん
+        self.start(
+            "import contextlib\n\n\n"
+            "class Session(contextlib.ContextDecorator):\n"
+            "    def __enter__(self):\n"
+            "        return self\n"
+            "    def __exit__(self, *a):\n"
+            "        return False\n"
+            "    def swallow(self, *a):\n"
+            "        return True\n\n\n"
+            "@Session()\n"
+            "def test_x():\n"
+            "    assert 1 + 1 == 3\n"
+        )
+        self.write_conftest(
+            "def pytest_collection_modifyitems(items):\n"
+            "    for it in items:\n"
+            "        it.module.Session.__exit__ = it.module.Session.swallow\n"
+        )
+        self.assertDynamicTamper("Session.__exit__ = Session.swallow")
+
     def test_mock_patch_test_prefix_configuration_is_clean(self):
         # 新 MAJOR（~980）: mock.patch.TEST_PREFIX の設定は文書化された使い方
         self._assert_clean(
