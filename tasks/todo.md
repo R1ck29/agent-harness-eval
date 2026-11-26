@@ -200,3 +200,81 @@ held-out の P0 スモーク（Claude sonnet 素のベースライン、6 罠 ×
   - `docs/reference.html`: `command` グレーダーの `ro` キー、`--trust-judge-input`、`grader_isolation`、bwrap 可視範囲の現行仕様（`home/` と `workdir/` のみ）反映。
   - `docs/guide.html`・`docs/design.html`: AWS 認証 Bedrock 限定、除外理由（`usage_limit`/`leak`）・失敗分類（`test_tamper`/`log_overflow`）、新規 6 モジュール構成図、`design.html` §6（sandbox 不採用記述）・§11（Windows 未検証記述）の現行実装・CI との整合。
   - `docs/results/2026-11-19-sound-eval-defaults.md`・`tasks/todo.md`: 項目 `b` の `--no-llm` + `csv-summary-insight` 注記、テスト件数更新、過去チェックリストの整理。
+
+## Issue #6: PR #5 で後回しにした cheat-proof #1–#3
+
+| 指摘 | 対応 | テスト |
+|---|---|---|
+| #1 `cm_cls` / `ContextDecorator` 差し替え（`ExitStack.__exit__` の付け替え・`AsyncExitStack`・基準 CD サブクラス） | 収集の子プロセスが、solver のコードを読む前にラッパー実行基盤 5 モジュール（`contextlib`・`unittest.mock`・`unittest.case`・`functools`・`pkgutil`）をスナップショットし、`pytest_collection_modifyitems`（trylast）と `pytest.main` 後に照合（モジュール dict・クラス dict と `__bases__`・関数の `__code__`/`__defaults__`/`__kwdefaults__`/`__closure__`・`sys.modules`）。不一致は `stdlib mutated at collection`。素の `ContextDecorator` / `AsyncContextDecorator` と stdlib の CM クラスは拒否（`@contextmanager` 由来だけ許可）。CD サブクラスは必須メソッドごとに MRO 上の定義元クラスで照合（基準クラスは基準のコード、ライブラリのクラスはそのクラス自身のファイル上の `クラス.メソッド`）。基準クラスの `__bases__` は import の別名を解決した名前の並びで照合 | `tests/test_review_i6.py` Exploit1〜3 |
+| #2a `mock.patch` / `patch.dict` の基盤改変（`app.py` での `ExitStack.__exit__`・`_GeneratorContextManager.__exit__`・`unittest.mock.contextlib`・`__code__` のインプレース差し替え） | 上のスナップショットで一括検出。安全な stdlib ラッパー（`ContextDecorator`・`mock.patch`・`patch.dict`・`unittest.skip`）は収集前に採取したコードオブジェクトの同一性で判定し、同じ中身の複製は拒否 | Exploit4・5 |
+| #2b `_patch` / `_patch_dict` の引数（`getter`・`new_callable` のコールバック、`patch.object(f, "__code__")`、悪性 `in_dict`） | インスタンス属性は収集前に採取した許可キー集合に限る。`getter` は採取した形（3.11+ の `partial(pkgutil.resolve_name, str)`・3.10 の lambda・`patch.object` / `patch.multiple` の lambda）だけ。`patch.object` の対象・`new_callable`・`spec`/`spec_set`/`autospec`・`in_dict` はライブラリ・基準のクラス／関数・C 組み込みモジュールのものだけ（ホストで照合）。危険なダンダー属性（`__code__` など 8 個）へのパッチは拒否 | Exploit6・7 |
+| #3 非リテラル `skipIf` / `skipUnless` 付きテストへの動的 `unittest.skip`、`__unittest_skip__` の直接付与 | 基準の `baseline_skipped` を、無条件 `@unittest.skip` とリテラルで確定する `skipIf(True)` / `skipUnless(False)` だけに絞った（fail-closed。クラスのデコレータと同じファイルの基底クラスの skip も含む）。収集時にクラス・各層の `__unittest_skip__` を記録し、基準で必ずスキップするテスト以外に付いていれば `unittest skip injected at collection` | Exploit8・9 |
+
+- 削ったもの: `_stdlib_wrapper_sigs`（`suppress.__exit__` 拒否・`gcm_sigs`・`patch_meth_sigs`・`pdict_meth_sigs`・`recreate_sigs`・ホスト側のラッパー署名再計算）、`_PATCH_BAD_INST_ATTRS` / `_PATCH_DICT_BAD_INST_ATTRS`、`cm_cls` の lib 無条件許可。
+- `CACHE_SCHEMA` を 11 に上げた（動的チェックの検出範囲が広がったため）。既存テストの変更は `tests/test_review_fb2.py` の CACHE_SCHEMA の値の確認だけ。
+- 設計書からの上乗せ・変更: `TestCase` は丸ごと除外せず、関数の属性の差し替え・中身の書き換えだけ見る（`maxDiff` などの設定は許す）。初期値 None の遅延キャッシュは、無害な型（`str`・`re.Pattern`・文字列のコンテナ）になるのだけ許す。モジュールに足されるキーは `__warningregistry__` だけ許す。`spec` 類はクラスに加えてライブラリ・基準の関数も許す。C 組み込みモジュールのクラス（`io.StringIO` など）は収集前に実体を同一性で覚えたものだけ許す（組み込みモジュールへの偽物の差し込みは通さない）。子の結果に照合結果がなければ「確認できなかった」扱い。
+- 残る穴・限界（今回スコープ外）:
+  - 採点環境で実際にスキップされる非リテラル `@unittest.skipIf` / `skipUnless`（例: Windows で `skipIf(os.name == "nt", ...)`）は改ざん扱いになる。評価用テストの環境依存スキップは `@pytest.mark.skipif(...)` を使うか、`allow_test_changes: true` で外す。実運用で誤検出が出たら基準ソース単体評価などの自動救済を検討する。
+  - 5 モジュール以外の stdlib（`os`・`sys`・`logging` など）の import 時改変、5 モジュール内の可変コンテナ（`unittest.mock` の内部 dict など）の中身の書き換えは見ない。
+  - `mock.patch` の `new` 値・`kwargs`、`patch.dict` に渡す素の `dict` の中身、文字列ターゲット（`patch("pkg.mod.attr")`）の文字列そのものの差し替えやモジュールの `__getattr__` は深追いしない。
+  - `new_callable` はライブラリの関数・クラスなら許すので、`kwargs` や `functools.partial` の引数を書き換えてライブラリ関数（`runpy.run_path` など）を実行時に呼ばせる経路は残る（`pytest_runtest_call` などの実行時フックと同じく収集時検証の限界）。
+  - 基準クラスの基底の照合は `__name__` の一致で、同名の別クラスへの差し替えは MRO 上の定義元の照合に任せる。別ファイルの基底クラスの skip の継承は baseline に含めない（実行時に付くと改ざん扱い）。
+  - 既記の構造的限界（収集後に動く `test_0`、`pytest_pyfunc_call` フック、同一プロセス内の `gc.get_objects()`、非テスト `.py` の基準 `@wraps` デコレータ本体の編集、実行時だけの改ざん）と、r9 の未対応（`leak_check` N1・N3・ドキュメント更新）はそのまま。
+
+## PR 11 r2: GPT-6.2 Astra クロスレビュー（CHANGES、対象 bfc2792）
+
+指摘ごとに `tests/test_review_i6.py` の `ReviewAstraPR11` に先に失敗するテストを足してから直した。設計（スナップショット＋同一性、skip の fail-closed 許可リスト）は変えていない。`CACHE_SCHEMA` は 11 のまま（キャッシュする記録の形は同じ）。
+
+- [x] MAJOR 1: 基準クラスが定義元の CM メソッドは、ファイル・行・ダイジェストに加えて qualname（`クラス.メソッド`）でも照合する（別の基準クラスのメソッドの付け替えを拒否）。`_known_wrapper_digests(with_qual=True)`
+- [x] MAJOR 2: `mock.patch` の公開束縛（`object`・`dict`・`multiple` など、関数の属性）を収集前にスナップショットし、同一性で照合
+- [x] MAJOR 3: 文字列ターゲットの `patch.dict` は収集前に取った `pkgutil.resolve_name` で解決し、実体の出自を同じく照合（解決できなければ拒否）
+- [x] MAJOR 4: `spec` / `spec_set` のインスタンスは、そのクラスの出自（ライブラリ・基準のクラス）で照合（`autospec` は属性をたどるので従来どおり型・関数だけ）
+- [x] MAJOR 5: クラス本体で `__unittest_skip__` を代入しているサブクラスには、基底クラスの skip を継承させない（クラス自身のデコレータは従来どおり）
+- [x] MAJOR 6: 同じ node id になる parametrize のケースを全部照合する（テストごとに最初の検出だけ出す）
+- [x] MINOR: 正当パターンの `patch.multiple` の例を、実行しても通る形（引数なしで `os` の差し替えを確認）に直した
+
+## PR 11 r3: GPT-6.2 Astra 再レビュー round 2（CHANGES、対象 5c1a12d）
+
+指摘ごとに `tests/test_review_i6.py` の `ReviewAstraPR11R2` に先に失敗するテストを足してから直した（素の pytest で、悪用例が失敗テストを通すこと・正当例が通る／スキップされることも確認）。全体 567 passed / 1 skipped、ruff 0 件。
+
+- [x] #1 qualname の索引: 定義行のダイジェストを `co_name` で絞り、その名前に束縛される関数のコードだけを対応させる（既定引数の lambda などは含めない）。全モードに適用 — 78a5b23
+- [x] 新 MAJOR（~1933）: クラス本体の単純な別名 `__exit__ = close` は、基準といまのファイルで同じ別名が残り、以後どちらも束縛し直さないときだけ、元のメソッドの基準コードを別名の qualname でも許す（`_class_method_aliases`）。基準にない実行時の別名付けは従来どおり検出 — afd1f25
+- [x] 新 MAJOR（~980）: `mock.patch.TEST_PREFIX` は同一性で比べず、値が `str` であることだけ確認 — 5e62b7f
+- [x] 新 MAJOR（~1246）: 文字列ターゲットの `patch.dict` は、収集時に解決できれば従来どおり実体の出自を照合し、解決できなければ照合しない（fixture / setUp が用意する対象） — de32913
+- [x] #5・新 MAJOR（~1506）: 基準の `__unittest_skip__` を unittest の getattr と同じく MRO で決める。同じファイルのクラスを C3 で並べ、最初に定めたクラスの値を使う（自身の値: skip デコレータ > 本体のリテラル束縛。注釈だけは束縛しない。非リテラル・その他の束縛・`*` 展開・MRO 不整合はスキップしない扱い）。繰り返しの `= True`・注釈だけのサブクラスはスキップのまま、`(Mixin(False), Base(skip))` は実行扱い — 737acef
+
+- 残る穴・限界: ① 別ファイル・ライブラリの基底は `__unittest_skip__` を定めないものとして MRO をたどる（基準の別ファイルの mixin が `= False` を持つ構成では過剰に許可し得る）。② 収集時に解決できない `patch.dict` の文字列ターゲットは、実行時に何に解決されても照合しない（実行時だけの差し替えは収集時検証の既知の限界）。③ 同じ行の lambda 同士（`<lambda>` 名が同じ）は区別しない。④ 別名の元メソッドをクラス本体の後で定義し直すと、別名は許さない（安全側）。
+
+## PR 11 r4: GPT-6.2 Astra 再レビュー round 3（CHANGES、対象 f317e85）
+
+残りはクラスの `__unittest_skip__` の静的な解決だけ（Generic の mixin `RunMixin[int]` の見落とし・`__init_subclass__` で外す skip の見落とし・Windows だけで外す skip の Linux での誤検出）。静的に MRO をまねても unittest と一致しないので、実行時の規則に置き換えた。`ReviewAstraPR11R3` に 3 件（+ fail-closed 1 件）を先に失敗するテストとして足してから直した。全体 571 passed / 1 skipped、ruff 0 件。
+
+- [x] 収集の子プロセスはクラスの skip（import した `cls` の getattr）と関数の skip（各層）を分けて返す。候補でクラスの skip が付いたテストは、基準の写し（`capture_tests` の before）だけで新しく作ったツリーを同じ隔離で収集し、同じテストがこの OS でクラスの skip によりスキップされるときだけ許す。基準を収集できなければ（写さないデータファイル・収集エラー）どれも注入扱い（fail-closed）。`_c3_merge`・`own_skip` などの静的 MRO は削除し、静的な skipped は関数自身の skip デコレータだけにした — e4484cd
+
+- 残る穴・限界: ① 基準の写しは `capture_tests` が読むファイル（.py・テスト・設定、512KB 以下、リンクなし）だけ。import 時にほかのファイルを読む基準ではクラスの skip がすべて誤検出になる（安全側）。② プロジェクトを site-packages に editable で入れている構成では、基準の収集も作業ツリーの（solver が変えた）モジュールを import し得る。③ クラスの skip を持つテストがあるときだけ収集が 2 回になる。④ 基準でクラスの skip があるテストに関数の skip を足すのは、理由の種類が違うので注入扱い（従来は許していた）。
+
+## PR 11 r5: GPT-6.2 Astra 再レビュー round 4（CHANGES、対象 e4484cd）
+
+round 3 の 3 件（Generic mixin・`__init_subclass__`・Windows だけで外す skip）は解消済みと確認された。新しい MAJOR 2 件を、`ReviewAstraPR11R4` に先に失敗するテストとして足してから直した（R3 までのテストはそのまま）。全体 578 passed / 1 skipped（`.venv`・`uv run --frozen` とも）、ruff 0 件。
+
+- [x] MAJOR 1（~1610）: 写しだけのツリーは写さないファイル（任意のフィクスチャ）を欠くため、フィクスチャがないときだけスキップするクラスが基準でスキップ扱いになり、クラスの skip の注入を許していた。基準の収集を 2 つのツリーで行い、両方でスキップされるときだけ基準の skip とする: ① 写しだけ（候補が変えられない）、② 作業ツリーの写さないファイル（`_SKIP_DIRS`・特殊ファイルを除く、リンクはリンクのまま、合計 256 MiB まで）に写しを重ねたもの（元の作業ツリーに近い）。どちらかで収集できなければ fail-closed。写したリンクを通して写しをツリーの外に書かない — 52ce6a6
+- [x] MAJOR 2（~1677）: e4484cd で静的な skipped からクラスの skip を外したため、変更のない `@unittest.skip` クラスの、この OS で効く関数の `@skipIf` が注入扱いになっていた（f317e85 では許していた）。同じ原因で、ほかの OS 専用のテスト（この OS で効く条件付きの関数の skip）も誤検出していた。関数の層の skip も同じ 2 つのツリーの基準の収集で決める（静的なリテラルの skip はそのまま許す）。本当に注入した関数の skip・フィクスチャの有無で変わる条件の skip は従来どおり検出 — a9baaa5
+
+- 残る穴・限界: ① 写さないファイルは候補が消したり変えたりできる（任意のフィクスチャを消すと、両方のツリーでスキップされ許す。採点の実行でもスキップされるので、これはフィクスチャ削除という別の手口で、写しの範囲外）。② 写さないファイルが 256 MiB を超える・基準のファイルの位置がリンクを通る・写しだけで収集できないときは、静的なリテラル以外の skip はすべて注入扱い（安全側）。③ 候補にクラスの skip かリテラルでない関数の skip があるときだけ、収集が最大 2 回増える。④ node id 単位で比べる（同じ id の parametrize のケースは区別しない）。⑤ r4 の ②（editable install）・④（基準でクラスが skip のテストに、基準にない関数の skip を足すのは注入扱い）はそのまま。
+
+## PR 11 r6: GPT-6.2 Astra 再レビュー round 5（CHANGES、対象 4b2398d）
+
+round 4 の 2 件（任意のフィクスチャ `fixture.dat`・Linux で効く関数の skip）は解消済みと確認された。新しい MAJOR 2 件は、どちらも重ねたツリーが元の作業ツリーと違っていたもの。`ReviewAstraPR11R5` に先に失敗するテストとして足してから直した（R4 までのテストはそのまま）。全体 585 passed / 1 skipped（`uv run --frozen`）、ruff 0 件。
+
+- [x] MAJOR 1（~1609）: 監視対象のパス（`tests/` の下など）にあって `capture_tests` の写しに入らないファイル（バイナリ・UTF-8 でない・512KB 超・リンク）は、写しにも重ねる側にもなく、どちらのツリーでも欠けていた（`tests/fixtures/sample.png` がないときだけスキップするクラスへの skip の注入を許す）。重ねる側は「写しが置くパス以外で、写しに入らないファイル全部」を作業ツリーから写す（`_copy_uncaptured`）。候補が足した監視対象のテキスト（新しい conftest など）は従来どおり写さない — 1009c55
+- [x] MAJOR 2（~1618）: `shutil.copyfile` は実行ビットを落としていた。写すファイルは `copy2`（権限・時刻ごと）で写し、重ねたツリーに置く写しのファイルにも作業ツリーの権限（0o777 の部分）を付ける（`tests/helper.sh` のように写しにあるヘルパー）。写しだけのツリーは従来どおり候補に依存しない（既定の権限） — 33bfcfc
+
+- 残る穴・限界: ① 写しだけのツリーは写さないファイル・実行ビットを欠くので、ファイルが「ある」ときだけ効く基準の skip（`skipIf(FIXTURE.exists())` など）は注入扱い（安全側の誤検出）。② 写さないファイル・権限は候補が変えられる（消す・chmod -x すると両方のツリーでスキップされ許すが、採点の実行でもスキップされる。r5 の ① と同じ）。③ ディレクトリの権限は写さない（既定の権限で作る）。④ r5 の ②〜⑤ はそのまま。
+
+## PR 11 r7: GPT-6.2 Astra 再レビュー round 6（CHANGES、対象 e193180）
+
+round 5 の 2 件（監視対象のバイナリのフィクスチャ・実行可能なヘルパー）は解消済みと確認された。新しい MAJOR 1 件を、`ReviewAstraPR11R6` に先に失敗するテストとして足してから直した（R5 までのテストはそのまま）。全体 588 passed / 1 skipped（`uv run --frozen`）、ruff 0 件。
+
+- [x] MAJOR（~1612）: 512 KiB を超える監視対象の JSON は写しに入らない。候補が上限以下に縮める（または UTF-8 でないファイルをテキストに書き換える）と、重ねる側は「候補が足したテキスト」として写さず、どちらのツリーにもなかった（作業ツリーにはあるので元のテストは実行されるのに、クラスの skip の注入を許す）。`capture_tests` は `TextSnapshot`（dict のサブクラス）を返し、取得時にあったが写しに入らなかった監視対象のパスを `uncaptured` に持つ。重ねる側はこれらをいまの形によらず作業ツリーから写す。取得時になかった監視対象のテキスト（新しい conftest・フィクスチャ）は従来どおり写さない（誤検出しないことをテストで固定） — 7059b38
+
+- 残る穴・限界: ① `uncaptured` は `capture_tests` の戻り値にだけある。手で作った dict を `rebound_report` に渡すと、従来の判定（いまテキストで読める監視対象は写さない）になる。② 取得時に写しに入らなかったファイルは、候補が中身を変えても作業ツリーのまま写す（写さないフィクスチャと同じく候補が変えられる。r6 の ② と同じ）。③ r6 の ①・③・④ はそのまま。

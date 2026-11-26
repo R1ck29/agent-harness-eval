@@ -55,7 +55,7 @@ def _solver_accounting_lines(path: Path) -> Iterator[str]:
                     while line and not line.endswith(b"\n"):
                         line = fh.readline(64 * 1024)
 
-CACHE_SCHEMA = "10"  # 10: tool_used の input_match（Bash はコマンド文字列・MULTILINE）・weight 0 / report_only・PATH バイナリは警告。9: ログ上限超過は不合格・再束縛検出
+CACHE_SCHEMA = "11"  # 11: 収集時の stdlib 改変検出・安全ラッパーの同一性照合・mock.patch 引数検証・unittest.skip の厳格化（Issue #6）。10: tool_used の input_match（Bash はコマンド文字列・MULTILINE）・weight 0 / report_only・PATH バイナリは警告。9: ログ上限超過は不合格・再束縛検出
 
 
 @dataclass
