@@ -1068,5 +1068,58 @@ class ReviewAstraPR11R5(I6Base):
                 self.assertEqual(self.dynamic_report(), ([], None), rel)
 
 
+
+BIG_FIXTURE = (
+    "import pathlib\n"
+    "import unittest\n\n"
+    "DATA = pathlib.Path(__file__).parent / 'fixtures' / 'data.json'\n\n\n"
+    "@unittest.skipUnless(DATA.exists(), 'needs data')\n"
+    "class TestX(unittest.TestCase):\n"
+    "    def test_x(self):\n"
+    "        {body}\n"
+)
+
+
+class ReviewAstraPR11R6(I6Base):
+    """PR #11 の GPT-6.2 Astra 再レビュー（round 6、CHANGES）: 取得時に写しから外れた監視対象のファイルが、あとで写しに入る形
+    （上限以下のテキスト）に変わると、重ねたツリーが「候補が足したテキスト」として写さず、どちらのツリーにもなかった。"""
+
+    DATA = "tests/fixtures/data.json"
+
+    def _assert_injections_detected(self, label: str):
+        for inject in (INJECT_CLASS_SKIP, INJECT_METHOD_SKIP):
+            self.write_conftest(inject)
+            self.assertDynamicTamper(f"{label} / {inject.splitlines()[-1].strip()}")
+
+    def test_class_skip_on_shrunk_large_watched_fixture_is_detected(self):
+        # MAJOR: 512 KiB を超える JSON は写しに入らない。候補が上限以下に縮めても、取得時にあったファイルなので作業ツリーから重ねる
+        self.start(BIG_FIXTURE.format(body="self.assertEqual(1 + 1, 3)"),
+                   extra_files={self.DATA: "[" + "0," * (300 * 1024) + "0]"})
+        self.assertNotIn(self.DATA, self.before)
+        (self.wd / self.DATA).write_text("[0]", encoding="utf-8")
+        self._assert_injections_detected("shrunk large watched fixture")
+
+    def test_class_skip_on_non_utf8_watched_fixture_made_text_is_detected(self):
+        # MAJOR の同類: 取得時に UTF-8 でなかった監視対象のファイルを、候補がテキストに書き換えた
+        p = self.wd / self.DATA
+        p.parent.mkdir(parents=True)
+        p.write_bytes(b"\xff\xfe[0]")
+        self.start(BIG_FIXTURE.format(body="self.assertEqual(1 + 1, 3)"))
+        self.assertNotIn(self.DATA, self.before)
+        p.write_text("[0]", encoding="utf-8")
+        self._assert_injections_detected("non-UTF-8 watched fixture made text")
+
+    def test_fresh_watched_text_fixture_is_not_overlaid(self):
+        # MAJOR の裏: 取得時になかった監視対象のテキスト（候補が足したもの）は重ねない。元の作業ツリーでもスキップされるテストへの
+        # skip は基準どおり（誤検出しない）
+        self.start(BIG_FIXTURE.format(body="self.fail('skipped')"))
+        self.assertNotIn(self.DATA, self.before)
+        p = self.wd / self.DATA
+        p.parent.mkdir(parents=True)
+        p.write_text("[0]", encoding="utf-8")
+        self.write_conftest(INJECT_CLASS_SKIP)  # 基準はクラスの層でスキップする（メソッドの層の skip は層が違うので検出する）
+        self.assertDynamicClean("fresh watched fixture / class skip")
+
+
 if __name__ == "__main__":
     unittest.main()

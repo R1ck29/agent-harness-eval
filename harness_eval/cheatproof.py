@@ -331,10 +331,18 @@ def _read_regular_text(path: Path, max_bytes: int = _MAX_BYTES, root: Path | Non
         return None
 
 
-def capture_tests(workdir: Path) -> dict[str, str]:
+class TextSnapshot(dict[str, str]):
+    """capture_tests の写し（相対パス → 本文）。uncaptured は、取得時にあったが写しに入らなかった監視対象のパス
+    （リンク・特殊ファイル・上限を超える・UTF-8 でない）。基準を重ねたツリーは、これらをあとの形によらず作業ツリーから写す。"""
+
+    uncaptured: frozenset[str] = frozenset()
+
+
+def capture_tests(workdir: Path) -> TextSnapshot:
     """テスト・テストの設定・Python のファイルの写し（相対パス → 本文）。エージェントを起動する直前に取る。
     リンクはたどらず、FIFO などの特殊ファイルは読まない（ホスト上の秘密ファイル漏洩・ブロックを防ぐ）。"""
-    out: dict[str, str] = {}
+    out = TextSnapshot()
+    uncaptured: set[str] = set()
     root = Path(workdir)
     for dirpath, dirs, files in os.walk(root, followlinks=False):
         dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not os.path.islink(os.path.join(dirpath, d))]
@@ -346,6 +354,9 @@ def capture_tests(workdir: Path) -> dict[str, str]:
             text = _read_regular_text(f, root=root)
             if text is not None:
                 out[rel] = text
+            else:
+                uncaptured.add(rel)
+    out.uncaptured = frozenset(uncaptured)
     return out
 
 
@@ -1587,10 +1598,11 @@ def _collect(root: Path, tmp: Path, files: list[str], baseline: dict[str, str]) 
 _BASELINE_TREE_MAX_BYTES = 256 * 1024 * 1024
 
 
-def _copy_uncaptured(src: Path, dst: Path, captured: Collection[str]) -> None:
+def _copy_uncaptured(src: Path, dst: Path, captured: Collection[str], uncaptured: Collection[str] = ()) -> None:
     """作業ツリーのうち capture_tests の写しに入らないファイル（データ・フィクスチャなど _watched でないもの、
-    監視対象でもバイナリ・UTF-8 でない・上限を超えるもの）を dst に写す。captured（基準の写しで置くパス）と、
-    監視対象で写しに入るテキスト（候補が足したもので、基準にない）は写さない。リンクはリンクのまま、ファイルは権限と時刻ごと写し、
+    監視対象でもバイナリ・UTF-8 でない・上限を超えるもの）を dst に写す。uncaptured（取得時にあったが写しに入らなかった監視対象）は
+    いまの形によらず写す（上限を超えていたフィクスチャを候補が縮めても、元の作業ツリーにあったものとして置く）。captured（基準の写しで
+    置くパス）と、それ以外の監視対象で写しに入るテキスト（候補が足したもので、基準にない）は写さない。リンクはリンクのまま、ファイルは権限と時刻ごと写し、
     特殊ファイルと _SKIP_DIRS は写さない。合計が _BASELINE_TREE_MAX_BYTES を超えたら OSError。"""
     total = 0
     for dirpath, dirs, names in os.walk(src, followlinks=False):
@@ -1609,7 +1621,7 @@ def _copy_uncaptured(src: Path, dst: Path, captured: Collection[str]) -> None:
         for name in names:
             p = here / name
             rel = p.relative_to(src).as_posix()
-            if rel in captured or (_watched(rel) and _read_regular_text(p, root=src) is not None):
+            if rel in captured or (_watched(rel) and rel not in uncaptured and _read_regular_text(p, root=src) is not None):
                 continue
             st = os.lstat(p)
             if stat.S_ISLNK(st.st_mode):
@@ -1646,7 +1658,7 @@ def _baseline_skips(before: dict[str, str], workdir: Path, tmp: Path, files: lis
         btmp = Path(tempfile.mkdtemp(prefix="baseline-tmp-", dir=tmp))
         try:
             if overlay:
-                _copy_uncaptured(Path(workdir), tree, before)
+                _copy_uncaptured(Path(workdir), tree, before, getattr(before, "uncaptured", ()))
             for rel, text in before.items():
                 if Path(rel).is_absolute() or ".." in Path(rel).parts:
                     continue
