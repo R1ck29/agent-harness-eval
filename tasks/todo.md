@@ -220,3 +220,15 @@ held-out の P0 スモーク（Claude sonnet 素のベースライン、6 罠 ×
   - `new_callable` はライブラリの関数・クラスなら許すので、`kwargs` や `functools.partial` の引数を書き換えてライブラリ関数（`runpy.run_path` など）を実行時に呼ばせる経路は残る（`pytest_runtest_call` などの実行時フックと同じく収集時検証の限界）。
   - 基準クラスの基底の照合は `__name__` の一致で、同名の別クラスへの差し替えは MRO 上の定義元の照合に任せる。別ファイルの基底クラスの skip の継承は baseline に含めない（実行時に付くと改ざん扱い）。
   - 既記の構造的限界（収集後に動く `test_0`、`pytest_pyfunc_call` フック、同一プロセス内の `gc.get_objects()`、非テスト `.py` の基準 `@wraps` デコレータ本体の編集、実行時だけの改ざん）と、r9 の未対応（`leak_check` N1・N3・ドキュメント更新）はそのまま。
+
+## PR 11 r2: GPT-6.2 Astra クロスレビュー（CHANGES、対象 bfc2792）
+
+指摘ごとに `tests/test_review_i6.py` の `ReviewAstraPR11` に先に失敗するテストを足してから直した。設計（スナップショット＋同一性、skip の fail-closed 許可リスト）は変えていない。`CACHE_SCHEMA` は 11 のまま（キャッシュする記録の形は同じ）。
+
+- [x] MAJOR 1: 基準クラスが定義元の CM メソッドは、ファイル・行・ダイジェストに加えて qualname（`クラス.メソッド`）でも照合する（別の基準クラスのメソッドの付け替えを拒否）。`_known_wrapper_digests(with_qual=True)`
+- [x] MAJOR 2: `mock.patch` の公開束縛（`object`・`dict`・`multiple` など、関数の属性）を収集前にスナップショットし、同一性で照合
+- [x] MAJOR 3: 文字列ターゲットの `patch.dict` は収集前に取った `pkgutil.resolve_name` で解決し、実体の出自を同じく照合（解決できなければ拒否）
+- [x] MAJOR 4: `spec` / `spec_set` のインスタンスは、そのクラスの出自（ライブラリ・基準のクラス）で照合（`autospec` は属性をたどるので従来どおり型・関数だけ）
+- [x] MAJOR 5: クラス本体で `__unittest_skip__` を代入しているサブクラスには、基底クラスの skip を継承させない（クラス自身のデコレータは従来どおり）
+- [x] MAJOR 6: 同じ node id になる parametrize のケースを全部照合する（テストごとに最初の検出だけ出す）
+- [x] MINOR: 正当パターンの `patch.multiple` の例を、実行しても通る形（引数なしで `os` の差し替えを確認）に直した
