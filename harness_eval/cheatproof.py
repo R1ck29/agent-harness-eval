@@ -943,6 +943,8 @@ def _run():
                     if _strict or type(_vv) is _FunctionType:
                         _ents[_kk] = _vv
                 _snap_cls.append((_v, _name + "." + _k, type(_v), _v.__bases__, _v.__name__, _v.__qualname__, _ents, _strict))
+    # mock.patch の公開束縛（patch.object / .dict / .multiple など）は関数の属性なので、同一性で別に照合する
+    _snap_ns = [("unittest.mock.patch", _umock.patch, dict(vars(_umock.patch)))]
     def _lazy_ok(v):
         # 初期値 None の遅延キャッシュ（pkgutil._NAME_PATTERN・mock.file_spec / open_spec）は、無害な型の値になるのだけ許す
         if v is None or type(v) in (str, _Pattern):
@@ -971,6 +973,10 @@ def _run():
             bad += [label + "." + k for k, v in ents.items() if cur.get(k, _EMPTY) is not v]
             if strict:
                 bad += [label + "." + k + " (added)" for k in cur if k not in ents and not k.startswith("_abc_")]
+        for label, obj, vals in _snap_ns:
+            cur = vars(obj)
+            bad += [label + "." + k + " (added)" for k in cur if k not in vals]
+            bad += [label + "." + k for k, v in vals.items() if cur.get(k, _EMPTY) is not v]
         for fn, label, st in _snap_fns.values():
             if not _same(_fn_state(fn), st):
                 bad.append(label + " (code/defaults/closure)")
