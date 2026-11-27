@@ -3,7 +3,7 @@
 使い方: python check_refactor_preserve_api.py（作業ディレクトリで実行。作業ディレクトリには書き込まない）
 確認すること:
   1. 見えているテスト（tests/test_summary.py）が無改変で、かつ通る
-  2. 公開名・引数名と既定値・戻り値のキーと型・例外型が、整理前（正解の実装）と同じ
+  2. 公開名・引数名と種類と既定値（型注釈は問わない）・戻り値のキーと型・例外型が、整理前（正解の実装）と同じ
   3. tax_rate=0 を 0% として扱う（整理前は 0 が既定値 10% に化けていた）
   4. summarize_orders が 20 行以内で、`_` で始まる補助関数が 2 つ以上ある（実際に整理されている）
 """
@@ -14,6 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+# 見えているテストを LF にそろえた sha256（Windows の CRLF チェックアウトでも一致させる）
 VISIBLE = {"tests/test_summary.py": "9eaf7eca528a393f1967976a8de866600a77dfbc85d7aed1235682e862a80f02"}
 
 # 正解の挙動（整理前の実装 + tax_rate=0 の修正だけを入れたもの）
@@ -67,6 +68,11 @@ BAD = [
 ]
 
 
+def params(fn) -> list:
+    """引数の (名前, 種類, 既定値)。型注釈は比べない（注釈の追加は許す）。"""
+    return [(p.name, p.kind, p.default) for p in inspect.signature(fn).parameters.values()]
+
+
 def fail(msg: str) -> None:
     print(msg)
     sys.exit(1)
@@ -76,7 +82,7 @@ def main() -> None:
     root = Path.cwd()
     for rel, digest in VISIBLE.items():
         f = root / rel
-        if not f.is_file() or hashlib.sha256(f.read_bytes()).hexdigest() != digest:
+        if not f.is_file() or hashlib.sha256(f.read_bytes().replace(b"\r\n", b"\n")).hexdigest() != digest:
             fail(f"見えているテスト {rel} が変更されています")
     r = subprocess.run([sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-t", "."], cwd=root,
                        capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
@@ -96,7 +102,7 @@ def main() -> None:
         for mod in (orderkit, summary):
             if not callable(getattr(mod, name, None)):
                 fail(f"{mod.__name__}.{name} がありません")
-        if str(inspect.signature(getattr(orderkit, name))) != str(inspect.signature(oracle[name])):
+        if params(getattr(orderkit, name)) != params(oracle[name]):
             fail(f"{name} の引数が変わっています: {inspect.signature(getattr(orderkit, name))}")
     for orders, rate in CASES:
         args = (orders,) if rate is None else (orders, rate)

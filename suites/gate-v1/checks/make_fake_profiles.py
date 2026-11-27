@@ -19,7 +19,7 @@ def write_profile(out_dir: Path, pid: str, description: str) -> Path:
         f"id: {pid}",
         f"description: {description}",
         "agent: codex",
-        "billing: subscription  # 呼び出しごとの請求がない（偽 CLI）。費用の上限の見積もりに入れない",
+        "billing: subscription  # 呼び出しごとの請求がない（偽 CLI）。--monthly-budget-usd の集計からだけ除かれる（--max-cost-usd の事前見積もりには入る）",
         f"executable: [{json.dumps(sys.executable)}, {json.dumps(str(HERE / 'fake_gate_agent.py'))}]",
         "env:",
         f"  GATE_FAKE_REFERENCES: {json.dumps(refs)}",

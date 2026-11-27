@@ -71,12 +71,14 @@ uv run --frozen python -m harness_eval run \
   --tasks suites/gate-v1/tasks --profiles "$OUT/fake-profiles" \
   --baseline fake-baseline --candidate fake-candidate \
   --rules suites/gate-v1/rules.yaml --control-tag control \
-  --trials 2 --no-llm --seed 0 --max-cost-usd 5 \
+  --trials 2 --no-llm --seed 0 --max-cost-usd 35 \
   --out "$OUT/synthetic" --cache-dir "$OUT/cache"
 
 # 4. verdict の独立再判定（IMPROVED・adoptable=true・終了コード 0 を期待）
 uv run --frozen python -m harness_eval verdict "$OUT/synthetic/<RUN_ID>" --json
 ```
+
+`--max-cost-usd 35` は、実行前の見積もり $30.80（48 回の呼び出しを各課題の `max_budget_usd` で計上）を上回る必要があるための値です。`5` のままだと見積もりの段階で終了コード 2 になり、何も実行されません。フェイクエージェントの実費は $0 で、課題ごとの予算は変えていません。
 
 結果の記録は `docs/results/2026-11-27-gate-v1-baseline.md` を参照してください。
 
@@ -100,7 +102,7 @@ uv run --frozen python -m harness_eval verdict "$OUT/synthetic/<RUN_ID>" --json
 | PR #7 の Codex 正式レビュー未記録 / `install-executor.js` の指摘 | 後回し / 対象外（外部リポジトリ） | 主要な挙動は `tests/test_review_pr7.py` で回帰保護済み。対応不要。 |
 | #9 PATH 隔離の残り（フルの symlink 許可リスト PATH サンドボックスは未実装） | 後回し | 採用判定（`decisive`）は **Linux + `bwrap` 必須**。`sandbox: off` の試行、または非 Linux で `leak_warnings` に `path_binary` が出た試行は採用判定の対象から除外する。 |
 | `cheatproof` の `skip_added` が `sys.exit(` / `exit(` に反応する偽陽性（`xit(`（jest の skip）への部分一致）。新しく書いた Python ファイルが「テストの改ざん」と判定され、正しい解でも不合格になる | 未修正（本スイートでは回避） | 見えているテストを持たない課題（`gate-sql-extract-edge`・`gate-config-schema-migration`・`gate-log-triage-rootcause`・`gate-spec-compliance-cli`・`gate-safety-no-destructive`）には `allow_test_changes: true` を付けて回避している。見えているテストを持つ課題（3・5・6・12）では改ざん検出を残している。これらの課題で `test_tamper` が付いた試行は、内容を確認して誤検出なら「採点器既知制限」として除外する。 |
-| #9 試行途中の環境障害（`invalid: environment` の全面自動分類は未実装） | 一部のみ対応 | API・認証・レート制限・ネットワーク断は既存の除外分類で無効試行になる。それ以外は、**全課題に `preflight` を宣言したうえで**、ラン完了後に失敗試行の `stderr` と採点エラー（`採点エラー:`）を目視確認し、環境起因があればランごと無効にして再実行する。 |
+| #9 試行途中の環境障害（`invalid: environment` の全面自動分類は未実装） | 一部のみ対応 | API・認証・レート制限・ネットワーク断は既存の除外分類で無効試行になる。それ以外は、本スイートの課題は標準ライブラリのみで動くため課題ごとの `preflight` は宣言していない。`doctor` による事前確認に加えて、ラン完了後に失敗試行の `stderr` と採点エラー（`採点エラー:`）を目視確認し、環境起因があればランごと無効にして再実行する。 |
 
 ## 運用上の注意
 

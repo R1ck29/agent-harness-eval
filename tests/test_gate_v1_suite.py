@@ -4,11 +4,15 @@
 - rules.yaml の固定値と、4 結論（IMPROVED / NO CHANGE / REGRESSED / INCONCLUSIVE）の分岐
 - 校正ゲート（6 件以上・合格と不合格の両方・一致率 80% 以上）の受理と拒否
 - examples/tasks が元の 6 件のままであること
+- 採点スクリプトの CRLF 耐性（見えているテストのハッシュ）と型注釈への耐性（公開 API の比較）
 実行を速く保つため、結論と校正は記録（TrialRecord）を作って verdict を直接呼ぶ（12 課題 × 試行の実行はしない）。
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -127,6 +131,68 @@ class TestSuiteShape(unittest.TestCase):
 
     def test_examples_tasks_are_unchanged(self):
         self.assertEqual({t.id for t in load_tasks([str(ROOT / "examples" / "tasks")])}, EXAMPLE_IDS)
+
+
+class TestGradingChecks(unittest.TestCase):
+    """見えているテストを持つ課題の採点スクリプトが、改行コードと型注釈の違いで誤って落ちない。"""
+
+    def run_check(self, task_id: str, check: str, edit=None) -> subprocess.CompletedProcess:
+        """フィクスチャ + 正解例を一時フォルダに作り、edit(work) で書き換えてから採点スクリプトを走らせる。"""
+        with tempfile.TemporaryDirectory(prefix="gate-check-") as tmp:
+            work = Path(tmp) / "w"
+            shutil.copytree(SUITE / "fixtures" / task_id, work, ignore=shutil.ignore_patterns("__pycache__"))
+            shutil.copytree(SUITE / "references" / task_id, work, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            if edit:
+                edit(work)
+            return subprocess.run([sys.executable, "-B", str(SUITE / "checks" / check)], cwd=work, capture_output=True,
+                                  text=True, timeout=120, stdin=subprocess.DEVNULL)
+
+    @staticmethod
+    def to_crlf(work: Path) -> None:
+        for f in (work / "tests").glob("*.py"):
+            f.write_bytes(f.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+
+    def test_visible_test_hash_ignores_line_endings(self):
+        for task_id, check in (("gate-bugfix-multi-file", "check_bugfix_multi_file.py"),
+                               ("gate-refactor-preserve-api", "check_refactor_preserve_api.py")):
+            with self.subTest(task=task_id):
+                r = self.run_check(task_id, check, self.to_crlf)
+                self.assertEqual((r.returncode, r.stdout.strip()), (0, "一致"), r.stdout + r.stderr)
+
+    def test_visible_test_edit_is_still_detected(self):
+        def edit(work: Path) -> None:
+            self.to_crlf(work)
+            with (work / "tests" / "test_summary.py").open("ab") as f:
+                f.write(b"# edited\r\n")
+        r = self.run_check("gate-refactor-preserve-api", "check_refactor_preserve_api.py", edit)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("変更されています", r.stdout)
+
+    def edit_summary(self, old: str, new: str):
+        def edit(work: Path) -> None:
+            f = work / "orderkit" / "summary.py"
+            text = f.read_text(encoding="utf-8")
+            self.assertIn(old, text)
+            f.write_text(text.replace(old, new), encoding="utf-8")
+        return edit
+
+    def test_added_type_annotations_are_accepted(self):
+        def edit(work: Path) -> None:
+            self.edit_summary("def summarize_orders(orders, tax_rate=None):",
+                              "def summarize_orders(orders: list, tax_rate: float | None = None) -> dict:")(work)
+            self.edit_summary("def format_summary(summary):", "def format_summary(summary: dict) -> str:")(work)
+        r = self.run_check("gate-refactor-preserve-api", "check_refactor_preserve_api.py", edit)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "一致"), r.stdout + r.stderr)
+
+    def test_changed_default_or_parameter_name_is_still_rejected(self):
+        orig = "def summarize_orders(orders, tax_rate=None):"
+        for new in ("def summarize_orders(orders, tax_rate=0.1):", "def summarize_orders(items, tax_rate=None):"):
+            with self.subTest(change=new):
+                r = self.run_check("gate-refactor-preserve-api", "check_refactor_preserve_api.py",
+                                   self.edit_summary(orig, new))
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertNotIn("一致", r.stdout)
 
 
 class TestFourConclusions(unittest.TestCase):

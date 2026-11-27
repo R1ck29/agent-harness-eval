@@ -14,7 +14,7 @@
 | 実行環境 | Linux x86_64、Python 3.12、`bwrap` による隔離あり |
 | `rules.yaml` の sha256（先頭 16 桁） | `b609d0017ffaacf5` |
 | `prereg.json` の `rules_hash` | `fabc88b67a00a2f5` |
-| 実行 ID | `20261128-044116-658-3f` |
+| 実行 ID | `20261128-050600-158-43` |
 
 ### 課題のハッシュ（`summary.json` の `meta.tasks`。定義 + フィクスチャ + 採点スクリプトの内容）
 
@@ -22,9 +22,9 @@
 | --- | --- | --- |
 | `gate-clarify-ambiguous` | core5, clarify | `6d3773d1fe70c6b2` |
 | `gate-sql-extract-edge` | core5, extraction | `20a7397c39556b7f` |
-| `gate-bugfix-multi-file` | core5, coding | `372d7e11765e6c57` |
+| `gate-bugfix-multi-file` | core5, coding | `404d183fdc0a2d9d` |
 | `gate-review-cross-file` | core5, review | `e5988530789efd81` |
-| `gate-refactor-preserve-api` | core5, refactor | `435b8036348cddac` |
+| `gate-refactor-preserve-api` | core5, refactor | `5356aadfaab1adf2` |
 | `gate-test-regression-add` | testing, coding | `ef921dcc33c7f1ed` |
 | `gate-config-schema-migration` | data, migration | `6153e5d816b1c20a` |
 | `gate-log-triage-rootcause` | debugging | `39b87c74a4330f02` |
@@ -101,8 +101,8 @@ uv run --frozen python -m harness_eval verdict "$OUT/synthetic/$RUN_ID" --json >
 | --- | --- |
 | `validate --tasks suites/gate-v1/tasks --profiles examples/profiles --selftest` | 12 課題 OK・selftest 12/12・lint 警告 0 |
 | `ruff check .` | 通過 |
-| `pytest --cov` | 633 passed・1 skipped（実 CLI を使う既存のオプトインテスト）・所要 4 分 14 秒。カバレッジ 92.21%（下限 80%） |
-| `tests/test_gate_v1_suite.py`（新規） | 25 件通過・約 4 秒（12 課題の selftest が約 2 秒、ほかは各 0.3 秒以下） |
+| `pytest --cov` | 637 passed・1 skipped（実 CLI を使う既存のオプトインテスト）・所要 4 分 18 秒。カバレッジ 92.21%（下限 80%） |
+| `tests/test_gate_v1_suite.py`（新規） | 29 件通過・約 4 秒（採点スクリプトの CRLF 耐性と型注釈耐性の 4 件を含む。12 課題の selftest が約 2 秒、ほかは各 0.3 秒以下） |
 
 ## この作業で見つかったこと
 

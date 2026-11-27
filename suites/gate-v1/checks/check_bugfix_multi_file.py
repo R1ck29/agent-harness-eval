@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# 見えているテストのハッシュ（改変されていないこと）。fixtures の tests/test_quote.py の sha256
+# 見えているテストのハッシュ（改変されていないこと）。fixtures の tests/test_quote.py を LF にそろえた sha256（Windows の CRLF チェックアウトでも一致させる）
 VISIBLE = {"tests/test_quote.py": "68a50ab130e09cb35e6abeb1232136fa5fb1d46bc9f575d6925bd5cf154c47de"}
 
 HIDDEN = '''
@@ -68,7 +68,7 @@ def main() -> None:
     src = Path.cwd()
     for rel, digest in VISIBLE.items():
         f = src / rel
-        if not f.is_file() or hashlib.sha256(f.read_bytes()).hexdigest() != digest:
+        if not f.is_file() or hashlib.sha256(f.read_bytes().replace(b"\r\n", b"\n")).hexdigest() != digest:
             print(f"見えているテスト {rel} が変更されています")
             sys.exit(1)
     base = Path(tempfile.mkdtemp(prefix="gate-bugfix-"))
