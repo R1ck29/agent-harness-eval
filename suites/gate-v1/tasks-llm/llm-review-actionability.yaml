@@ -1,0 +1,26 @@
+# オプトイン（既定のゲートには含めない）: レビュー指摘が、位置・影響・具体的な修正案をそろえて行動に移せる形か。LLM 判定を使う。
+# gate-review-cross-file と同じフィクスチャを使い、「指摘の質」だけを LLM 判定で見る（欠陥の検出そのものは決定的な課題側で見る）。
+id: llm-review-actionability
+description: レビュー指摘が、位置・影響・具体的な修正案をそろえて行動に移せる形か（LLM 判定）
+targets: [claude_code, codex]
+tags: [llm-optin, full, review]
+fixture: ../fixtures/gate-review-cross-file
+prompt: |
+  billing パッケージ（billing/catalog.py と billing/invoice.py）をレビューしてください。コードは変更せず、指摘だけを返してください。
+  各指摘は、開発者がそのまま修正に着手できるように書いてください。
+limits: {max_turns: 10, timeout_s: 240, max_budget_usd: 0.5}
+allow_tools: [Read, Glob, Grep, Bash]
+deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]
+graders:
+  - type: regex                   # 結果: 最終応答が invoice.py に触れている（決定的）
+    description: 最終応答が billing/invoice.py に触れている
+    pattern: 'invoice\.py'
+  - type: tool_used               # 過程: コードを変更していない
+    description: ファイルを変更していない
+    tool: Write|Edit|NotebookEdit|file_change
+    max: 0
+  - type: llm
+    focus: final
+    criteria: |
+      PASS: 主要な指摘に、(1) 問題の場所（ファイルと行または関数）、(2) 何が起きるか（影響）、(3) 具体的な修正案、の 3 つがそろっている。
+      FAIL: 場所・影響・修正案のいずれかが欠けた指摘ばかりで、そのままでは修正に着手できない。

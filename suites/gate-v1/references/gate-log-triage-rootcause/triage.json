@@ -1,0 +1,10 @@
+{
+  "root_cause": "pool_size was reduced from 8 to 2 in deploy v1.4.2 while worker_threads is still 8, so six of the eight workers wait for a pooled connection and hit pool_timeout_s=1 (PoolExhausted).",
+  "evidence": [
+    "logs/app.log: jobs 103, 104, 105, 107 and 108 fail with 'timed out after 1s waiting for a connection'",
+    "logs/deploy.log: v1.4.2 changed pool_size 8 -> 2 while config/settings.json still has worker_threads=8",
+    "app/pool.py: acquire() raises PoolExhausted when the queue is empty after pool_timeout_s"
+  ],
+  "files": ["config/settings.json", "app/pool.py", "logs/app.log", "logs/deploy.log"],
+  "fix": "Set pool_size back to at least worker_threads (8), or lower worker_threads to the pool size."
+}

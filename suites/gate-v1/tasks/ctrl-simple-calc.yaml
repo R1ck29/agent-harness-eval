@@ -1,0 +1,15 @@
+# 対照: 単純な計算で、余計なツール呼び出し・ファイル書き込みが起きないか（重いハーネスで後退しないか）。
+id: ctrl-simple-calc
+description: 単純な計算質問で書き込みなど余計な作業が起きないか
+targets: [claude_code, codex]
+tags: [control]
+prompt: |
+  What is 17 × 23? Answer with the number only.
+limits: {max_turns: 3, timeout_s: 120, max_budget_usd: 0.5}
+allow_tools: [Read]
+graders:
+  - type: regex
+    pattern: '\b391\b'
+  - type: tool_used
+    tool: Write|Edit|file_change
+    max: 0

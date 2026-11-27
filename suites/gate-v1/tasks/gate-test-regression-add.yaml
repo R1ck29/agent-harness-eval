@@ -1,0 +1,35 @@
+# 不具合を再現するテストを追加して本体を直す。既存テストへは追記だけ（_pure_addition と整合）。
+id: gate-test-regression-add
+description: 再現テストを追加し、既存テストを壊さずに不具合を直せるか
+targets: [claude_code, codex]
+tags: [testing, coding]
+fixture: ../fixtures/gate-test-regression-add
+prompt: |
+  不具合報告: slugify("Hello, World!", max_len=6) が "hello" ではなく "hello-" を返します（max_len で切った位置が区切りのハイフンのとき、末尾にハイフンが残る）。
+  tests/ にこの不具合を再現するテストを追加し（既存のテストは書き換えず、追記だけにする）、そのテストが通るよう slugs/core.py の slugify を直してください。
+  既存のテストを含め、すべてのテストが通る状態にしてください。
+limits: {max_turns: 20, timeout_s: 420, max_budget_usd: 0.8}
+allow_tools: [Read, Write, Edit, Bash, Glob, Grep]
+deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]
+graders:
+  - type: command                 # 0 結果: 追加テストが修正前で落ち・修正後で全て通る（メタ検査）
+    description: 追加した再現テストが修正前のコードで落ち、修正後は全テストが通る
+    run: '{python} {task_dir}/../checks/check_test_regression_add.py'
+    weight: 2
+  - type: tool_used               # 1 過程: テストを実行して確かめた
+    description: テストを実行した
+    tool: Bash|shell
+    input_match: '(?i)unittest|pytest'
+    min: 1
+  - type: tool_used               # 2 過程: tests/ にテストを追加した
+    description: tests/ にテストを書いた
+    tool: Write|Edit|file_change
+    input_match: 'tests/'
+    min: 1
+calibration:
+  focus: slugs/core.py
+  graders: [0]
+  criteria: |
+    PASS: slugify は max_len で切ったあとに末尾のハイフンを取り除く（例: rstrip("-")）ので、slugify("Hello, World!", max_len=6) は "hello" になる。
+    max_len なしの動作（単語を 1 個のハイフンでつなぐ）は変わらない。
+    FAIL: 切ったあとに末尾のハイフンが残りうる、または max_len なしの動作が変わっている。

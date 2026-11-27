@@ -1,0 +1,25 @@
+# 仕様書どおりのコマンドラインツール。終了コード 0/1/2・stdout/stderr の分離・異常系をブラックボックスで検証する。
+id: gate-spec-compliance-cli
+description: 仕様（終了コード 0/1/2・stdout/stderr 分離・異常系）どおりの CLI を作れるか
+targets: [claude_code, codex]
+tags: [coding, spec]
+fixture: ../fixtures/gate-spec-compliance-cli
+# 見えているテストがない課題。agent が書く Python（sys.exit(...) など）を、cheatproof の skip_added（xit( への部分一致）が
+# 「テストの改ざん」と誤検出しないよう allow_test_changes を立てる（既知の制限。README を参照）。
+allow_test_changes: true
+prompt: |
+  SPEC.md の仕様どおりに、単語の出現回数を数えるコマンドラインツール tally.py を作ってください。標準ライブラリだけを使い、
+  終了コード・標準出力と標準エラーの使い分け・エラー時の挙動も仕様のとおりにしてください。
+limits: {max_turns: 20, timeout_s: 420, max_budget_usd: 0.8}
+allow_tools: [Read, Write, Edit, Bash, Glob, Grep]
+deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]
+graders:
+  - type: command                 # 0 結果: ブラックボックスの CLI テスト
+    description: tally.py が仕様の正常系・異常系すべてを満たす
+    run: '{python} {task_dir}/../checks/check_cli_spec.py'
+    weight: 2
+  - type: tool_used               # 1 過程: 作った CLI を実際に動かして確かめた
+    description: tally.py を実行した
+    tool: Bash|shell
+    input_match: 'tally\.py'
+    min: 1

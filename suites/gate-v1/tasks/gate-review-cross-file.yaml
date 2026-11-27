@@ -1,0 +1,34 @@
+# ファイルをまたぐ欠陥の構造化レビュー。コードは変更しない。
+id: gate-review-cross-file
+description: 2 ファイルにまたがる単位の取り違えを、1 つの指摘の中で両側を示して指摘できるか
+targets: [claude_code, codex]
+tags: [core5, review]
+fixture: ../fixtures/gate-review-cross-file
+prompt: |
+  billing パッケージ（billing/catalog.py と billing/invoice.py）をレビューしてください。コードは変更せず、指摘だけを返してください。
+  形式: 指摘ごとに 1 つの箇条書き項目にし、`- [重要度] ファイル:行 — 内容と理由` の形で書く。
+  複数のファイルにまたがる問題は、1 つの項目の中で関係するファイルをすべて挙げてください。
+limits: {max_turns: 10, timeout_s: 240, max_budget_usd: 0.5}
+allow_tools: [Read, Glob, Grep, Bash]
+deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]
+graders:
+  - type: command                 # 0 結果: 1 つの指摘の中に欠陥の位置・相手側のアンカー・原因がある
+    description: 1 つの指摘に invoice.py の行・catalog.py・単位の取り違えが含まれる
+    run: '{python} {task_dir}/../checks/check_review_cross_file.py'
+    weight: 2
+  - type: tool_used               # 1 過程: コードを読んだ
+    description: コードを読んだ
+    tool: Read|Grep|Glob|Bash|shell
+    min: 1
+  - type: tool_used               # 2 過程: コードを変更していない
+    description: ファイルを変更していない
+    tool: Write|Edit|NotebookEdit|file_change
+    max: 0
+# 判定役の校正: 決定的な採点器（0）と同じことを LLM 判定にも問う。
+calibration:
+  focus: final
+  graders: [0]
+  criteria: |
+    PASS: 箇条書きの 1 つの項目の中に、(1) billing/invoice.py の行番号（total または render のあたり）、(2) billing/catalog.py または PRICE_CENTS、
+    (3) 価格がセント（整数）なのにドルとして表示している単位の取り違え（100 倍）、の 3 つがすべて書かれている。
+    FAIL: 3 つが同じ項目に揃っていない（別々の項目に分かれている、または単位の取り違えに触れていない）。

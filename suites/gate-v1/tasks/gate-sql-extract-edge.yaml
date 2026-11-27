@@ -1,0 +1,48 @@
+# SQLite からの抽出。重複・欠損・境界値・日付の月末・ソート・SQL の保存を、依頼文の規則どおりに扱えるか。
+id: gate-sql-extract-edge
+description: SQLite 抽出（重複・欠損・境界値・並び順・SQL 保存）
+targets: [claude_code, codex]
+tags: [core5, extraction]
+fixture: ../fixtures/gate-sql-extract-edge
+# 見えているテストがない課題。agent が書く Python（sys.exit(...) など）を、cheatproof の skip_added（xit( への部分一致）が
+# 「テストの改ざん」と誤検出しないよう allow_test_changes を立てる（既知の制限。README を参照）。
+allow_test_changes: true
+prompt: |
+  shop.db（SQLite）の orders テーブルから、次の条件の注文を抽出してください。
+  - 2026 年 3 月に注文されたもの（ordered_at が 3 月中。月末の時刻付きも含める）
+  - status が cancelled のものは除く。amount が空（NULL）のものも除く
+  - 同じ order_no の行が複数あるときは、id が最小の行だけを 1 件として扱う（その行が条件を満たさなければ、その注文は対象外）
+  - その行の amount が 5000 以上（5000 ちょうどを含む）
+  結果は order_no, customer, amount の列（この順・ヘッダ付き）で、amount の大きい順（同額は order_no の昇順）に result.csv へ保存し、
+  使った SQL を query.sql に保存してください。shop.db は変更しないでください。
+limits: {max_turns: 15, timeout_s: 300, max_budget_usd: 0.5}
+allow_tools: [Read, Write, Edit, Bash, Glob, Grep]
+deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]
+graders:
+  - type: command                 # 0 結果: result.csv が正解と一致し、query.sql の再実行でも同じ結果になる
+    description: result.csv と query.sql の再実行結果が正解と一致する
+    run: '{python} {task_dir}/../checks/check_sql_extract.py {task_dir}/../fixtures/gate-sql-extract-edge/shop.db'
+    weight: 2
+  - type: file_contains           # 1 結果: query.sql に SELECT 文が保存されている
+    description: query.sql に SELECT 文がある
+    path: query.sql
+    pattern: '(?i)\bselect\b'
+  - type: tool_used               # 2 過程: DB を実際に読んで抽出している
+    description: SQLite を実際に操作した
+    tool: Bash|shell
+    input_match: '(?i)sqlite|\.db\b'
+    min: 1
+  - type: tool_used               # 3 過程: shop.db を書き換える SQL を実行していない
+    description: shop.db を書き換える SQL を実行していない
+    tool: Bash|shell
+    input_match: '(?i)\b(?:drop\s+table|delete\s+from|update\s+\w+\s+set|insert\s+into|alter\s+table)\b'
+    max: 0
+# 判定役の校正: 決定的な採点器（0・1）と同じことを LLM 判定にも問う。
+calibration:
+  focus: result.csv
+  graders: [0]
+  criteria: |
+    PASS: 先頭行が「order_no,customer,amount」で、続く行が次の 10 行と、この順で完全に一致する。
+    A-1004,delta,12000 / A-1017,quebec,10500 / A-1007,golf,8000 / A-1008,hotel,8000 / A-1010,juliet,7300 /
+    A-1012,lima,6100 / A-1013,mike,5200 / A-1015,oscar,5001 / A-1002,bravo,5000 / A-1009,india,5000
+    FAIL: 行の過不足・順序違い・値の違い・ヘッダ違いのいずれかがある。

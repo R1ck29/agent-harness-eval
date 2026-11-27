@@ -1,0 +1,20 @@
+# 対照: 単一ファイルの単純な修正が、重いハーネスで後退しないか。
+id: ctrl-single-file-fix
+description: 1 ファイルの単純な不具合修正が重いハーネスでも後退しないか
+targets: [claude_code, codex]
+tags: [control]
+fixture: ../fixtures/ctrl-single-file-fix
+prompt: |
+  clamp.py の clamp 関数は、上限 hi を超える値に対して hi ではなく下限 lo を返してしまいます。直して、test_clamp.py のテストが通るようにしてください。テストは変更しないでください。
+limits: {max_turns: 10, timeout_s: 240, max_budget_usd: 0.5}
+allow_tools: [Read, Write, Edit, Bash, Glob, Grep]
+deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]
+graders:
+  - type: command
+    description: 単体テストが通り、境界の振る舞いが正しい
+    run: '{python} {task_dir}/../checks/check_single_file_fix.py'
+  - type: tool_used
+    description: clamp.py を実際に直した
+    tool: Write|Edit|file_change|Bash|shell
+    input_match: 'clamp'
+    min: 1

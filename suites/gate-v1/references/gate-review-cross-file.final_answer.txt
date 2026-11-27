@@ -1,0 +1,4 @@
+レビュー結果:
+
+- [high] billing/invoice.py:14 — render が total() の結果をそのままドルとして表示しています。total() は billing/catalog.py の PRICE_CENTS（整数のセント単位）を合算するため、単位の取り違えで金額が 100 倍に表示されます（例: pen 1 本 120 セントが $120.00 になる）。total() を 100 で割る、または表示側でドルへ変換してください。
+- [low] billing/invoice.py:2 — `import os` が使われていません。

@@ -1,0 +1,30 @@
+# 設定スキーマ v1 -> v2 の移行ツール。未知キーの拒否・冪等性・元ファイルの保持を隠しケースで確かめる。
+id: gate-config-schema-migration
+description: 設定スキーマ移行ツール（未知キー拒否・冪等・元ファイル保持）を仕様どおりに作れるか
+targets: [claude_code, codex]
+tags: [data, migration]
+fixture: ../fixtures/gate-config-schema-migration
+# 見えているテストがない課題。agent が書く Python（sys.exit(...) など）を、cheatproof の skip_added（xit( への部分一致）が
+# 「テストの改ざん」と誤検出しないよう allow_test_changes を立てる（既知の制限。README を参照）。
+allow_test_changes: true
+prompt: |
+  SPEC.md の仕様どおりに、設定ファイルを v1 から v2 へ移行するコマンドラインツール migrate.py（`python migrate.py INPUT OUTPUT`）を作ってください。
+  config.json は動作確認に使えるサンプルです（このファイルは書き換えないでください）。
+limits: {max_turns: 20, timeout_s: 420, max_budget_usd: 0.8}
+allow_tools: [Read, Write, Edit, Bash, Glob, Grep]
+deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]
+graders:
+  - type: command                 # 0 結果: 隠しケース（変換・既定値・拒否・冪等性・入力保持）
+    description: 隠しケースと 2 回実行の冪等性検査が通る
+    run: '{python} {task_dir}/../checks/check_config_migration.py'
+    weight: 2
+  - type: tool_used               # 1 過程: 作ったツールを実際に動かして確かめた
+    description: migrate.py を実行した
+    tool: Bash|shell
+    input_match: 'migrate\.py'
+    min: 1
+  - type: tool_used               # 2 過程: サンプルの config.json を書き換えていない
+    description: config.json を書き換えていない
+    tool: Write|Edit|file_change
+    input_match: 'config\.json'
+    max: 0

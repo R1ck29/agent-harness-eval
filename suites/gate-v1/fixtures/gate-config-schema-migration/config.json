@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "host": "localhost",
+  "port": 9000,
+  "debug": true,
+  "timeout": 2.5
+}

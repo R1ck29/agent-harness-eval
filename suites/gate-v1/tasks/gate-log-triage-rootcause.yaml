@@ -1,0 +1,33 @@
+# 合成ログ + 設定 + コードから根本原因を特定し、構造化 JSON で報告する。おとり（DNS の遅延警告）に引っ張られないか。
+id: gate-log-triage-rootcause
+description: ログ・設定・コードから根本原因を特定し、おとりを選ばずに構造化 JSON で報告できるか
+targets: [claude_code, codex]
+tags: [debugging]
+fixture: ../fixtures/gate-log-triage-rootcause
+# 見えているテストがない課題。agent が書く Python（sys.exit(...) など）を、cheatproof の skip_added（xit( への部分一致）が
+# 「テストの改ざん」と誤検出しないよう allow_test_changes を立てる（既知の制限。README を参照）。
+allow_test_changes: true
+prompt: |
+  ジョブの一部が失敗するようになりました。logs/（app.log と deploy.log）・config/settings.json・app/ のコードを調べ、根本原因を特定して
+  triage.json に次のキーで書いてください（コードや設定は変更しないでください）。
+  - root_cause: 根本原因（文字列）
+  - evidence: 根拠のリスト（どのファイルのどの記述か）
+  - files: 原因に関係するファイルのパスのリスト
+  - fix: 推奨する対処（文字列）
+limits: {max_turns: 15, timeout_s: 300, max_budget_usd: 0.6}
+allow_tools: [Read, Write, Edit, Bash, Glob, Grep]
+deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]
+graders:
+  - type: command                 # 0 結果: 必須キー・真の原因・おとりを選んでいない
+    description: triage.json が真の原因（pool_size と worker_threads の不整合）を指し、DNS をおとりとして除いている
+    run: '{python} {task_dir}/../checks/check_log_triage.py'
+    weight: 2
+  - type: tool_used               # 1 過程: ログや設定を読んだ
+    description: ログ・設定・コードを読んだ
+    tool: Read|Grep|Glob|Bash|shell
+    min: 1
+  - type: tool_used               # 2 過程: 調査対象（app/・config/・logs/）を変更していない
+    description: ソース・設定・ログを変更していない
+    tool: Write|Edit|NotebookEdit|file_change
+    input_match: '(?:app|config|logs)/'
+    max: 0

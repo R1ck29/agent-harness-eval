@@ -1,0 +1,17 @@
+# gate-v1 の判定規則（実行前に固定して事前登録する。値を変えると prereg の rules_hash が変わり、verdict は post_hoc 扱いになる）
+control_tags: [control]
+metric: pass_at_1
+floor: 0.2
+ceiling: 0.8
+min_tasks: 5
+recommended_tasks: 10
+min_trials_per_task: 2
+min_effect: 0.10
+confidence: 0.95
+max_error_rate: 0.2
+control_margin: 0.10
+min_calibration_agreement: 0.8
+min_calibration_items: 6
+required_tier: decisive
+resamples: 10000
+seed: 0

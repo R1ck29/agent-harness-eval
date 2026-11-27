@@ -1,0 +1,27 @@
+# オプトイン（既定のゲートには含めない）: 集計に加えて、データに基づく考察が書かれているか。LLM 判定を使う。
+# 実行するときだけ --tasks suites/gate-v1/tasks suites/gate-v1/tasks-llm --tier decisive で併用する
+# （Claude・Codex の両 CLI が認証済みで、別系統の判定役を使えること。--no-llm では判定が not_run になる）。
+id: llm-summary-insight
+description: 月別集計のサマリーに、店舗別の内訳に触れた考察が書かれるか（LLM 判定）
+targets: [claude_code, codex]
+tags: [llm-optin, full]
+fixture: ../fixtures/llm-summary-insight
+prompt: |
+  sales.csv を月別に集計して summary.md にまとめ、最も売上が多かった月について店舗別の内訳に触れた考察を 1〜2 文添えてください。
+limits: {max_turns: 15, timeout_s: 300, max_budget_usd: 0.5}
+allow_tools: [Read, Write, Edit, Bash, Glob, Grep]
+deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]
+graders:
+  - type: file_contains           # 結果: 最も売上が多い月（2026-03）が summary.md に出ている（決定的）
+    description: summary.md に最多月 2026-03 が出ている
+    path: summary.md
+    pattern: '2026-03'
+  - type: tool_used               # 過程: 実際に書いた
+    description: ファイルを書いた
+    tool: Write|Edit|Bash|shell|file_change
+    min: 1
+  - type: llm                     # 結果: 判定は観点を 1 つに絞り、根拠不足なら UNKNOWN
+    focus: summary.md
+    criteria: |
+      PASS: 最も売上が多い月（2026-03）を挙げ、その月の店舗別の違いに具体的な数値または店舗名（Aoba・Minato・Hibiya）で触れた考察がある。
+      FAIL: 考察がない、月を誤っている、または店舗に触れていない。
