@@ -145,6 +145,19 @@ class ClarificationDoneCheck(unittest.TestCase):
             with self.subTest(t=t):
                 self.assertFalse(is_clarification_question(t))
 
+    def test_review_round3_clarifications(self):
+        for q in ("保存済みファイルを使ってよいですか？", "元データは集計済みですか（はい／いいえ）？",
+                  "元データは集計済みですか(はい／いいえ)？", "作業が完了していますか？"):
+            with self.subTest(q=q):
+                self.assertTrue(is_clarification_question(q))
+
+    def test_review_round3_declarative_sakugyo_endings_stay_done(self):
+        for t in ("作業完了です。次はどの期間を集計しますか。", "作業を終えた。次はどの期間を集計しますか。",
+                  "作業終わった。次はどの期間を集計しますか。", "作業が完了しました。期間はいつですか？",
+                  "集計しましたから、期間はいつですか。"):
+            with self.subTest(t=t):
+                self.assertFalse(is_clarification_question(t))
+
 
 class PathBinaryRegression(unittest.TestCase):
     def setUp(self):
