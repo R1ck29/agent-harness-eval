@@ -127,6 +127,19 @@ class ClarificationDoneCheck(unittest.TestCase):
             with self.subTest(q=q):
                 self.assertTrue(is_clarification_question(q))
 
+    def test_review_round2_clarifications(self):
+        for q in ("作業が完了していますか？", "保存済みのファイルはどれですか？", "保存済みですか。",
+                  "確認が完了しました。対象期間はいつですか。"):
+            with self.subTest(q=q):
+                self.assertTrue(is_clarification_question(q))
+
+    def test_review_round2_declaratives_stay_done(self):
+        for t in ("作業を終えました。", "作業が完了しました。期間はいつですか？", "作業が完了しています。",
+                  "集計しましたから、期間はいつですか。", "集計しましたが、期間はいつですか。",
+                  "期間はいつですか？ 集計しました。"):
+            with self.subTest(t=t):
+                self.assertFalse(is_clarification_question(t))
+
     def test_plain_done_endings_are_still_done(self):
         for t in ("集計しました", "保存済みです。対象期間はいつですか。"):
             with self.subTest(t=t):

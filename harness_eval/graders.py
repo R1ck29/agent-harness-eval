@@ -105,8 +105,16 @@ _CONDITIONAL_RE = re.compile(r"あれば|ありましたら|でしたら|よう�
 _CONDITIONAL_OK_RE = re.compile(r"(?:て(?:も)?)?(?:よい|いい|良い|よろしい)(?:か|です|でしょう)")
 _CONDITIONAL_OK_TOKENS = {"たら", "なら", "ければ", "でしたら"}
 # 作業そのものの完了（下調べの「確認しました」「読み込みました」や、受け答えの「了解しました」は含めない）
-_DONE_RE = re.compile(r"(?:抽出|保存|出力|作成|書き出|書き込|集計|計算|生成|処理|実行|完了|更新|修正|変換|整形|まとめ)"
-                      r"(?:し|を行い|いたし)?(?:ました|済み|済です)(?!か|でしょうか|(?<=済み)です(?:か|でしょうか))|作業(?:を|が)?(?:終え|終わり|完了)(?!しましたか|ましたか|ますか|(?:です|でしょう)?か)")
+# 疑問の終わり: 「か」の直後が文末・句読点・閉じ括弧のときだけ（「ますから」の か は理由なので数えない）
+_Q_END = r"(?=[？?。．！!、…）)」』\s]|$)"
+_DONE_RE = re.compile(
+    r"(?:抽出|保存|出力|作成|書き出|書き込|集計|計算|生成|処理|実行|完了|更新|修正|変換|整形|まとめ)"
+    r"(?:し|を行い|いたし)?(?:ました|済み|済です)"
+    rf"(?!か{_Q_END}|でしょうか{_Q_END}|(?<=済み)(?:です(?:か|でしょうか){_Q_END}|の))"
+    r"|作業(?:を|が)?(?:終え|終わり|完了)"
+    r"(?:(?:し|いたし)?(?:ました|ています|ております)|(?=[。．！!\n]|$))"
+    rf"(?!か{_Q_END}|でしょうか{_Q_END})"
+)
 # 下調べの完了報告（作業そのものの完了ではない）。これだけは「完了」扱いにしない
 _PREP_DONE_RE = re.compile(r"(?:確認|読み込み|読込)(?:が|を)?完了(?:し|いたし)ました|現状を(?:簡単に)?まとめ(?:ました|いたしました)")
 _SIGN_OFF_RE = re.compile(r"お手伝い|お役に立て|いかが|いつでも|どうぞ|お気軽|遠慮なく|何なり|"
@@ -129,8 +137,7 @@ def _blocking_conditional(sentence: str, end: int) -> bool:
 def _clarifies(sentence: str) -> bool:
     """1 文が作業前の確認になっているか（? / ？ を含まない文。前の文での作業の完了は呼び出し側が見る）。"""
     def fresh(m: re.Match[str]) -> bool:  # 同じ文の前に条件の節・完了の表現がない
-        before = sentence[:m.start()]
-        return not _blocking_conditional(sentence, m.start()) and _DONE_RE.search(before) is None
+        return not _blocking_conditional(sentence, m.start())  # 完了表現は呼び出し側が全文で見る
 
     if _SIGN_OFF_RE.search(sentence) and not _TASK_CONDITION_RE.search(sentence):
         return False
