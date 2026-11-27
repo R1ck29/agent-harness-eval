@@ -55,7 +55,7 @@ class KillTreePermissionError(unittest.TestCase):
         p = FakeProc(running)
         # Force the non-waitid path (macOS-like): poll() is not None -> killpg SIGKILL -> EPERM.
         with mock.patch.object(isolation, "_HAS_WAITID", False), mock.patch.object(isolation.os, "name", "posix"), \
-                mock.patch.object(isolation.os, "killpg", side_effect=PermissionError(1, "EPERM")):
+                mock.patch.object(isolation.os, "killpg", create=True, side_effect=PermissionError(1, "EPERM")):
             isolation._kill_tree(p)  # must not raise
         return p
 
@@ -71,14 +71,14 @@ class KillTreePermissionError(unittest.TestCase):
         p = FakeProc(True)
         with mock.patch.object(isolation, "_HAS_WAITID", True), mock.patch.object(isolation.os, "name", "posix"), \
                 mock.patch.object(isolation, "_exited_unreaped", return_value=False), \
-                mock.patch.object(isolation.os, "killpg", side_effect=PermissionError(1, "EPERM")):
+                mock.patch.object(isolation.os, "killpg", create=True, side_effect=PermissionError(1, "EPERM")):
             isolation._kill_tree(p)
         p.kill.assert_called_once_with()
 
     def test_process_lookup_error_is_still_swallowed(self):
         p = FakeProc(True)
         with mock.patch.object(isolation, "_HAS_WAITID", False), mock.patch.object(isolation.os, "name", "posix"), \
-                mock.patch.object(isolation.os, "killpg", side_effect=ProcessLookupError()):
+                mock.patch.object(isolation.os, "killpg", create=True, side_effect=ProcessLookupError()):
             isolation._kill_tree(p)
         p.kill.assert_not_called()
 
