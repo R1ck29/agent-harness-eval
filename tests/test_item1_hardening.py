@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import stat
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -98,6 +99,8 @@ class ClarificationDoneCheck(unittest.TestCase):
         *[(f"{p}。対象期間はいつですか{end}", True, f"T{i + 1}") for i, p in enumerate(PREP) for end in ("。", "？")],
         # T4-T5: issue #8 cases 3 and 4 (locked trade-off)
         ("詳細な内訳を提示しましょうか。", True, "T4"),
+        ("詳細な内訳を提示しましょうか！", True, "T4b"),
+        ("詳細な内訳を提示しましょうか!", True, "T4c"),
         ("内訳も出しましょうか。", True, "T5"),
         ("元データはどの期間で集計しましたか？", True, "T6"),
         ("集計は完了しましたか？", True, "T7"),
@@ -162,6 +165,20 @@ class ClarificationDoneCheck(unittest.TestCase):
         for text, expected in cases:
             with self.subTest(text=text):
                 self.assertEqual(_split_sentences(text), expected)
+
+    def test_split_is_linear_on_repeated_bracket_groups(self):
+        def best(groups: int) -> float:
+            text = "(a)" * groups
+            times = []
+            for _ in range(3):
+                t0 = time.perf_counter()
+                _split_sentences(text)
+                times.append(time.perf_counter() - t0)
+            return min(times)
+
+        small, large = best(2000), best(8000)  # 6k vs 24k characters
+        self.assertLess(large, 1.0)
+        self.assertLess(large, 12 * small + 0.05)
 
     def test_split_newline_resets_brackets_and_ascii_period_is_not_a_boundary(self):
         self.assertEqual(_split_sentences("（閉じ忘れ\n1) sales.csv を v0.10.3 で読む。\r\n2) 次"),

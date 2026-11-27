@@ -92,7 +92,7 @@ def _safe_path(workdir: Path, rel: str) -> Path:
 #       2・3 とも、同じ文で前に条件の節（〜があれば / 〜なら / 〜でしたら / 〜場合は）があるもの、
 #       締めの言い回し（「いつでも」「どうぞ」「他に何かありますか」「いかがでしょうか」「これでよろしいでしょうか」）は数えない
 _CLARIFY_QUESTION_RE = re.compile(
-    r"(?:ますでしょうか|でしょうか|いただけますか|頂けますか|ましょうか|ましたか|ますか|ですか)(?=[。．、）)（(」』\s]|$)"
+    r"(?:ますでしょうか|でしょうか|いただけますか|頂けますか|ましょうか|ましたか|ますか|ですか)(?=[。．！!、）)（(」』\s]|$)"
 )
 _CLARIFY_REQUEST_RE = re.compile(
     r"(?:ご指定|指定して|ご教示|教示して|ご指示|指示して|お聞かせ|聞かせて|"
@@ -146,12 +146,15 @@ def _split_sentences(text: str) -> list[str]:
     out: list[str] = []
     buf: list[str] = []
     stack: list[str] = []
+    last = ""  # buf の最後の空白でない文字（buf を作り直さずに括弧を閉じる直前の文字を見る）
 
     def flush() -> None:
         s = "".join(buf).strip()
         if s:
             out.append(s)
         buf.clear()
+        nonlocal last
+        last = ""
 
     i, n = 0, len(text)
     while i < n:
@@ -162,10 +165,12 @@ def _split_sentences(text: str) -> list[str]:
         elif c in _BRACKETS:
             stack.append(_BRACKETS[c])
             buf.append(c)
+            last = c
         elif stack and c == stack[-1]:
-            prev = "".join(buf).rstrip()[-1:]
+            prev = last
             stack.pop()
             buf.append(c)
+            last = c
             nxt = text[i + 1] if i + 1 < n else ""
             if not stack and prev and prev in _TERMINATORS and nxt not in _TERMINATORS:
                 flush()  # 「対象期間はいつですか？」 のように、括弧の中で文が終わっている
@@ -178,6 +183,8 @@ def _split_sentences(text: str) -> list[str]:
             continue
         else:
             buf.append(c)  # 括弧の中の終端記号・対応しない閉じ括弧（1) 項目）もそのまま
+            if not c.isspace():
+                last = c
         i += 1
     flush()
     return out
