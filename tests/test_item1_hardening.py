@@ -10,7 +10,7 @@ from unittest import mock
 from harness_eval import isolation
 from harness_eval.adapters import classify_stderr
 from harness_eval.cheatproof import leak_check
-from harness_eval.graders import is_clarification_question
+from harness_eval.graders import _split_sentences, is_clarification_question
 from harness_eval.record import EXCLUDED_ERRORS, TrialRecord
 from harness_eval.soundness import INVALIDATING, Rules, verdict
 
@@ -90,86 +90,83 @@ class KillTreePermissionError(unittest.TestCase):
 
 
 class ClarificationDoneCheck(unittest.TestCase):
-    def test_question_then_later_completion_is_not_clarification(self):
-        self.assertFalse(is_clarification_question("対象期間はいつですか？ 集計を実行しました。"))
-        self.assertFalse(is_clarification_question("どちらが良いですか。とりあえずファイルを作成しました。"))
+    """Sentence-level done / clarify / neither classification (design-pr12-sentence.md, section 4)."""
 
-    def test_prep_done_then_question_is_clarification(self):
-        for prep in ("確認が完了しました", "読み込みが完了しました", "現状をまとめました"):
-            with self.subTest(prep=prep):
-                self.assertTrue(is_clarification_question(f"{prep}。対象期間はいつですか。"))
-                self.assertTrue(is_clarification_question(f"{prep}。対象期間はいつですか？"))
+    PREP = ("確認が完了しました", "読み込みが完了しました", "現状をまとめました")
+    CASES: list[tuple[str, bool, str]] = [
+        # T1-T3: preparatory "done" followed by a real question (#8 case 1), both 。 and ？ endings
+        *[(f"{p}。対象期間はいつですか{end}", True, f"T{i + 1}") for i, p in enumerate(PREP) for end in ("。", "？")],
+        # T4-T5: issue #8 cases 3 and 4 (locked trade-off)
+        ("詳細な内訳を提示しましょうか。", True, "T4"),
+        ("内訳も出しましょうか。", True, "T5"),
+        ("元データはどの期間で集計しましたか？", True, "T6"),
+        ("集計は完了しましたか？", True, "T7"),
+        ("出力しましたか？", True, "T8"),
+        ("保存済みですか？", True, "T9"),
+        ("保存済みでしょうか？", True, "T10"),
+        ("保存済みですか。", True, "T11"),
+        ("作業を終えましたか？", True, "T12"),
+        ("作業が終わりましたか？", True, "T13"),
+        ("作業が完了しましたか？", True, "T14"),
+        ("作業が完了していますか？", True, "T15"),
+        ("保存済みのファイルはどれですか？", True, "T16"),
+        ("保存済みファイルを使ってよいですか？", True, "T17"),
+        ("確認が完了しました。対象期間はいつですか。", True, "T18"),
+        ("元データは集計済みですか（はい／いいえ）？", True, "T19"),
+        ("元データは集計済みですか(はい／いいえ)？", True, "T20"),
+        ("対象は処理済みデータですか？", True, "T21"),
+        ("集計済みかどうか教えていただけますか？", True, "T22"),
+        ("変換済みレポートを使ってよいですか？", True, "T23"),
+        ("データが集計済みでしたら、そのファイルを使ってよいですか？", True, "T24"),
+        ("元データはどの期間で集計しました？", True, "T25"),
+        # F1-F2: question first, completion later (#8 case 5)
+        ("対象期間はいつですか？ 集計を実行しました。", False, "F1"),
+        ("どちらが良いですか。とりあえずファイルを作成しました。", False, "F2"),
+        ("確認が完了しました。", False, "F3"),
+        ("データの期間を集計しました。対象期間はいつですか。", False, "F4"),
+        ("参考: https://example.com/search?q=1 を確認しました。", False, "F5"),
+        # F6: issue #8 case 2 (locked trade-off)
+        ("以下の条件をご確認ください。\n- 期間\n- 対象", False, "F6"),
+        ("集計しました", False, "F7"),
+        ("保存済みです。対象期間はいつですか。", False, "F8"),
+        ("保存済み。対象期間はいつですか。", False, "F9"),
+        ("作業を終えました。", False, "F10"),
+        ("作業が完了しました。期間はいつですか？", False, "F11"),
+        ("作業が完了しています。", False, "F12"),
+        ("集計しましたから、期間はいつですか。", False, "F13"),
+        ("集計しましたが、期間はいつですか。", False, "F14"),
+        ("期間はいつですか？ 集計しました。", False, "F15"),
+        ("作業完了です。次はどの期間を集計しますか。", False, "F16"),
+        ("作業を終えた。次はどの期間を集計しますか。", False, "F17"),
+        ("作業終わった。次はどの期間を集計しますか。", False, "F18"),
+        ("作業が完了した。次はどの期間を集計しますか。", False, "F19"),
+        ("作業が完了したので、次の対象期間を教えてください。", False, "F20"),
+        ("3月分は集計済みで、結果は添付のとおりです。次はどの期間を集計しますか。", False, "F21"),
+    ]
 
-    def test_prep_done_alone_is_not_clarification(self):
-        self.assertFalse(is_clarification_question("確認が完了しました。"))
+    def test_regression_table(self):
+        for text, expected, case_id in self.CASES:
+            with self.subTest(case=case_id, text=text):
+                self.assertIs(is_clarification_question(text), expected)
 
-    def test_bare_aggregation_done_stays_not_clarification(self):
-        self.assertFalse(is_clarification_question("データの期間を集計しました。対象期間はいつですか。"))
+    def test_split_keeps_terminators_and_brackets(self):
+        cases = [
+            ("元データは集計済みですか（はい／いいえ）？", ["元データは集計済みですか（はい／いいえ）？"]),
+            ("「対象期間はいつですか？」 集計を実行しました。", ["「対象期間はいつですか？」", "集計を実行しました。"]),
+            ("抽出の前に確認させてください。「先月」は 2026年3月のことでしょうか？ 先月分を使います",
+             ["抽出の前に確認させてください。", "「先月」は 2026年3月のことでしょうか？", "先月分を使います"]),
+            ("集計しました。？", ["集計しました。", "？"]),
+            ("作業が完了しました！？", ["作業が完了しました！？"]),
+            ("確認が完了しました。\n？", ["確認が完了しました。", "？"]),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(_split_sentences(text), expected)
 
-    def test_url_query_question_mark_is_still_ignored(self):
-        self.assertFalse(is_clarification_question("参考: https://example.com/search?q=1 を確認しました。"))
-
-    # Boundary tests: lock the current (known trade-off) behaviour of issue #8 cases 2-4.
-    def test_case2_please_confirm_conditions_list_is_not_clarification(self):
-        self.assertFalse(is_clarification_question("以下の条件をご確認ください。\n- 期間\n- 対象"))
-
-    def test_case3_followup_offer_without_completion_verb_still_passes(self):
-        self.assertTrue(is_clarification_question("詳細な内訳を提示しましょうか。"))
-
-    def test_case4_breakdown_offer_still_passes(self):
-        self.assertTrue(is_clarification_question("内訳も出しましょうか。"))
-
-
-    def test_interrogative_ending_of_a_done_word_is_still_a_question(self):
-        for q in ("元データはどの期間で集計しましたか？", "集計は完了しましたか？",
-                  "出力しましたか？", "保存済みですか？", "保存済みでしょうか？",
-                  "作業を終えましたか？", "作業が終わりましたか？", "作業が完了しましたか？"):
-            with self.subTest(q=q):
-                self.assertTrue(is_clarification_question(q))
-
-    def test_review_round2_clarifications(self):
-        for q in ("作業が完了していますか？", "保存済みのファイルはどれですか？", "保存済みですか。",
-                  "確認が完了しました。対象期間はいつですか。"):
-            with self.subTest(q=q):
-                self.assertTrue(is_clarification_question(q))
-
-    def test_review_round2_declaratives_stay_done(self):
-        for t in ("作業を終えました。", "作業が完了しました。期間はいつですか？", "作業が完了しています。",
-                  "集計しましたから、期間はいつですか。", "集計しましたが、期間はいつですか。",
-                  "期間はいつですか？ 集計しました。"):
-            with self.subTest(t=t):
-                self.assertFalse(is_clarification_question(t))
-
-    def test_plain_done_endings_are_still_done(self):
-        for t in ("集計しました", "保存済みです。対象期間はいつですか。"):
-            with self.subTest(t=t):
-                self.assertFalse(is_clarification_question(t))
-
-    def test_review_round3_clarifications(self):
-        for q in ("保存済みファイルを使ってよいですか？", "元データは集計済みですか（はい／いいえ）？",
-                  "元データは集計済みですか(はい／いいえ)？", "作業が完了していますか？"):
-            with self.subTest(q=q):
-                self.assertTrue(is_clarification_question(q))
-
-    def test_review_round3_declarative_sakugyo_endings_stay_done(self):
-        for t in ("作業完了です。次はどの期間を集計しますか。", "作業を終えた。次はどの期間を集計しますか。",
-                  "作業終わった。次はどの期間を集計しますか。", "作業が完了しました。期間はいつですか？",
-                  "集計しましたから、期間はいつですか。"):
-            with self.subTest(t=t):
-                self.assertFalse(is_clarification_question(t))
-
-    def test_review_round4_prenominal_sumi_is_clarification(self):
-        for q in ("対象は処理済みデータですか？", "集計済みかどうか教えていただけますか？",
-                  "変換済みレポートを使ってよいですか？", "保存済みのファイルはどれですか？",
-                  "保存済みでしょうか？", "保存済みですか。"):
-            with self.subTest(q=q):
-                self.assertTrue(is_clarification_question(q))
-
-    def test_review_round4_plain_past_kanryou_stays_done(self):
-        for t in ("作業が完了した。次はどの期間を集計しますか。", "保存済みです。対象期間はいつですか。",
-                  "保存済み。対象期間はいつですか。", "作業完了です。次はどの期間を集計しますか。"):
-            with self.subTest(t=t):
-                self.assertFalse(is_clarification_question(t))
+    def test_split_newline_resets_brackets_and_ascii_period_is_not_a_boundary(self):
+        self.assertEqual(_split_sentences("（閉じ忘れ\n1) sales.csv を v0.10.3 で読む。\r\n2) 次"),
+                         ["（閉じ忘れ", "1) sales.csv を v0.10.3 で読む。", "2) 次"])
+        self.assertEqual(_split_sentences(" \n "), [])
 
 
 class PathBinaryRegression(unittest.TestCase):
