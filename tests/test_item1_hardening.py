@@ -122,7 +122,8 @@ class ClarificationDoneCheck(unittest.TestCase):
 
     def test_interrogative_ending_of_a_done_word_is_still_a_question(self):
         for q in ("元データはどの期間で集計しましたか？", "集計は完了しましたか？",
-                  "出力しましたか？", "保存済みですか？", "保存済みでしょうか？"):
+                  "出力しましたか？", "保存済みですか？", "保存済みでしょうか？",
+                  "作業を終えましたか？", "作業が終わりましたか？", "作業が完了しましたか？"):
             with self.subTest(q=q):
                 self.assertTrue(is_clarification_question(q))
 
