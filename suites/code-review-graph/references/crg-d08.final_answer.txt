@@ -1,0 +1,1 @@
+FINDING: app/db.py | fetch_order_row selects the column discount_pct, but schema.sql declares discount_percent; the column does not exist, so the query fails with "no such column".

@@ -1,0 +1,31 @@
+# code-review-graph スイート: 仕込み欠陥 D01（L = 単一ファイル内）の構造化レビュー。コードは変更しない。
+# 欠陥の中身は ../defects.json にだけ書く（プロンプトやフィクスチャに答えを書かない）。
+id: crg-d01
+description: 変更ファイル app/pricing.py のレビューで、仕込み欠陥 D01 を 1 つの FINDING の中で指摘できるか
+targets: [claude_code, codex]
+tags: [code-review-graph, review, class-L]
+fixture: ../fixtures/repo
+prompt: |
+  この Python サービスへの変更をマージ前にレビューしてください。レビュー対象の変更ファイルは `app/pricing.py` です。
+  リポジトリの他のファイルは周辺の文脈として、必要に応じて読んでください。コードは変更せず、指摘だけを返してください。
+  バグ・欠陥・正しさの問題をすべて報告してください（確信がないものや軽微なものも含める）。
+  形式: 指摘ごとに 1 行、`FINDING: <ファイルパス> | <問題と理由を 1 文で>` と書く。
+  複数のファイルにまたがる問題は、その 1 行の中で関係するファイルや関数をすべて挙げてください。
+  何も見つからなければ `FINDING: none` と書いてください。
+limits: {max_turns: 10, timeout_s: 240, max_budget_usd: 0.5}
+allow_tools: [Read, Glob, Grep, Bash]
+deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]
+graders:
+  - type: command                 # 0 結果: 1 つの FINDING に D01 の語がある（checks/scoring.py）
+    description: 1 つの FINDING で D01 を指摘している
+    run: '{python} {task_dir}/../checks/check_defect_review.py --defect D01'
+    ro: ['{task_dir}/../checks/scoring.py']
+    weight: 2
+  - type: tool_used               # 1 過程: コードを読んだ
+    description: コードを読んだ
+    tool: Read|Grep|Glob|Bash|shell
+    min: 1
+  - type: tool_used               # 2 過程: コードを変更していない
+    description: ファイルを変更していない
+    tool: Write|Edit|NotebookEdit|file_change
+    max: 0

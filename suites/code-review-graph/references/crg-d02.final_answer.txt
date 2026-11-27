@@ -1,0 +1,1 @@
+FINDING: app/utils.py | parse_money calls float(raw) without handling malformed input, so a non-numeric string raises an unhandled ValueError to the caller.

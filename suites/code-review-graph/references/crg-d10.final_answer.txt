@@ -1,0 +1,1 @@
+FINDING: app/api.py | create reads payload["customerId"] (camelCase), but app/serializers.py order_to_dict and the rest of the wire format use customer_id (snake_case); the keys do not match and the request fails with KeyError.

@@ -1,0 +1,1 @@
+FINDING: app/pricing.py | apply_bulk_discount uses `quantity > threshold`, so an order of exactly BULK_THRESHOLD units gets no bulk discount; this is an off-by-one and should be `>=`.
