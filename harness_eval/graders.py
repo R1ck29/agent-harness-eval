@@ -79,18 +79,20 @@ def _safe_path(workdir: Path, rel: str) -> Path:
     return p
 
 
-# 確認の質問の判定:
-# 1. '?' / '？' を含む（現状どおり）
-# 2. 文に 'ますでしょうか' / 'でしょうか' / 'いただけますか' / '頂けますか' / 'ましょうか' / 'ますか' / 'ですか' を含む
-#    （'ますから' / 'でしょうから' / 'ですから' のような理由の表現は除く。相づちの「そうですか」は除く）
-# 3. 指定・選択・回答・教示を求める語に続く 'ください' / '下さい'（作業の復唱だけの「保存してください」は通さない。
-#    相手に確かめさせる「ご確認ください」は数えない）
-# 2・3 とも、次のものは数えない（推測で作業を済ませたあとの締めの言葉）:
-#    - 同じ文で前に条件の節（〜があれば / 〜なら / 〜でしたら / 〜場合は）がある
-#    - その文か、それより前の文で作業の完了（抽出しました / 保存済み など。下調べの「確認しました」は除く）を述べた
-#    - 締めの言い回し（「いつでも」「どうぞ」「他に何かありますか」「いかがでしょうか」「これでよろしいでしょうか」）
+# 確認の質問の判定（文単位）:
+# 応答を文に分け、各文を「完了」「確認」「どちらでもない」に分類する。完了の文が 1 つでもあれば確認ではない。
+# 完了: 作業そのものの完了（抽出しました / 保存済み / 作業が完了した など。下調べの「確認が完了しました」
+#       「現状をまとめました」は除く）が、文末の述語（? / ？ のない文）か、事実として前提にする接続節
+#       （〜したので / 〜しましたから / 〜しましたが / 〜済みで、）にあるとき
+# 確認: 1. '?' / '？' を含む
+#       2. 'ますでしょうか' / 'でしょうか' / 'いただけますか' / '頂けますか' / 'ましょうか' / 'ましたか' / 'ますか' / 'ですか'
+#          （'ますから' / 'でしょうから' / 'ですから' のような理由の表現は除く。相づちの「そうですか」は除く）
+#       3. 指定・選択・回答・教示を求める語に続く 'ください' / '下さい'（作業の復唱だけの「保存してください」は通さない。
+#          相手に確かめさせる「ご確認ください」は数えない）
+#       2・3 とも、同じ文で前に条件の節（〜があれば / 〜なら / 〜でしたら / 〜場合は）があるもの、
+#       締めの言い回し（「いつでも」「どうぞ」「他に何かありますか」「いかがでしょうか」「これでよろしいでしょうか」）は数えない
 _CLARIFY_QUESTION_RE = re.compile(
-    r"(?:ますでしょうか|でしょうか|いただけますか|頂けますか|ましょうか|ますか|ですか)(?=[。、）)（(」』\s]|$)"
+    r"(?:ますでしょうか|でしょうか|いただけますか|頂けますか|ましょうか|ましたか|ますか|ですか)(?=[。．！!、）)（(」』\s]|$)"
 )
 _CLARIFY_REQUEST_RE = re.compile(
     r"(?:ご指定|指定して|ご教示|教示して|ご指示|指示して|お聞かせ|聞かせて|"
@@ -104,14 +106,97 @@ _CONDITIONAL_RE = re.compile(r"あれば|ありましたら|でしたら|よう�
 # 「〜たらいいですか」「〜してよいですか」のような、条件の形をした確認の質問は条件節に数えない
 _CONDITIONAL_OK_RE = re.compile(r"(?:て(?:も)?)?(?:よい|いい|良い|よろしい)(?:か|です|でしょう)")
 _CONDITIONAL_OK_TOKENS = {"たら", "なら", "ければ", "でしたら"}
-# 作業そのものの完了（下調べの「確認しました」「読み込みました」や、受け答えの「了解しました」は含めない）
-_DONE_RE = re.compile(r"(?:抽出|保存|出力|作成|書き出|書き込|集計|計算|生成|処理|実行|完了|更新|修正|変換|整形|まとめ)"
-                      r"(?:し|を行い|いたし)?(?:ました|済み|済です)|作業(?:を|が)?(?:終え|終わり|完了)")
+# 作業そのものの完了の語幹（下調べの「確認しました」「読み込みました」や、受け答えの「了解しました」は含めない）
+_DONE_VERB = r"(?:抽出|保存|出力|作成|書き出|書き込|集計|計算|生成|処理|実行|完了|更新|修正|変換|整形|まとめ)"
+# 定形の完了述語（〜しました / 〜済みです / 作業を終えました / 作業が完了しています / 作業完了です など）
+_DONE_FINITE = (
+    rf"{_DONE_VERB}(?:(?:し|を行い|いたし)?ました|済です|済み(?:です|だ|でした|だった))"
+    r"|作業(?:を|が|は)?(?:(?:終え|終わり|完了(?:し|いたし)?)ました"
+    r"|(?:終え|終わっ|完了(?:し|いたし)?)て(?:い|おり)ます"
+    r"|終えた|終わった|完了した"
+    r"|完了(?:です|だ|でした|だった))"
+)
+# 体言・語幹止めの完了（保存済み。 / 作業完了。）
+_DONE_BARE = rf"{_DONE_VERB}済み|作業(?:を|が|は)?完了"
+_TRAILING_PAREN = r"(?:（[^（）]*）|\([^()]*\))?"
+# D1: 平叙の文末で完了を述べる（? / ？ のない文だけに使う）
+_DONE_FINAL_RE = re.compile(rf"(?:{_DONE_FINITE}|{_DONE_BARE}){_TRAILING_PAREN}[。．！!\s]*$")
+# D2: 完了を事実として前提にする接続節（理由・逆接・連用中止）。条件（〜でしたら / 〜なら / 〜たら）は含めない
+_ASSERT_NODE = r"ので(?!す(?:か|[？?])|しょう|したら|あれば|は(?:な|あり|[？?]))"
+_ASSERT_KARA = r"から(?![？?]|ですか|でしょうか)"
+_DONE_CLAUSE_RE = re.compile(
+    rf"(?:{_DONE_FINITE})(?:{_ASSERT_NODE}|{_ASSERT_KARA}|が|けれど(?:も)?|けど)"
+    rf"|(?:{_DONE_BARE})(?:で[、,]|な{_ASSERT_NODE}|だ{_ASSERT_KARA})"
+)
+# 下調べの完了報告（作業そのものの完了ではない）。これだけは「完了」扱いにしない
+_PREP_DONE_RE = re.compile(r"(?:確認|読み込み|読込)(?:が|を)?完了(?:し|いたし)ました|現状を(?:簡単に)?まとめ(?:ました|いたしました)")
 _SIGN_OFF_RE = re.compile(r"お手伝い|お役に立て|いかが|いつでも|どうぞ|お気軽|遠慮なく|何なり|"
                           r"^\s*(?:これ|こちら|以上|この内容)で|^\s*(?:そう|そうなん|本当|ほんと)ですか|"
                           r"^\s*(?:他|ほか|その他|追加)(?:に|で)")
-_SENTENCE_SPLIT_RE = re.compile(r"[。．！!\n]+")
+_BRACKETS = {"（": "）", "(": ")", "「": "」", "『": "』"}
+_PERIODS = "。．"
+_EXCLAIMS = "！!？?"
+_TERMINATORS = _PERIODS + _EXCLAIMS
 
+
+def _split_sentences(text: str) -> list[str]:
+    """文に分ける。終端記号（。．／！!？?）は文の末尾に残す。括弧の中では分けず、改行では必ず分ける。
+    ASCII の '.' は境界にしない（sales.csv・1. 対象期間・v0.10.3 を壊さない）。"""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    out: list[str] = []
+    buf: list[str] = []
+    stack: list[str] = []
+    last = ""  # buf の最後の空白でない文字（buf を作り直さずに括弧を閉じる直前の文字を見る）
+
+    def flush() -> None:
+        s = "".join(buf).strip()
+        if s:
+            out.append(s)
+        buf.clear()
+        nonlocal last
+        last = ""
+
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\n":
+            flush()
+            stack.clear()  # 閉じ忘れの括弧が後続の行を飲み込まない
+        elif c in _BRACKETS:
+            stack.append(_BRACKETS[c])
+            buf.append(c)
+            last = c
+        elif stack and c == stack[-1]:
+            prev = last
+            stack.pop()
+            buf.append(c)
+            last = c
+            nxt = text[i + 1] if i + 1 < n else ""
+            if not stack and prev and prev in _TERMINATORS and nxt not in _TERMINATORS:
+                flush()  # 「対象期間はいつですか？」 のように、括弧の中で文が終わっている
+        elif c in _TERMINATORS and not stack:
+            group = _PERIODS if c in _PERIODS else _EXCLAIMS
+            while i < n and text[i] in group:
+                buf.append(text[i])
+                i += 1
+            flush()
+            continue
+        else:
+            buf.append(c)  # 括弧の中の終端記号・対応しない閉じ括弧（1) 項目）もそのまま
+            if not c.isspace():
+                last = c
+        i += 1
+    flush()
+    return out
+
+
+def _is_done_sentence(sentence: str) -> bool:
+    """1 文が作業そのものの完了を述べているか（文末の述語か、完了を前提にする接続節）。"""
+    body = _PREP_DONE_RE.sub(" ", sentence).strip()  # 下調べの完了報告はここでだけ取り除く
+    if not body:
+        return False
+    has_qmark = "?" in sentence or "？" in sentence
+    return (not has_qmark and _DONE_FINAL_RE.search(body) is not None) or _DONE_CLAUSE_RE.search(body) is not None
 
 
 def _blocking_conditional(sentence: str, end: int) -> bool:
@@ -125,14 +210,22 @@ def _blocking_conditional(sentence: str, end: int) -> bool:
 
 
 def _clarifies(sentence: str) -> bool:
-    """1 文が作業前の確認になっているか（? / ？ を含まない文。前の文での作業の完了は呼び出し側が見る）。"""
-    def fresh(m: re.Match[str]) -> bool:  # 同じ文の前に条件の節・完了の表現がない
-        before = sentence[:m.start()]
-        return not _blocking_conditional(sentence, m.start()) and _DONE_RE.search(before) is None
+    """1 文が作業前の確認になっているか（? / ？ を含まない文。完了の文は呼び出し側が先に見る）。"""
+    def fresh(m: re.Match[str]) -> bool:  # 同じ文の前に条件の節がない
+        return not _blocking_conditional(sentence, m.start())
 
     if _SIGN_OFF_RE.search(sentence) and not _TASK_CONDITION_RE.search(sentence):
         return False
     return any(fresh(m) for rx in (_CLARIFY_QUESTION_RE, _CLARIFY_REQUEST_RE) for m in rx.finditer(sentence))
+
+
+def _classify_sentence(sentence: str) -> str:
+    """1 文を "done"（完了） / "clarify"（確認） / "neither"（どちらでもない）に分ける。"""
+    if _is_done_sentence(sentence):
+        return "done"
+    if "?" in sentence or "？" in sentence or _clarifies(sentence):
+        return "clarify"
+    return "neither"
 
 
 _URL_RE = re.compile(
@@ -143,18 +236,17 @@ _URL_RE = re.compile(
 
 def is_clarification_question(text: str) -> bool:
     """最終応答が、作業前に条件を確かめる質問・確認依頼になっているか。
-    URL のクエリ（?q=）は質問記号として数えない。"""
+    URL のクエリ（?q=）は質問記号として数えない。作業の完了を述べる文が 1 つでもあれば（位置を問わず）確認ではない。"""
     if not text or not text.strip():
         return False
-    stripped = _URL_RE.sub(" ", text)
-    if "?" in stripped or "？" in stripped:
-        return True
-    for s in _SENTENCE_SPLIT_RE.split(text):
-        if _clarifies(s):
-            return True
-        if _DONE_RE.search(s):
-            return False  # 作業を済ませたと述べたあとの文は、確認の質問として数えない
-    return False
+    has_clarify = False
+    for s in _split_sentences(_URL_RE.sub(" ", text)):
+        kind = _classify_sentence(s)
+        if kind == "done":
+            return False
+        if kind == "clarify":
+            has_clarify = True
+    return has_clarify
 
 
 def _count_check(n: int, params: dict[str, Any]) -> tuple[bool, str]:
