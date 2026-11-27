@@ -48,6 +48,9 @@ def _jsonl(lines: Iterable[str], warnings: list[str]) -> Iterable[dict[str, Any]
 
 def _classify_message(msg: str) -> str:
     m = msg.lower()
+    # サンドボックス（bwrap）の起動失敗・ディスク満杯は実行環境の問題で、エージェントの失敗ではない。先に見ないと path 中の 429 や credentials.json が誤分類される
+    if re.search(r"\bbwrap:|no space left on device", m):
+        return "harness_error"
     # 利用上限（サブスクリプションの上限・クレジット切れ）。数時間戻らないので再試行せず、結果から除外する
     if re.search(r"usage limit|hit your (?:usage|rate) limit|insufficient_quota|exceeded your current quota|"
                  r"credit balance is too low|purchase more credits", m):
@@ -58,9 +61,6 @@ def _classify_message(msg: str) -> str:
         return "overloaded"
     if re.search(r"\b401\b|\b403\b|unauthori[sz]ed|not logged in|invalid api key|authentication|login required|credential", m):
         return "auth"
-    # サンドボックス（bwrap）の起動失敗・ディスク満杯は実行環境の問題で、エージェントの失敗ではない
-    if re.search(r"\bbwrap:|no space left on device", m):
-        return "harness_error"
     return "agent_error"
 
 

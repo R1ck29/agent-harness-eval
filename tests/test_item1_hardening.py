@@ -120,6 +120,18 @@ class ClarificationDoneCheck(unittest.TestCase):
         self.assertTrue(is_clarification_question("内訳も出しましょうか。"))
 
 
+    def test_interrogative_ending_of_a_done_word_is_still_a_question(self):
+        for q in ("元データはどの期間で集計しましたか？", "集計は完了しましたか？",
+                  "出力しましたか？", "保存済みですか？", "保存済みでしょうか？"):
+            with self.subTest(q=q):
+                self.assertTrue(is_clarification_question(q))
+
+    def test_plain_done_endings_are_still_done(self):
+        for t in ("集計しました", "保存済みです。対象期間はいつですか。"):
+            with self.subTest(t=t):
+                self.assertFalse(is_clarification_question(t))
+
+
 class PathBinaryRegression(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -189,6 +201,14 @@ class ClassifyStderr(unittest.TestCase):
     def test_harness_error_is_excluded_and_invalidating(self):
         self.assertIn("harness_error", EXCLUDED_ERRORS)
         self.assertIn("harness_error", INVALIDATING)
+
+
+class ClassifyStderrEnvPrecedence(unittest.TestCase):
+    def test_environment_diagnostics_beat_generic_auth_and_rate_limit_words(self):
+        self.assertEqual(classify_stderr("OSError: [Errno 28] No space left on device: credentials.json"),
+                         "harness_error")
+        self.assertEqual(classify_stderr("bwrap: Can't bind /work/429: No such file or directory"),
+                         "harness_error")
 
 
 class ErrorRateGuard(unittest.TestCase):
