@@ -576,6 +576,12 @@ def _kill_tree(p: subprocess.Popen) -> None:
                 pass
     except ProcessLookupError:
         p.poll()
+    except PermissionError:  # macOS: グループの後始末の競合で EPERM になることがある。生きていればリーダーだけでも落とす
+        if p.poll() is None:
+            try:
+                p.kill()
+            except OSError:
+                pass
 
 
 _RUNNING: set = set()

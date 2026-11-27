@@ -107,6 +107,8 @@ _CONDITIONAL_OK_TOKENS = {"たら", "なら", "ければ", "でしたら"}
 # 作業そのものの完了（下調べの「確認しました」「読み込みました」や、受け答えの「了解しました」は含めない）
 _DONE_RE = re.compile(r"(?:抽出|保存|出力|作成|書き出|書き込|集計|計算|生成|処理|実行|完了|更新|修正|変換|整形|まとめ)"
                       r"(?:し|を行い|いたし)?(?:ました|済み|済です)|作業(?:を|が)?(?:終え|終わり|完了)")
+# 下調べの完了報告（作業そのものの完了ではない）。これだけは「完了」扱いにしない
+_PREP_DONE_RE = re.compile(r"(?:確認|読み込み|読込)(?:が|を)?完了(?:し|いたし)ました|現状を(?:簡単に)?まとめ(?:ました|いたしました)")
 _SIGN_OFF_RE = re.compile(r"お手伝い|お役に立て|いかが|いつでも|どうぞ|お気軽|遠慮なく|何なり|"
                           r"^\s*(?:これ|こちら|以上|この内容)で|^\s*(?:そう|そうなん|本当|ほんと)ですか|"
                           r"^\s*(?:他|ほか|その他|追加)(?:に|で)")
@@ -146,10 +148,12 @@ def is_clarification_question(text: str) -> bool:
     URL のクエリ（?q=）は質問記号として数えない。"""
     if not text or not text.strip():
         return False
-    stripped = _URL_RE.sub(" ", text)
+    stripped = _PREP_DONE_RE.sub(" ", _URL_RE.sub(" ", text))
+    if _DONE_RE.search(stripped):
+        return False  # 質問があっても、作業を済ませたと述べる文が（下調べの報告を除いて）あれば確認ではない
     if "?" in stripped or "？" in stripped:
         return True
-    for s in _SENTENCE_SPLIT_RE.split(text):
+    for s in _SENTENCE_SPLIT_RE.split(stripped):
         if _clarifies(s):
             return True
         if _DONE_RE.search(s):

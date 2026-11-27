@@ -58,6 +58,9 @@ def _classify_message(msg: str) -> str:
         return "overloaded"
     if re.search(r"\b401\b|\b403\b|unauthori[sz]ed|not logged in|invalid api key|authentication|login required|credential", m):
         return "auth"
+    # サンドボックス（bwrap）の起動失敗・ディスク満杯は実行環境の問題で、エージェントの失敗ではない
+    if re.search(r"\bbwrap:|no space left on device", m):
+        return "harness_error"
     return "agent_error"
 
 
