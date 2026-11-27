@@ -1,0 +1,6 @@
+{
+  "worker_threads": 8,
+  "pool_size": 2,
+  "pool_timeout_s": 1,
+  "dns_cache_ttl_s": 0
+}

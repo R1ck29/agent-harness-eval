@@ -1,0 +1,6 @@
+2026-03-10 09:00:02 INFO  deploy v1.4.1 started
+2026-03-10 09:00:09 INFO  deploy v1.4.1 finished (pool_size=8 worker_threads=8 dns_cache_ttl_s=300)
+2026-03-14 17:30:11 INFO  deploy v1.4.2 started
+2026-03-14 17:30:12 INFO  config change: pool_size 8 -> 2 (reduce idle connections)
+2026-03-14 17:30:12 INFO  config change: dns_cache_ttl_s 300 -> 0 (follow resolver changes faster)
+2026-03-14 17:30:20 INFO  deploy v1.4.2 finished

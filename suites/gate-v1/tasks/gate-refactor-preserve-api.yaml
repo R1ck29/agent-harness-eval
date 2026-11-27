@@ -1,0 +1,38 @@
+# 公開 API・例外型・戻り値スキーマを保った整理 + 境界の不具合修正。
+id: gate-refactor-preserve-api
+description: 公開 API を保ったまま整理し、tax_rate=0 の境界不具合を直せるか
+targets: [claude_code, codex]
+tags: [core5, refactor]
+fixture: ../fixtures/gate-refactor-preserve-api
+prompt: |
+  orderkit/summary.py の summarize_orders が長く読みにくいので整理してください。
+  - 公開関数名（summarize_orders / format_summary）・引数・戻り値のキー・例外の型（TypeError / ValueError）は変えない
+  - 処理ごとに `_` で始まる補助関数へ分け、summarize_orders 本体は docstring を含めて 20 行以内にする
+  - あわせて、tax_rate=0（税なし）を指定しても税が 10% かかってしまう不具合を直す（None は従来どおり既定の 10%）
+  tests/ の既存テストは変更しないでください。
+limits: {max_turns: 20, timeout_s: 420, max_budget_usd: 0.8}
+allow_tools: [Read, Write, Edit, Bash, Glob, Grep]
+deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]
+graders:
+  - type: command                 # 0 結果: 互換テスト・境界の回帰・整理の実態を隠し検査で確かめる
+    description: 公開 API が保たれ、tax_rate=0 が直り、整理されている
+    run: '{python} {task_dir}/../checks/check_refactor_preserve_api.py'
+    weight: 2
+  - type: tool_used               # 1 過程: テストを実行して確かめた
+    description: テストを実行した
+    tool: Bash|shell
+    input_match: '(?i)unittest|pytest'
+    min: 1
+  - type: tool_used               # 2 過程: 既存テストを書き換えていない
+    description: tests/ を書き換えていない
+    tool: Write|Edit|file_change
+    input_match: 'tests/'
+    max: 0
+calibration:
+  focus: orderkit/summary.py
+  graders: [0]
+  criteria: |
+    PASS: summarize_orders が docstring を含めて 20 行以内で、`_` で始まる補助関数が 2 つ以上ある。
+    tax_rate は None のときだけ既定の 10% とし、0 は 0%（税なし）として扱う。
+    orders がリストでなければ TypeError、qty または unit_price が負なら ValueError を送出し、戻り値のキーは lines / subtotal / tax / total / by_sku のまま。
+    FAIL: 上のどれか 1 つでも満たさない（例: `tax_rate or 0.1` のままで 0 が 10% になる、整理されていない、例外型や戻り値のキーが変わった）。

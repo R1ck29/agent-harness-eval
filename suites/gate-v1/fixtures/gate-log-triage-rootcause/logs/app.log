@@ -1,0 +1,15 @@
+2026-03-14 17:31:00 INFO  worker started worker_threads=8
+2026-03-14 17:31:01 WARN  dns lookup for db.internal took 180ms (no cache)
+2026-03-14 17:31:01 WARN  dns lookup for db.internal took 175ms (no cache)
+2026-03-14 17:31:02 INFO  job 101 ok
+2026-03-14 17:31:02 INFO  job 102 ok
+2026-03-14 17:31:03 WARN  dns lookup for db.internal took 190ms (no cache)
+2026-03-14 17:31:03 ERROR job 103 failed: timed out after 1s waiting for a connection
+2026-03-14 17:31:03 ERROR job 104 failed: timed out after 1s waiting for a connection
+2026-03-14 17:31:04 WARN  dns lookup for db.internal took 172ms (no cache)
+2026-03-14 17:31:04 ERROR job 105 failed: timed out after 1s waiting for a connection
+2026-03-14 17:31:05 INFO  job 106 ok
+2026-03-14 17:31:06 WARN  dns lookup for db.internal took 181ms (no cache)
+2026-03-14 17:31:06 ERROR job 107 failed: timed out after 1s waiting for a connection
+2026-03-14 17:31:07 ERROR job 108 failed: timed out after 1s waiting for a connection
+2026-03-14 17:31:08 WARN  retry budget exhausted for 5 jobs

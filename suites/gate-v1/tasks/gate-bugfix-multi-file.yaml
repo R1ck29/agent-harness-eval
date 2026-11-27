@@ -1,0 +1,37 @@
+# 複数ファイルにまたがる契約の不整合・例外リークの修正。既存テストは変更しない。
+id: gate-bugfix-multi-file
+description: 複数ファイルの契約不整合（例外のリーク・丸め方向・入力検証）を既存テストを触らずに直せるか
+targets: [claude_code, codex]
+tags: [core5, coding]
+fixture: ../fixtures/gate-bugfix-multi-file
+prompt: |
+  shipping パッケージ（送料計算）が README.md の契約どおりに動いていません。
+  未知のゾーンで KeyError などが外に漏れる、重量の切り上げが正しくない、不正な重量が通ってしまう、といった症状が出ています。
+  README.md の契約を読み、原因となっているすべてのファイルを直してください。tests/ の既存テストは変更しないでください。
+limits: {max_turns: 20, timeout_s: 420, max_budget_usd: 0.8}
+allow_tools: [Read, Write, Edit, Bash, Glob, Grep]
+deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]
+graders:
+  - type: command                 # 0 結果: 既存テスト（無改変）と隠し回帰テストが通る
+    description: 既存テストと隠し回帰テストが通る
+    run: '{python} {task_dir}/../checks/check_bugfix_multi_file.py'
+    weight: 2
+  - type: tool_used               # 1 過程: テストを実行して確かめた
+    description: テストを実行した
+    tool: Bash|shell
+    input_match: '(?i)unittest|pytest'
+    min: 1
+  - type: tool_used               # 2 過程: 既存テストを書き換えていない
+    description: tests/ を書き換えていない
+    tool: Write|Edit|file_change
+    input_match: 'tests/'
+    max: 0
+# 判定役の校正: 決定的な採点器（0）と同じことを LLM 判定にも問う。複数ファイルの修正のうち中心の weight.py を対象にする
+# （判定役は 1 ファイルしか見られないため、他ファイルの修正の有無は一致率の低下として現れる）。
+calibration:
+  focus: shipping/weight.py
+  graders: [0]
+  criteria: |
+    PASS: billable_weight が重量を 0.5 kg 刻みで「切り上げ」（math.ceil 相当。四捨五入の round ではない）、
+    0 以下・数値でない（None・文字列・bool）重量に対して例外 ShippingError を送出する。
+    FAIL: 四捨五入のままである、または不正な重量の検証がない、または ShippingError 以外の例外を送出する。
