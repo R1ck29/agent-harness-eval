@@ -158,6 +158,19 @@ class ClarificationDoneCheck(unittest.TestCase):
             with self.subTest(t=t):
                 self.assertFalse(is_clarification_question(t))
 
+    def test_review_round4_prenominal_sumi_is_clarification(self):
+        for q in ("対象は処理済みデータですか？", "集計済みかどうか教えていただけますか？",
+                  "変換済みレポートを使ってよいですか？", "保存済みのファイルはどれですか？",
+                  "保存済みでしょうか？", "保存済みですか。"):
+            with self.subTest(q=q):
+                self.assertTrue(is_clarification_question(q))
+
+    def test_review_round4_plain_past_kanryou_stays_done(self):
+        for t in ("作業が完了した。次はどの期間を集計しますか。", "保存済みです。対象期間はいつですか。",
+                  "保存済み。対象期間はいつですか。", "作業完了です。次はどの期間を集計しますか。"):
+            with self.subTest(t=t):
+                self.assertFalse(is_clarification_question(t))
+
 
 class PathBinaryRegression(unittest.TestCase):
     def setUp(self):
