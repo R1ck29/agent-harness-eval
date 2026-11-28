@@ -1,0 +1,19 @@
+{
+  "_doc": "Seeded-defect manifest. 'changed' = file that appears in the PR diff. 'evidence' = file(s) that MUST be present in the review context for the defect to be detectable at all. 'class': L=local (evidence==changed), X=cross-file with a static import/call edge, H=cross-file coupled only through strings/dynamic dispatch (no static edge). 'static_edge' = our a-priori prediction of whether a tree-sitter import/call graph links changed->evidence.",
+  "defects": [
+    {"id": "D01", "class": "L", "changed": "app/pricing.py",     "evidence": ["app/pricing.py"],     "static_edge": true,  "desc": "Off-by-one: '>' should be '>=' for the bulk-discount threshold."},
+    {"id": "D02", "class": "L", "changed": "app/utils.py",       "evidence": ["app/utils.py"],       "static_edge": true,  "desc": "parse_money lets ValueError escape on malformed input."},
+    {"id": "D03", "class": "L", "changed": "app/orders.py",      "evidence": ["app/orders.py"],      "static_edge": true,  "desc": "Local rebinding shadows the module-level STATUS_OPEN."},
+    {"id": "D04", "class": "L", "changed": "app/db.py",          "evidence": ["app/db.py"],          "static_edge": true,  "desc": "Connection leaks on the exception path; close() is unreachable."},
+
+    {"id": "D05", "class": "X", "changed": "app/pricing.py",     "evidence": ["app/orders.py"],      "static_edge": true,  "desc": "compute_total gained a required param; orders.create_order still calls it with two args."},
+    {"id": "D06", "class": "X", "changed": "app/repository.py",  "evidence": ["app/orders.py"],      "static_edge": true,  "desc": "get_order now returns None instead of raising; caller dereferences it."},
+    {"id": "D07", "class": "X", "changed": "app/models.py",      "evidence": ["app/serializers.py"], "static_edge": true,  "desc": "Order.discount renamed to discount_percent; serializer still reads .discount."},
+
+    {"id": "D08", "class": "H", "changed": "app/db.py",          "evidence": ["schema.sql"],         "static_edge": false, "desc": "SQL selects discount_pct; the DDL column is discount_percent. String-to-DDL coupling."},
+    {"id": "D09", "class": "H", "changed": "app/events.py",      "evidence": ["app/handlers.py"],    "static_edge": false, "desc": "Publishes topic 'order.created'; subscriber registers 'order_created'. Coupling is the literal, not a call."},
+    {"id": "D10", "class": "H", "changed": "app/serializers.py", "evidence": ["app/api.py"],         "static_edge": false, "desc": "Serializer emits 'customer_id'; api.py reads 'customerId'. No import or call path links the two."},
+    {"id": "D11", "class": "H", "changed": "app/handlers.py",    "evidence": ["app/tasks.py"],       "static_edge": false, "desc": "on_order_created is reached only via getattr() on a config-built name; no static call edge."},
+    {"id": "D12", "class": "H", "changed": "app/config.py",      "evidence": ["app/repository.py"],  "static_edge": false, "desc": "MAX_RETRIES=0 silently disables retry; the dependency is a dict string key, not a symbol reference."}
+  ]
+}

@@ -1,0 +1,1 @@
+FINDING: app/db.py | fetch_order_row opens a connection and only closes it on the happy path; if cursor() or execute() raises, the connection leaks. Use try/finally or a context manager.

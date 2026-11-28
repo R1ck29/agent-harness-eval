@@ -1,0 +1,36 @@
+# code-review-graph スイート: 仕込み欠陥 D01（L = 単一ファイル内）の構造化レビュー。コードは変更しない。
+# 欠陥の中身は ../defects.json にだけ書く（プロンプトやフィクスチャに答えを書かない）。
+id: crg-d01
+description: 変更ファイル app/pricing.py のレビューで、仕込み欠陥 D01 を 1 つの FINDING の中で指摘できるか
+targets: [claude_code, codex]
+tags: [code-review-graph, review, class-L]
+fixture: ../fixtures/repo
+prompt: |
+  You are reviewing a change to a Python service before it is merged.
+  The repository is your working directory. The file under review is: `app/pricing.py`.
+  Read other files in the repository as context when needed. Do not modify any files; report findings only.
+  Report every bug, defect, or correctness problem you can find in that change,
+  including problems it causes in other files. Include issues you are uncertain
+  about or consider low severity - coverage matters more than precision here, and
+  a separate step will filter your findings.
+  For each finding, write one line in exactly this form:
+  FINDING: <file path> | <one sentence describing the problem>
+  If a problem involves other files, name those files and symbols in that same FINDING line.
+  If you find nothing, write: FINDING: none
+limits: {max_turns: 10, timeout_s: 240, max_budget_usd: 0.5}
+allow_tools: [Read, Glob, Grep, Bash]
+deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]
+graders:
+  - type: command                 # 0 結果: 1 つの FINDING に D01 の語がある（checks/scoring.py）
+    description: 1 つの FINDING で D01 を指摘している
+    run: '{python} {task_dir}/../checks/check_defect_review.py --defect D01'
+    ro: ['{task_dir}/../checks/scoring.py']
+    weight: 2
+  - type: tool_used               # 1 過程: コードを読んだ
+    description: コードを読んだ
+    tool: Read|Grep|Glob|Bash|shell
+    min: 1
+  - type: tool_used               # 2 過程: コードを変更していない
+    description: ファイルを変更していない
+    tool: Write|Edit|NotebookEdit|file_change
+    max: 0

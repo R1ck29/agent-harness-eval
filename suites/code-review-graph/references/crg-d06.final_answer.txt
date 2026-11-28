@@ -1,0 +1,1 @@
+FINDING: app/repository.py | get_order now returns None when no row is found, but app/orders.py get_order_summary dereferences order.id without a check, raising AttributeError on a missing order.

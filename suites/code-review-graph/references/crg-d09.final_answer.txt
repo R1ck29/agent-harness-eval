@@ -1,0 +1,1 @@
+FINDING: app/events.py | publish_order_created emits the topic order.created (DEFAULT_TOPIC), but app/handlers.py subscribes to 'order_created'; the topics do not match, so the handler is silently never called.

@@ -1,0 +1,1 @@
+FINDING: app/pricing.py | compute_total gained a required tax_rate parameter, but app/orders.py create_order still calls compute_total(quantity, unit_cents) with two arguments, which raises TypeError (missing argument).
