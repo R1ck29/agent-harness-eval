@@ -16,7 +16,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -79,7 +82,9 @@ class TestDeterministicChecks(unittest.TestCase):
         self.assertEqual(len(defects), 12)
         self.assertEqual(set(scoring.MATCH), {d["id"] for d in defects} - {"D03"})
         for d in defects:
-            self.assertTrue((REPO / d["changed"]).is_file(), d["changed"])
+            for rel in [d["changed"], *d["evidence"]]:
+                path = (REPO / rel).resolve()
+                self.assertTrue(path.is_relative_to(REPO) and path.is_file(), f"{d['id']}: {rel}")
             if d["id"] in scoring.MATCH:  # ファイル跨ぎ（X/H）だけが相手側アンカーの第 3 グループを持つ
                 self.assertEqual(len(scoring.MATCH[d["id"]]) == 3, d["class"] != "L", d["id"])
 
@@ -151,11 +156,26 @@ class TestTasks(unittest.TestCase):
                 self.assertEqual({g.kind for g in t.graders}, {"outcome", "process"})
                 self.assertTrue(any(g.type in PROCESS_GRADERS for g in t.graders))
                 self.assertEqual(t.fixture.resolve(), REPO.resolve())
-                cmd = next(g for g in t.graders if g.type == "command")
-                self.assertTrue(cmd.params["run"].endswith(f"--defect {t.id[4:].upper()}"))
+                commands = [g for g in t.graders if g.type == "command"]
+                self.assertTrue(commands)
+                for cmd in commands:
+                    self.assertTrue(cmd.params["run"].endswith(f"--defect {t.id[4:].upper()}"))
+                    self.assertEqual(cmd.params.get("ro"), ["{task_dir}/../checks/scoring.py"])
                 self.assertTrue(any(g.type == "tool_used" and g.params.get("max") == 0 and "Write" in g.params["tool"]
                                     for g in t.graders))
                 self.assertNotIn("llm", {g.type for g in t.graders})
+
+    def test_prompts_are_english_finding_instructions(self):
+        """scoring.MATCH は英語の語だけを見るので、プロンプトも移植元と同じく英語で FINDING 行を求める。"""
+        defects = {d["id"]: d for d in json.loads((SUITE / "defects.json").read_text(encoding="utf-8"))["defects"]}
+        for t in TASKS:
+            with self.subTest(task=t.id):
+                self.assertIn("Report every bug, defect, or correctness problem", t.prompt)
+                self.assertIn("FINDING: <file path> | <one sentence describing the problem>", t.prompt)
+                self.assertIn("FINDING: none", t.prompt)
+                self.assertIn("Do not modify any files", t.prompt)
+                self.assertIn(f"`{defects[t.id[4:].upper()]['changed']}`", t.prompt)
+                self.assertNotIn("graph", t.prompt.lower())
 
     def test_lint_has_no_warnings(self):
         self.assertEqual(lint(TASKS, load_profiles([str(ROOT / "examples" / "profiles")])), [])
@@ -190,18 +210,19 @@ class TestCheckDefectReview(unittest.TestCase):
         self.assertEqual(self.grade(good, defect="D99").returncode, 2)
 
 
+def _stub_cli(cmd):
+    if cmd[1] == "impact":
+        return 0, json.dumps({"impacted_files": [str(REPO / f) for f in cmd[cmd.index("--files") + 1:-2]]}), ""
+    if cmd[-1] == "compute_total":
+        return 0, json.dumps({"results": [{"file_path": str(REPO / "app" / "orders.py")}]}), ""
+    return 0, json.dumps({"results": []}), ""
+
+
 class TestContextRecall(unittest.TestCase):
     def test_measure_with_stubbed_cli(self):
         """impact は変更ファイルだけを返し、callers_of は compute_total の呼び出し元 orders.py を返すスタブ。"""
-        def stub(cmd):
-            if cmd[1] == "impact":
-                return 0, json.dumps({"impacted_files": [str(REPO / f) for f in cmd[cmd.index("--files") + 1:-2]]}), ""
-            if cmd[-1] == "compute_total":
-                return 0, json.dumps({"results": [{"file_path": str(REPO / "app" / "orders.py")}]}), ""
-            return 0, json.dumps({"results": []}), ""
-
         defects = recall.load_defects(SUITE / "defects.json")
-        result = recall.measure(REPO, defects, cli="stub", run=stub)
+        result = recall.measure(REPO, defects, cli="stub", run=_stub_cli)
         rows = {r["id"]: r for r in result["rows"]}
         self.assertEqual(result["repo_files"], 15)
         self.assertEqual(result["repo"], "repo")  # 絶対パスは記録しない
@@ -213,6 +234,24 @@ class TestContextRecall(unittest.TestCase):
         self.assertGreater(rows["D05"]["graph_payload_tokens"], 0)
         self.assertIn("recall by class", recall.report(result))
         self.assertEqual(len(recall.load_defects(SUITE / "defects.json", "FIRES")), 9)
+
+    def test_patching_run_cli_is_honored(self):
+        """既定の run は呼び出し時に run_cli を引くので、patch.object で差し替えた CLI が measure と main で使われる。"""
+        calls = []
+
+        def spy(cmd):
+            calls.append(cmd)
+            return _stub_cli(cmd)
+
+        with mock.patch.object(recall, "run_cli", spy):
+            result = recall.measure(REPO, recall.load_defects(SUITE / "defects.json", "FIRES"), cli="stub")
+            self.assertTrue(calls)
+            self.assertTrue({r["id"]: r for r in result["rows"]}["D05"]["graph+callers_hit"])
+            calls.clear()
+            with redirect_stdout(StringIO()) as out:
+                self.assertEqual(recall.main(["--fires-only", "--cli", "stub"]), 0)
+            self.assertTrue(calls)
+            self.assertIn("recall by class", out.getvalue())
 
     def test_cli_failure_is_an_error(self):
         with self.assertRaises(RuntimeError):

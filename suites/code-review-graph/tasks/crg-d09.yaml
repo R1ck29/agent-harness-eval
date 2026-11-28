@@ -6,12 +6,17 @@ targets: [claude_code, codex]
 tags: [code-review-graph, review, class-H]
 fixture: ../fixtures/repo
 prompt: |
-  この Python サービスへの変更をマージ前にレビューしてください。レビュー対象の変更ファイルは `app/events.py` です。
-  リポジトリの他のファイルは周辺の文脈として、必要に応じて読んでください。コードは変更せず、指摘だけを返してください。
-  バグ・欠陥・正しさの問題をすべて報告してください（確信がないものや軽微なものも含める）。
-  形式: 指摘ごとに 1 行、`FINDING: <ファイルパス> | <問題と理由を 1 文で>` と書く。
-  複数のファイルにまたがる問題は、その 1 行の中で関係するファイルや関数をすべて挙げてください。
-  何も見つからなければ `FINDING: none` と書いてください。
+  You are reviewing a change to a Python service before it is merged.
+  The repository is your working directory. The file under review is: `app/events.py`.
+  Read other files in the repository as context when needed. Do not modify any files; report findings only.
+  Report every bug, defect, or correctness problem you can find in that change,
+  including problems it causes in other files. Include issues you are uncertain
+  about or consider low severity - coverage matters more than precision here, and
+  a separate step will filter your findings.
+  For each finding, write one line in exactly this form:
+  FINDING: <file path> | <one sentence describing the problem>
+  If a problem involves other files, name those files and symbols in that same FINDING line.
+  If you find nothing, write: FINDING: none
 limits: {max_turns: 10, timeout_s: 240, max_budget_usd: 0.5}
 allow_tools: [Read, Glob, Grep, Bash]
 deny_tools: ["Bash(ssh *)", "Bash(curl *)", "Bash(wget *)", WebFetch, WebSearch]

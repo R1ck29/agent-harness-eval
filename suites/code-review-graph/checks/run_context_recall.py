@@ -67,8 +67,9 @@ def _rel(root: Path, fp: str):
         return None
 
 
-def graph_context(cli: str, root: Path, changed, depth: int, run=run_cli):
+def graph_context(cli: str, root: Path, changed, depth: int, run=None):
     """Files code-review-graph says are in the blast radius of `changed`, and the payload tokens."""
+    run = run_cli if run is None else run
     code, out, err = run([cli, "impact", "--repo", str(root), "--files", *changed, "--depth", str(depth)])
     if code != 0:
         raise RuntimeError(err[-500:])
@@ -83,7 +84,7 @@ def graph_context(cli: str, root: Path, changed, depth: int, run=run_cli):
     return sorted(files), est_tokens(out)
 
 
-def caller_context(cli: str, root: Path, changed, base_files, run=run_cli):
+def caller_context(cli: str, root: Path, changed, base_files, run=None):
     """`impact` + every file containing a *caller* of a symbol defined in the changed
     files, via the symbol-level `query callers_of`.
 
@@ -91,6 +92,7 @@ def caller_context(cli: str, root: Path, changed, base_files, run=run_cli):
     blast radius is derived from file-level IMPORTS edges and silently drops
     callers that used `from package import module`.
     """
+    run = run_cli if run is None else run
     files = set(base_files)
     extra_tokens = 0
     for rel in changed:
@@ -123,8 +125,9 @@ def caller_context(cli: str, root: Path, changed, base_files, run=run_cli):
     return sorted(files), extra_tokens
 
 
-def measure(root: Path, defects, cli: str = "code-review-graph", depth: int = 2, run=run_cli):
+def measure(root: Path, defects, cli: str = "code-review-graph", depth: int = 2, run=None):
     """One row per defect: hit / tokens / missing per strategy, plus graph payload tokens."""
+    run = run_cli if run is None else run
     root = Path(root)
     all_files = repo_files(root)
     full_tokens = tokens_for(root, all_files)
@@ -179,7 +182,8 @@ def report(result) -> str:
     return "\n".join(lines)
 
 
-def main(argv=None) -> int:
+def main(argv=None, run=None) -> int:
+    run = run_cli if run is None else run
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--repo", default=str(DEFAULT_REPO))
     ap.add_argument("--defects", default=str(DEFAULT_DEFECTS))
@@ -188,7 +192,8 @@ def main(argv=None) -> int:
     ap.add_argument("--fires-only", action="store_true", help="only defects classified FIRES in verdicts.json")
     ap.add_argument("--out", help="write the JSON result here (no absolute paths are recorded)")
     a = ap.parse_args(argv)
-    result = measure(Path(a.repo), load_defects(Path(a.defects), "FIRES" if a.fires_only else None), a.cli, a.depth)
+    defects = load_defects(Path(a.defects), "FIRES" if a.fires_only else None)
+    result = measure(Path(a.repo), defects, a.cli, a.depth, run=run)
     print(report(result))
     if a.out:
         Path(a.out).write_text(json.dumps(result, indent=2), encoding="utf-8")
